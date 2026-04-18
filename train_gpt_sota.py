@@ -80,6 +80,7 @@ class Hyperparameters:
     embed_bits = int(os.environ.get("EMBED_BITS", 8))
     matrix_clip_sigmas = float(os.environ.get("MATRIX_CLIP_SIGMAS", 12.85))
     embed_clip_sigmas = float(os.environ.get("EMBED_CLIP_SIGMAS", 2e1))
+    hessian_clip_lambda = float(os.environ.get("HESSIAN_CLIP_LAMBDA", 0.0))  # 0.0 = baseline SDClip
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -807,7 +808,7 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
     return hessians
 
 
-def gptq_quantize_weight(w, H, clip_sigmas=3.0, clip_range=63, block_size=128):
+def gptq_quantize_weight(w, H, clip_sigmas=3.0, clip_range=63, block_size=128, hessian_clip_lambda=0.0):
     W_orig = w.float().clone()
     rows, cols = W_orig.shape
     H = H.float().clone()
@@ -815,6 +816,7 @@ def gptq_quantize_weight(w, H, clip_sigmas=3.0, clip_range=63, block_size=128):
     H[dead, dead] = 1
     damp = 0.01 * H.diag().mean()
     H.diagonal().add_(damp)
+    diagH_orig = H.diag().clone().clamp_min(1e-8)
     perm = torch.argsort(H.diag(), descending=True)
     invperm = torch.argsort(perm)
     W_perm = W_orig[:, perm].clone()
@@ -823,7 +825,14 @@ def gptq_quantize_weight(w, H, clip_sigmas=3.0, clip_range=63, block_size=128):
     Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H))
     Hinv = torch.linalg.cholesky(Hinv, upper=True)
     row_std = W_orig.std(dim=1)
-    s = (clip_sigmas * row_std / clip_range).clamp_min(1e-10).to(torch.float16)
+    if hessian_clip_lambda > 0.0:
+        col_importance = diagH_orig / diagH_orig.mean()
+        row_importance = (W_orig.abs() * col_importance.unsqueeze(0)).mean(dim=1)
+        row_importance = row_importance / row_importance.mean().clamp_min(1e-10)
+        adj = 1.0 + hessian_clip_lambda * (row_importance - 1.0)
+        s = (clip_sigmas * row_std * adj / clip_range).clamp_min(1e-10).to(torch.float16)
+    else:
+        s = (clip_sigmas * row_std / clip_range).clamp_min(1e-10).to(torch.float16)
     sf = s.float()
     Q = torch.zeros(rows, cols, dtype=torch.int8)
     W_work = W_perm.clone()
@@ -856,7 +865,7 @@ def gptq_mixed_quantize(state_dict, hessians, h):
             continue
         cs = h.embed_clip_sigmas if "tok_emb" in name else h.matrix_clip_sigmas
         bits = h.embed_bits if "tok_emb" in name else h.matrix_bits
-        q, s = gptq_quantize_weight(t, hessians[name], clip_sigmas=cs, clip_range=2 ** (bits - 1) - 1)
+        q, s = gptq_quantize_weight(t, hessians[name], clip_sigmas=cs, clip_range=2 ** (bits - 1) - 1, hessian_clip_lambda=h.hessian_clip_lambda)
         result[name + ".q"] = q
         result[name + ".scale"] = s
         meta[name] = f"gptq (int{bits})"
