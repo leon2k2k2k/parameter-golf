@@ -90,23 +90,47 @@ def cmd_resume(args):
     else:
         ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
 
-    # Check if recurrence should be active at this step
-    frac = start_step / max(h.iterations, 1)
-    if h.num_loops > 0 and frac >= h.enable_looping_at:
+    # Recurrence activation. Prefer explicit --looping_active when set, since
+    # frac-based check (start_step/iterations) fails for wallclock-trained
+    # checkpoints where step << iterations but recurrence was active in the
+    # original run.
+    if args.looping_active and h.num_loops > 0:
         base_model.looping_active = True
-        log(f"Recurrence active (frac={frac:.3f} >= {h.enable_looping_at})")
+        log(f"Recurrence set active by --looping_active (step={start_step})")
+    else:
+        frac = start_step / max(h.iterations, 1)
+        if h.num_loops > 0 and frac >= h.enable_looping_at:
+            base_model.looping_active = True
+            log(f"Recurrence active (frac={frac:.3f} >= {h.enable_looping_at})")
 
     # Compile
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     val_data = ValidationData(h, device)
     train_loader = ShuffledSequenceLoader(h, device)
 
+    # Fast-forward data loader so we see the same batches the original run
+    # would have seen at start_step+1. ShuffledSequenceLoader is deterministic.
+    if start_step > 0:
+        ff_batches = start_step * h.grad_accum_steps
+        log(f"Fast-forwarding data loader {ff_batches} batches (start_step={start_step}, grad_accum={h.grad_accum_steps})")
+        t_ff = time.perf_counter()
+        for _ in range(ff_batches):
+            train_loader.next_batch(h.train_batch_tokens, h.grad_accum_steps)
+        log(f"Loader fast-forward done in {time.perf_counter()-t_ff:.1f}s")
+
     # Resume training loop
     target_steps = args.steps or h.iterations
     log(f"Resuming from step {start_step} → {target_steps}")
 
+    # Mirror train_gpt_sota.py: wallclock-based frac when max_wallclock_seconds>0.
+    max_wallclock_ms = 1e3 * h.max_wallclock_seconds if h.max_wallclock_seconds > 0 else None
+    if max_wallclock_ms is not None:
+        max_wallclock_ms -= h.gptq_reserve_seconds * 1e3
+
     def training_frac(step, elapsed_ms):
-        return step / max(h.iterations, 1)
+        if max_wallclock_ms is None:
+            return step / max(h.iterations, 1)
+        return elapsed_ms / max(max_wallclock_ms, 1e-09)
 
     def lr_mul(frac):
         if h.warmdown_frac <= 0:
@@ -116,11 +140,16 @@ def cmd_resume(args):
         return 1.0
 
     step = start_step
+    training_time_ms = float(args.elapsed_ms) if args.elapsed_ms is not None else 0.0
+    initial_frac = training_frac(step, training_time_ms)
+    warmdown_ckpt_saved = lr_mul(initial_frac) < 1.0
+    log(f"Resume state: step={step} training_time_ms={training_time_ms:.0f} frac={initial_frac:.4f} lr_scale={lr_mul(initial_frac):.4f} warmdown_ckpt_saved={warmdown_ckpt_saved}")
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
     while step < target_steps:
-        frac = step / max(h.iterations, 1)
+        elapsed_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
+        frac = training_frac(step, elapsed_ms)
         scale = lr_mul(frac)
 
         if h.num_loops > 0 and not base_model.looping_active and frac >= h.enable_looping_at:
@@ -317,6 +346,10 @@ if __name__ == "__main__":
     p_resume = sub.add_parser("resume", help="Resume training from checkpoint")
     p_resume.add_argument("--ckpt", required=True, help="Path to checkpoint .pt file")
     p_resume.add_argument("--steps", type=int, help="Target step count (default: h.iterations)")
+    p_resume.add_argument("--looping_active", action="store_true",
+                          help="Force recurrence on at resume (use when original run activated recurrence via wallclock frac)")
+    p_resume.add_argument("--elapsed_ms", type=int,
+                          help="Seed training_time_ms so LR schedule resumes at the correct warmdown point")
 
     p_requant = sub.add_parser("requant", help="Re-quantize with different params")
     p_requant.add_argument("--ckpt", required=True, help="Path to checkpoint .pt file")
