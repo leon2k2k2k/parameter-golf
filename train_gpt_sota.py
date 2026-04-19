@@ -1259,9 +1259,15 @@ def train_model(h, device, val_data):
             for group in opt.param_groups:
                 group["lr"] = group["base_lr"] * lr_scale
         if h.grad_clip_norm > 0:
-            torch.nn.utils.clip_grad_norm_(base_model.parameters(), h.grad_clip_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(base_model.parameters(), h.grad_clip_norm)
+        else:
+            grad_norm = torch.tensor(0.0, device=device)
+        per_layer_gn = torch.stack([
+            torch.sqrt(sum(p.grad.detach().float().pow(2).sum() for p in block.parameters() if p.grad is not None))
+            for block in base_model.blocks
+        ])
         optimizers.step()
-        return train_loss
+        return train_loss, grad_norm, per_layer_gn
 
     if h.warmup_steps > 0:
         initial_model_state = {
@@ -1351,7 +1357,7 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
-        train_loss = step_fn(step, scale)
+        train_loss, grad_norm, per_layer_gn = step_fn(step, scale)
         with torch.no_grad():
             for name, t in base_model.state_dict().items():
                 ema_state[name].mul_(ema_decay).add_(t.detach().float(), alpha=1.0 - ema_decay)
@@ -1364,8 +1370,9 @@ def train_model(h, device, val_data):
         )
         if should_log_train:
             tok_per_sec = step * h.train_batch_tokens / (approx_training_time_ms / 1e3)
+            gn_str = ",".join(f"{x:.4f}" for x in per_layer_gn.tolist())
             log(
-                f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_training_time_ms/60000:.1f}m tok/s: {tok_per_sec:.0f}"
+                f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_training_time_ms/60000:.1f}m tok/s: {tok_per_sec:.0f} grad_norm: {grad_norm.item():.4f} per_layer_gn: [{gn_str}]"
             )
         reached_cap = max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
         if h.distributed and max_wallclock_ms is not None:
