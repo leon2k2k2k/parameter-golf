@@ -112,6 +112,11 @@ def cmd_resume(args):
             base_model.looping_active = True
             log(f"Recurrence active (frac={frac:.3f} >= {h.enable_looping_at})")
 
+    # Disable dynamo's DDP optimization pass — it chokes on rotary cos/sin
+    # cached buffers ("tensor does not have a device") when compiling a
+    # GPT+DDP composite. Matches train_gpt_sota.py's main() setup.
+    torch._dynamo.config.optimize_ddp = False
+
     # Compile and (if distributed) wrap in DDP
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     if h.distributed:
