@@ -26,6 +26,8 @@ import os
 import sys
 import time
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 import random
 from pathlib import Path
@@ -64,10 +66,17 @@ def load_checkpoint(ckpt_path, device):
 
 
 def cmd_resume(args):
-    """Resume training from a checkpoint."""
+    """Resume training from a checkpoint.
+
+    DDP-aware: when launched under torchrun, initializes NCCL, wraps model
+    in DDP, uses per-rank device. Single-GPU launches still work.
+    """
     h = Hyperparameters()
-    device = torch.device("cuda", 0)
+    device = torch.device("cuda", h.local_rank)
     torch.cuda.set_device(device)
+    if h.distributed and not (dist.is_available() and dist.is_initialized()):
+        dist.init_process_group(backend="nccl", device_id=device)
+        dist.barrier()
     set_logging_hparams(h)
 
     ckpt = load_checkpoint(args.ckpt, device)
@@ -103,8 +112,12 @@ def cmd_resume(args):
             base_model.looping_active = True
             log(f"Recurrence active (frac={frac:.3f} >= {h.enable_looping_at})")
 
-    # Compile
+    # Compile and (if distributed) wrap in DDP
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    if h.distributed:
+        model = DDP(compiled_model, device_ids=[h.local_rank], broadcast_buffers=False)
+    else:
+        model = compiled_model
     val_data = ValidationData(h, device)
     train_loader = ShuffledSequenceLoader(h, device)
 
@@ -160,9 +173,11 @@ def cmd_resume(args):
         optimizers.zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(h.grad_accum_steps):
+            if h.distributed:
+                model.require_backward_grad_sync = micro_step == h.grad_accum_steps - 1
             x, y = train_loader.next_batch(h.train_batch_tokens, h.grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                loss = compiled_model(x, y)
+                loss = model(x, y)
             train_loss += loss.detach()
             (loss / h.grad_accum_steps).backward()
         train_loss /= h.grad_accum_steps
@@ -185,21 +200,62 @@ def cmd_resume(args):
                 ema_state[name].mul_(h.ema_decay).add_(t.detach().float(), alpha=1.0 - h.ema_decay)
 
         step += 1
-        if step % 10 == 0 or step == target_steps:
-            elapsed = time.perf_counter() - t0
-            log(f"step:{step}/{target_steps} train_loss:{train_loss.item():.4f} time:{elapsed:.1f}s")
 
-    # Eval
-    val_loss, val_bpb = eval_val(h, device, val_data, compiled_model)
+        # Mid-training val eval (honors VAL_LOSS_EVERY from env).
+        if h.val_loss_every > 0 and step % h.val_loss_every == 0 and step < target_steps:
+            torch.cuda.synchronize()
+            training_time_ms += 1e3 * (time.perf_counter() - t0)
+            vl, vb = eval_val(h, device, val_data, model)
+            log(f"{step}/{h.iterations} val_loss: {vl:.4f} val_bpb: {vb:.4f}")
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+
+        # Train loss logging (honors TRAIN_LOG_EVERY from env).
+        should_log = h.train_log_every > 0 and (step % h.train_log_every == 0 or step == target_steps)
+        if should_log:
+            approx_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
+            tok_per_sec = (step - start_step) * h.train_batch_tokens / (approx_ms / 1e3) if approx_ms > 0 else 0
+            log(f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_ms/60000:.1f}m tok/s: {tok_per_sec:.0f}")
+
+    # Eval (eval_val is DDP-aware — all-reduces internally)
+    val_loss, val_bpb = eval_val(h, device, val_data, model)
+    log(f"{step}/{h.iterations} val_loss: {val_loss:.4f} val_bpb: {val_bpb:.4f}")
     log(f"Final (pre-EMA): val_loss={val_loss:.4f} val_bpb={val_bpb:.4f}")
+
+    # Rank-0 saves final pre-EMA checkpoint if CKPT_DIR set
+    ckpt_dir = os.environ.get("CKPT_DIR", "")
+    if ckpt_dir and h.is_main_process:
+        os.makedirs(ckpt_dir, exist_ok=True)
+        p = os.path.join(ckpt_dir, f"ckpt_final_pre_ema_step{step}.pt")
+        torch.save({
+            "step": step,
+            "model_state_dict": base_model.state_dict(),
+            "optimizer_states": [opt.state_dict() for opt in optimizers],
+            "ema_state": {k: v.cpu() for k, v in ema_state.items()},
+        }, p)
+        log(f"Checkpoint saved: {p} ({os.path.getsize(p)/1e6:.1f} MB)")
 
     # Apply EMA
     current_state = base_model.state_dict()
     avg_state = {name: t.to(dtype=current_state[name].dtype) for name, t in ema_state.items()}
     base_model.load_state_dict(avg_state, strict=True)
 
-    val_loss, val_bpb = eval_val(h, device, val_data, compiled_model)
+    val_loss, val_bpb = eval_val(h, device, val_data, model)
     log(f"Final (post-EMA): val_loss={val_loss:.4f} val_bpb={val_bpb:.4f}")
+
+    if ckpt_dir and h.is_main_process:
+        p = os.path.join(ckpt_dir, f"ckpt_final_post_ema_step{step}.pt")
+        torch.save({
+            "step": step,
+            "model_state_dict": base_model.state_dict(),
+            "optimizer_states": [opt.state_dict() for opt in optimizers],
+            "ema_state": {k: v.cpu() for k, v in ema_state.items()},
+        }, p)
+        log(f"Checkpoint saved: {p} ({os.path.getsize(p)/1e6:.1f} MB)")
+
+    if h.distributed and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 def cmd_requant(args):
