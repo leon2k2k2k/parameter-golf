@@ -117,6 +117,15 @@ class Hyperparameters:
     smear_gate_enabled = bool(int(os.environ.get("SMEAR_GATE_ENABLED", "0")))
     # Window: first GATE_WINDOW dims of the source feed the gate projection.
     gate_window = int(os.environ.get("GATE_WINDOW", 12))
+    # Spec 015 Recur-Alpha (port #1714 Anakintano). Learnable scalar per
+    # non-first recurrence pass per looped block. At init all zero -> pure
+    # passthrough on extra passes (equivalent to NUM_LOOPS=0 effective behavior).
+    # Model learns how much to commit per pass via gradient descent.
+    # Default off -> byte-identical to #1736 baseline.
+    recur_alpha_enabled = bool(int(os.environ.get("RECUR_ALPHA_ENABLED", "0")))
+    # Diagnostics: compute/store pass-to-pass cosine similarity on block deltas.
+    # Answers "is cross-pass XSA the right follow-up?" informational side-channel.
+    recur_diag_p2p_cos = bool(int(os.environ.get("RECUR_DIAG_P2P_COS", "0")))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -1029,6 +1038,52 @@ class GPT(nn.Module):
             self.smear_gate = CastedLinear(self.smear_window, 1, bias=False)
             self.smear_gate._zero_init = True
             self.smear_lambda = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        # Spec 015 Recur-Alpha (port #1714). All state attr-guarded so default=off
+        # is byte-identical to baseline (attr checks in forward look for None).
+        self.recur_alpha_enabled = bool(h.recur_alpha_enabled) and h.num_loops > 0
+        self.recur_diag_p2p_cos = bool(h.recur_diag_p2p_cos) and h.num_loops > 0
+        self.loop_start = h.loop_start
+        self.loop_end = h.loop_end
+        if self.recur_alpha_enabled:
+            num_looped = h.loop_end - h.loop_start + 1
+            self.recur_alpha = nn.Parameter(
+                torch.zeros(h.num_loops, num_looped, dtype=torch.float32)
+            )
+            # Precompute alpha_info lists: parallel to encoder_indices and
+            # decoder_indices, indicating (pass_offset, local_idx) or None for
+            # each position. Pass counts span encoder + decoder (sequential).
+            visits = {}
+            self._encoder_alpha_info = []
+            for idx in self.encoder_indices:
+                pi = visits.get(idx, 0)
+                visits[idx] = pi + 1
+                if self.loop_start <= idx <= self.loop_end and pi > 0:
+                    self._encoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                else:
+                    self._encoder_alpha_info.append(None)
+            self._decoder_alpha_info = []
+            for idx in self.decoder_indices:
+                pi = visits.get(idx, 0)
+                visits[idx] = pi + 1
+                if self.loop_start <= idx <= self.loop_end and pi > 0:
+                    self._decoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                else:
+                    self._decoder_alpha_info.append(None)
+        else:
+            self.recur_alpha = None
+            self._encoder_alpha_info = None
+            self._decoder_alpha_info = None
+        # Diagnostic buffers for p2p cosine. Updated in forward, read by logger.
+        # Detached values only; no backprop through these.
+        if self.recur_diag_p2p_cos:
+            num_looped = h.loop_end - h.loop_start + 1
+            # Mean cosine per (pass_pair, layer) — num_loops pass pairs × num_looped layers.
+            self.register_buffer(
+                "_diag_p2p_cos",
+                torch.zeros(h.num_loops, num_looped, dtype=torch.float32),
+                persistent=False,
+            )
+            self._diag_prev_deltas = {}  # layer_idx -> tensor (updated in forward)
         self._init_weights()
 
     def _init_weights(self):
@@ -1128,13 +1183,47 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        for i in enc_iter:
+        # Spec 015: use precomputed alpha_info only when Recur-Alpha enabled AND
+        # looping is active. When inactive, behavior is byte-identical to baseline.
+        enc_alpha_info = (
+            self._encoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x_before = x
+            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                pass_off, local_idx = enc_alpha_info[step_idx]
+                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                x = alpha * x_new + (1.0 - alpha) * x_before
+                # Diagnostic: p2p cosine similarity on block deltas (optional).
+                if self.recur_diag_p2p_cos:
+                    delta_this = (x_new - x_before).detach()
+                    prev = self._diag_prev_deltas.get(i, None)
+                    if prev is not None:
+                        flat_this = delta_this.reshape(-1, delta_this.size(-1))
+                        flat_prev = prev.reshape(-1, prev.size(-1))
+                        cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
+                        self._diag_p2p_cos[pass_off, local_idx] = cos
+                    self._diag_prev_deltas[i] = delta_this
+            else:
+                x = x_new
+                # Seed first-pass delta for diagnostic.
+                if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
+                    self._diag_prev_deltas[i] = (x_new - x_before).detach()
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
+        # Spec 015: alpha_info for decoder; shares visit-count state with encoder
+        # (see __init__ precompute). None when Recur-Alpha disabled or looping inactive.
+        dec_alpha_info = (
+            self._decoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
@@ -1164,7 +1253,25 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                x_before = x
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    pass_off, local_idx = dec_alpha_info[skip_idx]
+                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                    x = alpha * x_new + (1.0 - alpha) * x_before
+                    if self.recur_diag_p2p_cos:
+                        delta_this = (x_new - x_before).detach()
+                        prev = self._diag_prev_deltas.get(i, None)
+                        if prev is not None:
+                            flat_this = delta_this.reshape(-1, delta_this.size(-1))
+                            flat_prev = prev.reshape(-1, prev.size(-1))
+                            cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
+                            self._diag_p2p_cos[pass_off, local_idx] = cos
+                        self._diag_prev_deltas[i] = delta_this
+                else:
+                    x = x_new
+                    if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
+                        self._diag_prev_deltas[i] = (x_new - x_before).detach()
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
@@ -1666,6 +1773,11 @@ class Optimizers:
         if getattr(base_model, "smear_gate_enabled", False):
             scalar_params.append(base_model.smear_gate.weight)
             scalar_params.append(base_model.smear_lambda)
+        # Spec 015 Recur-Alpha: 6 scalars (num_loops × num_looped), route to scalar AdamW.
+        # Not in .blocks so not picked up by block_named_params. ndim=2 but tiny —
+        # would be silly to send to Muon. Append by hand like SmearGate.
+        if getattr(base_model, "recur_alpha_enabled", False) and base_model.recur_alpha is not None:
+            scalar_params.append(base_model.recur_alpha)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
@@ -3035,6 +3147,11 @@ def train_model(h, device, val_data):
     )
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
+    log(
+        f"recur_alpha: enabled={h.recur_alpha_enabled} "
+        f"num_loops={h.num_loops} loop_start={h.loop_start} loop_end={h.loop_end} "
+        f"diag_p2p_cos={h.recur_diag_p2p_cos}"
+    )
     optimizers = Optimizers(h, base_model)
     train_loader = DocumentPackingLoader(h, device)
     max_wallclock_ms = (
@@ -3216,6 +3333,18 @@ def train_model(h, device, val_data):
             log(
                 f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_training_time_ms/60000:.1f}m tok/s: {tok_per_sec:.0f}"
             )
+            # Spec 015: Recur-Alpha diagnostics (alpha values, grad norms, p2p cosine).
+            if getattr(base_model, "recur_alpha", None) is not None:
+                alpha_tensor = base_model.recur_alpha.detach().float().cpu().tolist()
+                alpha_grad = base_model.recur_alpha.grad
+                alpha_grad_norm = alpha_grad.norm().item() if alpha_grad is not None else 0.0
+                p2p_cos_str = ""
+                if getattr(base_model, "recur_diag_p2p_cos", False):
+                    p2p = base_model._diag_p2p_cos.detach().float().cpu().tolist()
+                    p2p_cos_str = f" p2p_cos: {p2p}"
+                log(
+                    f"recur_alpha: values={alpha_tensor} grad_norm={alpha_grad_norm:.6f}{p2p_cos_str}"
+                )
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
         )
