@@ -1046,8 +1046,12 @@ class GPT(nn.Module):
         self.loop_end = h.loop_end
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
+            # Spec 016: α initialized to 1.0 (vs spec 015's 0.0). α=1 ≡ standard
+            # Loop345 full-commitment extra passes, so activation matches baseline
+            # behavior; model drifts from there. Removes 015's ~400-step catch-up
+            # handicap during the α=0→learned ramp.
             self.recur_alpha = nn.Parameter(
-                torch.zeros(h.num_loops, num_looped, dtype=torch.float32)
+                torch.ones(h.num_loops, num_looped, dtype=torch.float32)
             )
             # Precompute alpha_info lists: parallel to encoder_indices and
             # decoder_indices, indicating (pass_offset, local_idx) or None for
@@ -3207,8 +3211,16 @@ def train_model(h, device, val_data):
                 group["lr"] = group["base_lr"] * lr_scale
         if h.grad_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), h.grad_clip_norm)
+        # Snapshot α grad norm BEFORE optimizers.step() since step() ends with
+        # zero_grad_all(); reading recur_alpha.grad after step() always sees None/0.
+        # Spec 015 hit this bug — cosmetic (α values moved fine) but the logged
+        # grad_norm was unusable as a plumbing-check signal.
+        alpha_grad_norm = None
+        ra = getattr(base_model, "recur_alpha", None)
+        if ra is not None and ra.grad is not None:
+            alpha_grad_norm = ra.grad.norm().item()
         optimizers.step(distributed=h.distributed)
-        return train_loss
+        return train_loss, alpha_grad_norm
 
     if h.warmup_steps > 0:
         initial_model_state = {
@@ -3322,7 +3334,7 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
-        train_loss = step_fn(step, scale)
+        train_loss, alpha_grad_norm = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
                 ema_state[name].mul_(ema_decay).add_(
@@ -3338,11 +3350,13 @@ def train_model(h, device, val_data):
             log(
                 f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_training_time_ms/60000:.1f}m tok/s: {tok_per_sec:.0f}"
             )
-            # Spec 015: Recur-Alpha diagnostics (alpha values, grad norms, p2p cosine).
+            # Spec 015/016: Recur-Alpha diagnostics (alpha values, grad norms, p2p cosine).
+            # alpha_grad_norm comes from step_fn (snapshotted before optimizers.step()
+            # zeros grads); reading base_model.recur_alpha.grad here would always be None.
             if getattr(base_model, "recur_alpha", None) is not None:
                 alpha_tensor = base_model.recur_alpha.detach().float().cpu().tolist()
-                alpha_grad = base_model.recur_alpha.grad
-                alpha_grad_norm = alpha_grad.norm().item() if alpha_grad is not None else 0.0
+                if alpha_grad_norm is None:
+                    alpha_grad_norm = 0.0
                 p2p_cos_str = ""
                 if getattr(base_model, "recur_diag_p2p_cos", False):
                     p2p = base_model._diag_p2p_cos.detach().float().cpu().tolist()
