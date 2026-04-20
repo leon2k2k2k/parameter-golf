@@ -972,7 +972,14 @@ class GPT(nn.Module):
             head_dim = h.model_dim // h.num_heads
             for block in self.blocks:
                 block.attn.rope_dims = h.rope_dims
-        # Spec 012: per-layer QK_GAIN override (port #1648 methodology; uniform softer is cheapest first pass).
+                block.attn.rotary = Rotary(
+                    head_dim,
+                    base=h.rope_base,
+                    train_seq_len=h.train_seq_len,
+                    rope_dims=h.rope_dims,
+                    yarn=h.rope_yarn,
+                )
+        # Spec 011: per-layer QK_GAIN override (port #1648 methodology; uniform softer is cheapest first pass).
         # Set QK_GAIN_INIT=<scalar> for uniform override. Set QK_GAIN_PER_LAYER="v0,v1,...,vN-1" for per-layer.
         if h.qk_gain_per_layer:
             vals = [float(v) for v in h.qk_gain_per_layer.split(",")]
@@ -983,13 +990,6 @@ class GPT(nn.Module):
             with torch.no_grad():
                 for block, v in zip(self.blocks, vals):
                     block.attn.q_gain.data.fill_(v)
-                block.attn.rotary = Rotary(
-                    head_dim,
-                    base=h.rope_base,
-                    train_seq_len=h.train_seq_len,
-                    rope_dims=h.rope_dims,
-                    yarn=h.rope_yarn,
-                )
         self.final_norm = RMSNorm()
         self.lm_head = (
             None
