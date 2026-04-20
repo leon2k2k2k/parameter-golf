@@ -117,6 +117,12 @@ class Hyperparameters:
     smear_gate_enabled = bool(int(os.environ.get("SMEAR_GATE_ENABLED", "0")))
     # Window: first GATE_WINDOW dims of the source feed the gate projection.
     gate_window = int(os.environ.get("GATE_WINDOW", 12))
+    # Spec 014 BPB-weighted CE (port #1519 elliottdehn). Weight each token's
+    # training CE by the UTF-8 byte count of its surface piece, aligning the
+    # training objective with the eval metric (bits-per-byte). Approximation
+    # for CaseOps: uses base_bytes_lut (per-token surface byte count) rather
+    # than a context-aware sidecar. Default off -> byte-identical to spec 008.
+    bpb_weighted_loss_enabled = bool(int(os.environ.get("BPB_WEIGHTED_LOSS_ENABLED", "0")))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -1178,11 +1184,18 @@ class GPT(nn.Module):
         logits = self.forward_logits(
             input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
-        return F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)).float(),
-            target_ids.reshape(-1),
-            reduction="mean",
-        )
+        logits_flat = logits.reshape(-1, logits.size(-1)).float()
+        targets_flat = target_ids.reshape(-1)
+        # Spec 014 BPB-weighted CE (port #1519). Buffer `_bpb_byte_weights` is
+        # registered by train_model() when h.bpb_weighted_loss_enabled. Guarded
+        # by getattr so the default (no buffer) path is byte-identical to the
+        # pre-patch reduction="mean" cross_entropy.
+        bw = getattr(self, "_bpb_byte_weights", None)
+        if bw is not None:
+            per_token = F.cross_entropy(logits_flat, targets_flat, reduction="none")
+            w = bw[targets_flat].float()
+            return (per_token * w).sum() / w.sum().clamp_min(1.0)
+        return F.cross_entropy(logits_flat, targets_flat, reduction="mean")
 
     def forward_ttt(self, input_ids, target_ids, lora):
         x = self.tok_emb(input_ids)
@@ -3029,12 +3042,33 @@ def timed_eval(label, fn, *args, **kwargs):
 def train_model(h, device, val_data):
     base_model = GPT(h).to(device).bfloat16()
     restore_fp32_params(base_model)
+    # Spec 014 BPB-weighted CE: register per-token byte weights as a buffer
+    # BEFORE torch.compile so fullgraph sees the buffer at trace time. The
+    # LUT is built by val_data.__init__() via build_sentencepiece_luts().
+    # clamp_min(1) mirrors #1519's guard against divide-by-zero on control/
+    # unknown token ids whose surface piece has zero bytes.
+    if h.bpb_weighted_loss_enabled:
+        base_model.register_buffer(
+            "_bpb_byte_weights",
+            val_data.base_bytes_lut.to(torch.float32).clamp_min(1.0),
+            persistent=False,
+        )
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     compiled_forward_logits = torch.compile(
         base_model.forward_logits, dynamic=False, fullgraph=True
     )
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
+    log(
+        f"bpb_weighted_loss: enabled={h.bpb_weighted_loss_enabled}"
+        + (
+            f" mean_weight={base_model._bpb_byte_weights.mean().item():.3f} "
+            f"min={base_model._bpb_byte_weights.min().item():.0f} "
+            f"max={base_model._bpb_byte_weights.max().item():.0f}"
+            if h.bpb_weighted_loss_enabled
+            else ""
+        )
+    )
     optimizers = Optimizers(h, base_model)
     train_loader = DocumentPackingLoader(h, device)
     max_wallclock_ms = (
