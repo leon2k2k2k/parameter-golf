@@ -117,6 +117,15 @@ class Hyperparameters:
     smear_gate_enabled = bool(int(os.environ.get("SMEAR_GATE_ENABLED", "0")))
     # Window: first GATE_WINDOW dims of the source feed the gate projection.
     gate_window = int(os.environ.get("GATE_WINDOW", 12))
+    # Spec 013 BigramHash (port #1716 himanshudongre). Auxiliary (buckets, d)
+    # embedding keyed by hash(prev_token, curr_token), projected to model_dim
+    # and added to tok_emb pre-block-0. Zero-init projection -> byte-identical
+    # to baseline at init.  Default off.
+    bigram_hash_enabled = bool(int(os.environ.get("BIGRAM_HASH_ENABLED", "0")))
+    bigram_hash_buckets = int(os.environ.get("BIGRAM_HASH_BUCKETS", 16384))
+    bigram_hash_dim = int(os.environ.get("BIGRAM_HASH_DIM", 32))
+    bigram_hash_prime_a = int(os.environ.get("BIGRAM_HASH_PRIME_A", 36313))
+    bigram_hash_prime_b = int(os.environ.get("BIGRAM_HASH_PRIME_B", 27191))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -922,6 +931,42 @@ class Block(nn.Module):
         ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
         return x_out
 
+
+class BigramHashEmbedding(nn.Module):
+    """Spec 013 BigramHash (port #1716).
+
+    Hash-keyed auxiliary embedding table. Hash of (prev_token, curr_token)
+    selects a row from `embed`; row is projected to model_dim by `proj`
+    and added to tok_emb before block 0.
+
+    - `embed.weight` shape (buckets, dim); quantized at matrix_bits via GPTQ
+      using a hook-collected (dim, dim) hessian on the embedding output.
+    - `proj.weight` shape (model_dim, dim); zero-init so the module is
+      identity at step 0 (output is exactly tok_emb[input_ids]).
+
+    Position-0 handling: fallback `prev = curr` (self-bigram). Cross-document
+    leakage via cu_seqlens is NOT special-cased, matching #1736's SmearGate
+    convention (which also uses ids[:-1] without doc-boundary sentinels).
+    """
+
+    def __init__(self, buckets, dim, model_dim, prime_a, prime_b):
+        super().__init__()
+        self.buckets = buckets
+        self.prime_a = prime_a
+        self.prime_b = prime_b
+        self.embed = nn.Embedding(buckets, dim)
+        self.proj = CastedLinear(dim, model_dim, bias=False)
+        self.proj._zero_init = True  # baseline-preserving at init
+        nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
+
+    def forward(self, input_ids):
+        prev = torch.cat([input_ids[:, :1], input_ids[:, :-1]], dim=1).to(torch.long)
+        curr = input_ids.to(torch.long)
+        hash_ids = ((self.prime_a * curr) ^ (self.prime_b * prev)) % self.buckets
+        h = self.embed(hash_ids)
+        return self.proj(h)
+
+
 class GPT(nn.Module):
     def __init__(self, h):
         super().__init__()
@@ -1029,6 +1074,18 @@ class GPT(nn.Module):
             self.smear_gate = CastedLinear(self.smear_window, 1, bias=False)
             self.smear_gate._zero_init = True
             self.smear_lambda = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        # Spec 013 BigramHash (port #1716). None-gated so default=off is byte-identical.
+        self.bigram_hash_enabled = h.bigram_hash_enabled
+        if self.bigram_hash_enabled:
+            self.bigram_embed = BigramHashEmbedding(
+                buckets=h.bigram_hash_buckets,
+                dim=h.bigram_hash_dim,
+                model_dim=h.model_dim,
+                prime_a=h.bigram_hash_prime_a,
+                prime_b=h.bigram_hash_prime_b,
+            )
+        else:
+            self.bigram_embed = None
         self._init_weights()
 
     def _init_weights(self):
@@ -1103,6 +1160,11 @@ class GPT(nn.Module):
 
     def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0):
         x = self.tok_emb(input_ids)
+        # Spec 013 BigramHash: add hash(prev, curr) embedding additively. proj is
+        # zero-init so this is identity at step 0. Attr-guarded for byte-identical
+        # default behavior.
+        if self.bigram_embed is not None:
+            x = x + self.bigram_embed(input_ids).to(dtype=x.dtype)
         # SmearGate (PR #1667). Inline gate compute with .contiguous() on the slice fed
         # to the projection so torch.compile fullgraph is happy. lam=0 + W=0 -> identity
         # at init. This block runs unconditionally on the smear path; the cat keeps
@@ -1186,6 +1248,9 @@ class GPT(nn.Module):
 
     def forward_ttt(self, input_ids, target_ids, lora):
         x = self.tok_emb(input_ids)
+        # Spec 013 BigramHash: TTT path parallel to forward_logits.
+        if self.bigram_embed is not None:
+            x = x + self.bigram_embed(input_ids).to(dtype=x.dtype)
         # SmearGate on the TTT path — same inline compute as forward_logits.
         if self.smear_gate_enabled:
             sl = self.smear_lambda.to(dtype=x.dtype)
@@ -1666,10 +1731,24 @@ class Optimizers:
         if getattr(base_model, "smear_gate_enabled", False):
             scalar_params.append(base_model.smear_gate.weight)
             scalar_params.append(base_model.smear_lambda)
+        # Spec 013 BigramHash: embed table -> AdamW with embed_wd (sparse-gradient
+        # pattern like tok_emb); proj weight -> Muon (standard matrix). Only
+        # appended when enabled so the optimizer param list is identical to
+        # baseline when BIGRAM_HASH_ENABLED=0.
+        if getattr(base_model, "bigram_hash_enabled", False):
+            matrix_params.append(base_model.bigram_embed.proj.weight)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
         ]
+        if getattr(base_model, "bigram_hash_enabled", False):
+            tok_params.append(
+                {
+                    "params": [base_model.bigram_embed.embed.weight],
+                    "lr": token_lr,
+                    "base_lr": token_lr,
+                }
+            )
         self.optimizer_tok = torch.optim.AdamW(
             tok_params,
             betas=(h.beta1, h.beta2),
@@ -1864,6 +1943,32 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
 
         hooks.append(
             hook_module.register_forward_hook(make_output_hook("tok_emb.weight"))
+        )
+    # Spec 013 BigramHash: collect (dim, dim) hessian from embed OUTPUT during
+    # calibration. GPTQ on the weight of shape (buckets, dim) treats dim as cols;
+    # covariance over output rows is the activation-weighted column importance.
+    if getattr(model, "bigram_embed", None) is not None:
+        def _make_bigram_embed_hook(name):
+            def hook_fn(module, inp, out):
+                x = out.detach().float()
+                if x.ndim == 3:
+                    x = x.reshape(-1, x.shape[-1])
+                if name not in hessians:
+                    hessians[name] = torch.zeros(
+                        x.shape[1], x.shape[1], dtype=torch.float32, device=device
+                    )
+                hessians[name].addmm_(x.T, x)
+            return hook_fn
+
+        hooks.append(
+            model.bigram_embed.embed.register_forward_hook(
+                _make_bigram_embed_hook("bigram_embed.embed.weight")
+            )
+        )
+        hooks.append(
+            model.bigram_embed.proj.register_forward_hook(
+                make_linear_input_hook("bigram_embed.proj.weight")
+            )
         )
     model.eval()
     with torch.no_grad():
@@ -3035,6 +3140,11 @@ def train_model(h, device, val_data):
     )
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
+    log(
+        f"bigram_hash: enabled={h.bigram_hash_enabled} "
+        f"buckets={h.bigram_hash_buckets} dim={h.bigram_hash_dim} "
+        f"primes=({h.bigram_hash_prime_a},{h.bigram_hash_prime_b})"
+    )
     optimizers = Optimizers(h, base_model)
     train_loader = DocumentPackingLoader(h, device)
     max_wallclock_ms = (
