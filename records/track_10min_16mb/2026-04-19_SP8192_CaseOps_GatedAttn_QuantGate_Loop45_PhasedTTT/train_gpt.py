@@ -69,6 +69,11 @@ class Hyperparameters:
     adam_wd = float(os.environ.get("ADAM_WD", 0.02))
     muon_wd = float(os.environ.get("MUON_WD", 0.095))
     embed_wd = float(os.environ.get("EMBED_WD", 0.085))
+    # Spec 012 training-bundle: all four default to no-op so spec 008 is byte-identical.
+    wd_taper_start_frac = float(os.environ.get("WD_TAPER_START_FRAC", 0.0))
+    wd_taper_final_mult = float(os.environ.get("WD_TAPER_FINAL_MULT", 1.0))
+    muon_grad_power = float(os.environ.get("MUON_GRAD_POWER", 1.0))
+    qk_gain_per_layer = os.environ.get("QK_GAIN_PER_LAYER", "")
     ema_decay = float(os.environ.get("EMA_DECAY", 0.9965))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 96))
@@ -967,6 +972,17 @@ class GPT(nn.Module):
             head_dim = h.model_dim // h.num_heads
             for block in self.blocks:
                 block.attn.rope_dims = h.rope_dims
+        # Spec 012: per-layer QK_GAIN override (port #1648 methodology; uniform softer is cheapest first pass).
+        # Set QK_GAIN_INIT=<scalar> for uniform override. Set QK_GAIN_PER_LAYER="v0,v1,...,vN-1" for per-layer.
+        if h.qk_gain_per_layer:
+            vals = [float(v) for v in h.qk_gain_per_layer.split(",")]
+            if len(vals) != h.num_layers:
+                raise ValueError(
+                    f"QK_GAIN_PER_LAYER has {len(vals)} values but num_layers={h.num_layers}"
+                )
+            with torch.no_grad():
+                for block, v in zip(self.blocks, vals):
+                    block.attn.q_gain.data.fill_(v)
                 block.attn.rotary = Rotary(
                     head_dim,
                     base=h.rope_base,
@@ -1595,6 +1611,12 @@ class Muon(torch.optim.Optimizer):
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(g)
                     buf = state["momentum_buffer"]
+                # Spec 012: GradPower port from #1682. Elementwise sign(g)*|g|^p.
+                # Default p=1.0 → identity (no-op). Applied pre-momentum, pre-orthogonalization.
+                # Covers both sharded (g = m["shard"]) and non-sharded (g = p.grad) paths.
+                gp = getattr(self, "grad_power", 1.0)
+                if gp != 1.0:
+                    g = torch.sign(g) * g.abs().pow(gp)
                 buf.mul_(momentum).add_(g)
                 if nesterov:
                     update = g.add(buf, alpha=momentum)
@@ -1685,6 +1707,8 @@ class Optimizers:
             weight_decay=h.muon_wd,
             row_normalize=h.muon_row_normalize,
         )
+        # Spec 012: GradPower (port #1682). Read by Muon.step via getattr.
+        self.optimizer_muon.grad_power = h.muon_grad_power
         for group in self.optimizer_muon.param_groups:
             group["base_lr"] = h.matrix_lr
         self.optimizer_scalar = torch.optim.AdamW(
@@ -3035,6 +3059,13 @@ def train_model(h, device, val_data):
     )
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
+    log(
+        f"training_bundle: wd_taper_start_frac={h.wd_taper_start_frac} "
+        f"wd_taper_final_mult={h.wd_taper_final_mult} "
+        f"muon_grad_power={h.muon_grad_power} "
+        f"qk_gain_init={h.qk_gain_init} "
+        f"qk_gain_per_layer='{h.qk_gain_per_layer}'"
+    )
     optimizers = Optimizers(h, base_model)
     train_loader = DocumentPackingLoader(h, device)
     max_wallclock_ms = (
@@ -3080,6 +3111,17 @@ def train_model(h, device, val_data):
         ) * h.muon_momentum_warmup_start + frac * h.muon_momentum
         for group in optimizers.optimizer_muon.param_groups:
             group["momentum"] = muon_momentum
+        # Spec 012: tapered WD (port #1729). Linear from 1.0 at start_step to final_mult at h.iterations.
+        # Applied to Muon only (per #1729). Default: start_frac=0 → no-op (group["weight_decay"] untouched).
+        if h.wd_taper_start_frac > 0.0:
+            start_step = int(h.wd_taper_start_frac * h.iterations)
+            if step >= start_step:
+                progress = (step - start_step) / max(1, h.iterations - start_step)
+                mult = 1.0 - progress * (1.0 - h.wd_taper_final_mult)
+            else:
+                mult = 1.0
+            for group in optimizers.optimizer_muon.param_groups:
+                group["weight_decay"] = h.muon_wd * mult
         for opt in optimizers:
             for group in opt.param_groups:
                 group["lr"] = group["base_lr"] * lr_scale
