@@ -2870,9 +2870,23 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         doc_lens = [dl for _, dl in batch]
         should_report = batch_num in eval_batch_set if eval_batch_set is not None else True
         if should_report:
-            cur_tokens = token_count.item()
-            cur_loss_val = loss_sum.item()
-            cur_bytes_val = byte_sum.item()
+            # All-rank aggregate for rb/rl — previously rank-local, which
+            # created a ~+0.007 delta vs final.json val_bpb at eval end.
+            # Diagnostic-only: no effect on training or on final.json math.
+            if dist.is_available() and dist.is_initialized():
+                _rb_buf = torch.stack(
+                    [loss_sum.detach().clone(),
+                     byte_sum.detach().clone(),
+                     token_count.detach().clone()]
+                )
+                dist.all_reduce(_rb_buf, op=dist.ReduceOp.SUM)
+                cur_loss_val = _rb_buf[0].item()
+                cur_bytes_val = _rb_buf[1].item()
+                cur_tokens = _rb_buf[2].item()
+            else:
+                cur_tokens = token_count.item()
+                cur_loss_val = loss_sum.item()
+                cur_bytes_val = byte_sum.item()
             dt = cur_tokens - prev_tokens
             db = cur_bytes_val - prev_bytes
             if dt > 0 and db > 0:
