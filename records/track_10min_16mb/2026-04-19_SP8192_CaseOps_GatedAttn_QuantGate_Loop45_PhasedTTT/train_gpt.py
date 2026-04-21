@@ -3407,8 +3407,9 @@ def train_model(h, device, val_data):
                 )
         step += 1
         approx_training_time_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
-        # Spec 020: per-step diagnostic row (syncs on elapsed_time call)
+        # Spec 020: per-step diagnostic row
         if _diag_on and _diag_csv_w is not None:
+            torch.cuda.synchronize()  # ensure GPU work done before elapsed_time reads
             _now = time.perf_counter()
             _step_time_ms = (_now - _diag_prev_t) * 1e3 if _diag_prev_t is not None else 0.0
             _diag_prev_t = _now
