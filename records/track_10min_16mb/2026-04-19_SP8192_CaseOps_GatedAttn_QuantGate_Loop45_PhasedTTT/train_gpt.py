@@ -1046,13 +1046,24 @@ class GPT(nn.Module):
         self.loop_end = h.loop_end
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
-            # Spec 016: α initialized to 1.0 (vs spec 015's 0.0). α=1 ≡ standard
-            # Loop345 full-commitment extra passes, so activation matches baseline
-            # behavior; model drifts from there. Removes 015's ~400-step catch-up
-            # handicap during the α=0→learned ramp.
-            self.recur_alpha = nn.Parameter(
-                torch.ones(h.num_loops, num_looped, dtype=torch.float32)
+            # Spec 021: α as a register_buffer frozen at 017's endpoint values.
+            # Not an nn.Parameter → no gradient, no optimizer state, no learning.
+            # Buffer (vs Python literal): Dynamo sees a runtime tensor input, not
+            # a compile-time constant, so the graph isn't specialized on α's value.
+            # This avoids the post-val graph recompile dip pattern that 019/019b
+            # suffered (where literal α kernels paid a cold-path penalty after
+            # every train→eval→train mode switch at val_loss_every=4000).
+            # Expected throughput profile matches 017's tensor-α recipe.
+            _recur_alpha_017_endpoint = torch.tensor(
+                [[1.078125, 1.2734375, 1.4296875],     # pass-2 L3, L4, L5
+                 [1.015625, 0.96484375, 0.83203125]],  # pass-3 L3, L4, L5
+                dtype=torch.float32,
             )
+            assert _recur_alpha_017_endpoint.shape == (h.num_loops, num_looped), (
+                f"017 endpoint table shape {_recur_alpha_017_endpoint.shape} "
+                f"!= (num_loops={h.num_loops}, num_looped={num_looped})"
+            )
+            self.register_buffer("recur_alpha", _recur_alpha_017_endpoint)
             # Precompute alpha_info lists: parallel to encoder_indices and
             # decoder_indices, indicating (pass_offset, local_idx) or None for
             # each position. Pass counts span encoder + decoder (sequential).
@@ -1780,7 +1791,14 @@ class Optimizers:
         # Spec 015 Recur-Alpha: 6 scalars (num_loops × num_looped), route to scalar AdamW.
         # Not in .blocks so not picked up by block_named_params. ndim=2 but tiny —
         # would be silly to send to Muon. Append by hand like SmearGate.
-        if getattr(base_model, "recur_alpha_enabled", False) and base_model.recur_alpha is not None:
+        # Spec 021: recur_alpha is a register_buffer (not Parameter), so DO NOT
+        # append to optimizer. Guard with isinstance check so the 015/016/017
+        # Parameter form still works if we ever revert.
+        if (
+            getattr(base_model, "recur_alpha_enabled", False)
+            and base_model.recur_alpha is not None
+            and isinstance(base_model.recur_alpha, nn.Parameter)
+        ):
             scalar_params.append(base_model.recur_alpha)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
