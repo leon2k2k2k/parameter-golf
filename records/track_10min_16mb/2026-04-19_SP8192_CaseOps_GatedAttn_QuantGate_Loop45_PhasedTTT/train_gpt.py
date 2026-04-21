@@ -1046,23 +1046,27 @@ class GPT(nn.Module):
         self.loop_end = h.loop_end
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
-            # Spec 016: α initialized to 1.0 (vs spec 015's 0.0). α=1 ≡ standard
-            # Loop345 full-commitment extra passes, so activation matches baseline
-            # behavior; model drifts from there. Removes 015's ~400-step catch-up
-            # handicap during the α=0→learned ramp.
-            self.recur_alpha = nn.Parameter(
-                torch.ones(h.num_loops, num_looped, dtype=torch.float32)
+            # Spec 018c: α values hardcoded as Python floats from spec 017's
+            # endpoint (recur_alpha_final). torch.compile sees these as
+            # compile-time constants in the lerp weight position and can
+            # specialize kernels / fold the arithmetic. α is NOT learnable here.
+            # Throughput test only — not a training spec.
+            _ALPHA_CONSTANTS_017 = (
+                (1.078125, 1.2734375, 1.3984375),   # pass-2: L3, L4, L5
+                (1.015625, 0.97265625, 0.83203125), # pass-3: L3, L4, L5
             )
-            # Precompute alpha_info lists: parallel to encoder_indices and
-            # decoder_indices, indicating (pass_offset, local_idx) or None for
-            # each position. Pass counts span encoder + decoder (sequential).
+            self.recur_alpha = None  # not a Parameter; no gradient tracking
+            # Precompute alpha_info lists with Python float values baked in
+            # (instead of (pass_offset, local_idx) tuples that would index a
+            # tensor at runtime).
             visits = {}
             self._encoder_alpha_info = []
             for idx in self.encoder_indices:
                 pi = visits.get(idx, 0)
                 visits[idx] = pi + 1
                 if self.loop_start <= idx <= self.loop_end and pi > 0:
-                    self._encoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                    alpha_val = _ALPHA_CONSTANTS_017[pi - 1][idx - self.loop_start]
+                    self._encoder_alpha_info.append(alpha_val)
                 else:
                     self._encoder_alpha_info.append(None)
             self._decoder_alpha_info = []
@@ -1070,7 +1074,8 @@ class GPT(nn.Module):
                 pi = visits.get(idx, 0)
                 visits[idx] = pi + 1
                 if self.loop_start <= idx <= self.loop_end and pi > 0:
-                    self._decoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                    alpha_val = _ALPHA_CONSTANTS_017[pi - 1][idx - self.loop_start]
+                    self._decoder_alpha_info.append(alpha_val)
                 else:
                     self._decoder_alpha_info.append(None)
         else:
@@ -1187,11 +1192,12 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        # Spec 015: use precomputed alpha_info only when Recur-Alpha enabled AND
-        # looping is active. When inactive, behavior is byte-identical to baseline.
+        # Spec 018c: α values are Python floats baked into _encoder_alpha_info
+        # at __init__ time (not tensor indices). torch.compile sees them as
+        # compile-time constants in the lerp weight position.
         enc_alpha_info = (
             self._encoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
+            if (self.recur_alpha_enabled and self.looping_active)
             else None
         )
         for step_idx, i in enumerate(enc_iter):
@@ -1199,22 +1205,12 @@ class GPT(nn.Module):
             x_before = x
             x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
-                pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                # Spec 018: torch.lerp fuses (1-a)*x + a*y into a single CUDA
-                # primitive, ~50-60% reduction in blend memory traffic + kernel
-                # launch overhead vs the unfused `a*x_new + (1-a)*x_before`.
+                alpha = enc_alpha_info[step_idx]  # Python float from 017 endpoint
+                # torch.lerp with literal weight — compile specializes the kernel.
                 x = torch.lerp(x_before, x_new, alpha)
-                # Diagnostic: p2p cosine similarity on block deltas (optional).
-                if self.recur_diag_p2p_cos:
-                    delta_this = (x_new - x_before).detach()
-                    prev = self._diag_prev_deltas.get(i, None)
-                    if prev is not None:
-                        flat_this = delta_this.reshape(-1, delta_this.size(-1))
-                        flat_prev = prev.reshape(-1, prev.size(-1))
-                        cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
-                        self._diag_p2p_cos[pass_off, local_idx] = cos
-                    self._diag_prev_deltas[i] = delta_this
+                # Note: p2p cos diagnostic omitted in 018c (alpha_info no longer
+                # stores pass_off/local_idx indices). recur_diag_p2p_cos is
+                # off-by-default anyway and unused in this throughput test.
             else:
                 x = x_new
                 # Seed first-pass delta for diagnostic.
@@ -1228,7 +1224,7 @@ class GPT(nn.Module):
         # (see __init__ precompute). None when Recur-Alpha disabled or looping inactive.
         dec_alpha_info = (
             self._decoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
+            if (self.recur_alpha_enabled and self.looping_active)
             else None
         )
         for skip_idx, i in enumerate(dec_iter):
@@ -1263,19 +1259,8 @@ class GPT(nn.Module):
                 x_before = x
                 x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
-                    pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                    # Spec 018: see encoder-side comment.
+                    alpha = dec_alpha_info[skip_idx]  # Python float, compile-time constant
                     x = torch.lerp(x_before, x_new, alpha)
-                    if self.recur_diag_p2p_cos:
-                        delta_this = (x_new - x_before).detach()
-                        prev = self._diag_prev_deltas.get(i, None)
-                        if prev is not None:
-                            flat_this = delta_this.reshape(-1, delta_this.size(-1))
-                            flat_prev = prev.reshape(-1, prev.size(-1))
-                            cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
-                            self._diag_p2p_cos[pass_off, local_idx] = cos
-                        self._diag_prev_deltas[i] = delta_this
                 else:
                     x = x_new
                     if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
