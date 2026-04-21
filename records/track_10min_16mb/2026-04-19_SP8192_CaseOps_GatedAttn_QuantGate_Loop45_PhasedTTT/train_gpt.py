@@ -1056,7 +1056,7 @@ class GPT(nn.Module):
             # Expected throughput profile matches 017's tensor-α recipe.
             _recur_alpha_017_endpoint = torch.tensor(
                 [[1.078125, 1.2734375, 1.4296875],     # pass-2 L3, L4, L5
-                 [1.015625, 0.96484375, 0.83203125]],  # pass-3 L3, L4, L5
+                 [1.015625, 0.97265625, 0.83203125]],  # pass-3 L3, L4, L5
                 dtype=torch.float32,
             )
             assert _recur_alpha_017_endpoint.shape == (h.num_loops, num_looped), (
