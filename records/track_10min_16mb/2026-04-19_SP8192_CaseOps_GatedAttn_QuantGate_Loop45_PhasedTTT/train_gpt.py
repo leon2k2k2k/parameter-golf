@@ -2815,9 +2815,10 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         batch = [doc for _, doc in batch_entries]
         bsz = len(batch)
         docs_processed += bsz
-        if h.rank == 0 and docs_processed % 5000 < bsz:
+        if h.rank == 0 and docs_processed % 5000 < bsz and token_count > 0:
             elapsed = time.perf_counter() - t_start
-            log(f"ttt_progress: docs:{docs_processed}/{queue_len} elapsed:{elapsed:.0f}s")
+            running_bpb = (loss_sum / token_count).item() / math.log(2.0) * (token_count.item() / byte_sum.item())
+            log(f"ttt_progress: docs:{docs_processed}/{queue_len} bpb:{running_bpb:.5f} elapsed:{elapsed:.0f}s")
         prev_loss = loss_sum.item()
         prev_bytes = byte_sum.item()
         prev_tokens = token_count.item()
