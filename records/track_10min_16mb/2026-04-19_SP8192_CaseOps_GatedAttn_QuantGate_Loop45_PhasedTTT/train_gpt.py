@@ -1054,10 +1054,14 @@ class GPT(nn.Module):
             # suffered (where literal α kernels paid a cold-path penalty after
             # every train→eval→train mode switch at val_loss_every=4000).
             # Expected throughput profile matches 017's tensor-α recipe.
+            # dtype=bfloat16: matches activation dtype so no cast kernel is
+            # needed at blend time. All six α values are exact multiples of
+            # 1/128 (≤ 1.5) — fit bf16's 7-bit mantissa exactly, zero precision
+            # loss vs storing in float32.
             _recur_alpha_017_endpoint = torch.tensor(
                 [[1.078125, 1.2734375, 1.4296875],     # pass-2 L3, L4, L5
                  [1.015625, 0.97265625, 0.83203125]],  # pass-3 L3, L4, L5
-                dtype=torch.float32,
+                dtype=torch.bfloat16,
             )
             assert _recur_alpha_017_endpoint.shape == (h.num_loops, num_looped), (
                 f"017 endpoint table shape {_recur_alpha_017_endpoint.shape} "
@@ -1211,7 +1215,7 @@ class GPT(nn.Module):
             x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                alpha = self.recur_alpha[pass_off, local_idx]
                 x = alpha * x_new + (1.0 - alpha) * x_before
                 # Diagnostic: p2p cosine similarity on block deltas (optional).
                 if self.recur_diag_p2p_cos:
@@ -1272,7 +1276,7 @@ class GPT(nn.Module):
                 x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                    alpha = self.recur_alpha[pass_off, local_idx]
                     x = alpha * x_new + (1.0 - alpha) * x_before
                     if self.recur_diag_p2p_cos:
                         delta_this = (x_new - x_before).detach()
