@@ -916,7 +916,7 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, alpha=None):
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(
@@ -925,11 +925,29 @@ class Block(nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
-        x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
-        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
-            None, None, :
-        ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
-        return x_out
+        mid = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
+        mlp_out = self.mlp(self.mlp_norm(mid) * self.ln_scale_factor, up_w, down_w)
+        if alpha is None:
+            # Baseline path — identical to original.
+            return mid + self.mlp_scale.to(dtype=mid.dtype)[None, None, :] * mlp_out
+        # Spec 018b: bake-in recur-alpha blend. Instead of computing x_new and
+        # externally blending with x_before, fold alpha into the block's own
+        # coefficient structure and produce x_blended in a single 4-term sum.
+        # Algebra: x_blended = x + α(x_new − x) where x_new = mix[0]x + mix[1]x0 +
+        #   attn_scale·attn + mlp_scale·mlp, so
+        # x_blended = (1 + α(mix[0]−1))·x + α·mix[1]·x0 + α·attn_scale·attn_out
+        #           + α·mlp_scale·mlp_out.
+        a = alpha.to(dtype=x.dtype)
+        eff_mix_0 = 1.0 + a * (mix[0] - 1.0)
+        eff_mix_1 = a * mix[1]
+        eff_attn_s = a * self.attn_scale.to(dtype=x.dtype)
+        eff_mlp_s = a * self.mlp_scale.to(dtype=x.dtype)
+        return (
+            eff_mix_0[None, None, :] * x
+            + eff_mix_1[None, None, :] * x0
+            + eff_attn_s[None, None, :] * attn_out
+            + eff_mlp_s[None, None, :] * mlp_out
+        )
 
 class GPT(nn.Module):
     def __init__(self, h):
@@ -1196,14 +1214,20 @@ class GPT(nn.Module):
         )
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x_before = x
-            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            # Spec 018b: pass alpha to block.forward so blend folds into the 4-term
+            # residual sum and we skip materializing x_new separately.
+            alpha_param = None
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                x = alpha * x_new + (1.0 - alpha) * x_before
-                # Diagnostic: p2p cosine similarity on block deltas (optional).
-                if self.recur_diag_p2p_cos:
+                alpha_param = self.recur_alpha[pass_off, local_idx]
+            if self.recur_diag_p2p_cos:
+                # Diagnostic path: need explicit x_new to compute p2p cosine, so
+                # fall back to external blend for this branch.
+                x_before = x
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                if alpha_param is not None:
+                    a = alpha_param.to(x_new.dtype)
+                    x = torch.lerp(x_before, x_new, a)
                     delta_this = (x_new - x_before).detach()
                     prev = self._diag_prev_deltas.get(i, None)
                     if prev is not None:
@@ -1212,11 +1236,12 @@ class GPT(nn.Module):
                         cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
                         self._diag_p2p_cos[pass_off, local_idx] = cos
                     self._diag_prev_deltas[i] = delta_this
+                else:
+                    x = x_new
+                    if self.loop_start <= i <= self.loop_end:
+                        self._diag_prev_deltas[i] = (x_new - x_before).detach()
             else:
-                x = x_new
-                # Seed first-pass delta for diagnostic.
-                if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
-                    self._diag_prev_deltas[i] = (x_new - x_before).detach()
+                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, alpha=alpha_param)
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
@@ -1257,13 +1282,17 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x_before = x
-                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                # Spec 018b: same bake-in pattern as encoder.
+                alpha_param = None
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                    x = alpha * x_new + (1.0 - alpha) * x_before
-                    if self.recur_diag_p2p_cos:
+                    alpha_param = self.recur_alpha[pass_off, local_idx]
+                if self.recur_diag_p2p_cos:
+                    x_before = x
+                    x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                    if alpha_param is not None:
+                        a = alpha_param.to(x_new.dtype)
+                        x = torch.lerp(x_before, x_new, a)
                         delta_this = (x_new - x_before).detach()
                         prev = self._diag_prev_deltas.get(i, None)
                         if prev is not None:
@@ -1272,10 +1301,12 @@ class GPT(nn.Module):
                             cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
                             self._diag_p2p_cos[pass_off, local_idx] = cos
                         self._diag_prev_deltas[i] = delta_this
+                    else:
+                        x = x_new
+                        if self.loop_start <= i <= self.loop_end:
+                            self._diag_prev_deltas[i] = (x_new - x_before).detach()
                 else:
-                    x = x_new
-                    if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
-                        self._diag_prev_deltas[i] = (x_new - x_before).detach()
+                    x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, alpha=alpha_param)
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
@@ -1321,10 +1352,27 @@ class GPT(nn.Module):
                 )
             )
         )
+        # Spec 018b TTT fix: apply recur_alpha bake-in in the TTT forward path.
+        # Spec 015's original patch wired alpha only into forward_logits; TTT
+        # ran on an effective α=1 model.
+        enc_alpha_info = (
+            self._encoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
+        dec_alpha_info = (
+            self._decoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
         slot = 0
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            alpha_param = None
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                pass_off, local_idx = enc_alpha_info[step_idx]
+                alpha_param = self.recur_alpha[pass_off, local_idx]
+            x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w, alpha=alpha_param)
             slot += 1
             skips.append(x)
         psl = self.parallel_start_layer
@@ -1359,7 +1407,11 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                alpha_param = None
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    pass_off, local_idx = dec_alpha_info[skip_idx]
+                    alpha_param = self.recur_alpha[pass_off, local_idx]
+                x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w, alpha=alpha_param)
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
@@ -1375,7 +1427,7 @@ class GPT(nn.Module):
             logits.float().reshape(-1, V), target_ids.reshape(-1), reduction="none"
         ).reshape(bsz, sl)
 
-    def _block_with_lora(self, block, x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w):
+    def _block_with_lora(self, block, x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w, alpha=None):
         mix = block.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         n = block.attn_norm(x_in) * block.ln_scale_factor
@@ -1428,13 +1480,27 @@ class GPT(nn.Module):
         attn_out = F.linear(y_proj, out_w.to(n.dtype))
         if lora.o_loras is not None:
             attn_out = attn_out + lora.o_loras[slot](n)
-        x_out = x_in + block.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
-        mlp_n = block.mlp_norm(x_out) * block.ln_scale_factor
+        mid = x_in + block.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
+        mlp_n = block.mlp_norm(mid) * block.ln_scale_factor
         mlp_out = block.mlp(mlp_n, up_w, down_w)
         if lora.mlp_loras is not None:
             mlp_out = mlp_out + lora.mlp_loras[slot](mlp_n)
-        x_out = x_out + block.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
-        return x_out
+        if alpha is None:
+            # Baseline path — identical to original.
+            return mid + block.mlp_scale.to(dtype=mid.dtype)[None, None, :] * mlp_out
+        # Spec 018b: bake-in recur-alpha. Fold α into the 4-term linear combo.
+        # See Block.forward for derivation.
+        a = alpha.to(dtype=x.dtype)
+        eff_mix_0 = 1.0 + a * (mix[0] - 1.0)
+        eff_mix_1 = a * mix[1]
+        eff_attn_s = a * block.attn_scale.to(dtype=x.dtype)
+        eff_mlp_s = a * block.mlp_scale.to(dtype=x.dtype)
+        return (
+            eff_mix_0[None, None, :] * x
+            + eff_mix_1[None, None, :] * x0
+            + eff_attn_s[None, None, :] * attn_out
+            + eff_mlp_s[None, None, :] * mlp_out
+        )
 
     def _parallel_block_with_lora(
         self, block_idx, lane0, lane1, x0, lora, slot,
