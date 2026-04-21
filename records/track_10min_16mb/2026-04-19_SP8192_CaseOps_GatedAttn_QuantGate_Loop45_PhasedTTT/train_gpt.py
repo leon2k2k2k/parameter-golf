@@ -70,6 +70,7 @@ class Hyperparameters:
     muon_wd = float(os.environ.get("MUON_WD", 0.095))
     embed_wd = float(os.environ.get("EMBED_WD", 0.085))
     ema_decay = float(os.environ.get("EMA_DECAY", 0.9965))
+    throughput_diag = bool(int(os.environ.get("THROUGHPUT_DIAG", "0")))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 96))
     ttt_lora_lr = float(os.environ.get("TTT_LORA_LR", 0.0001))
@@ -3202,18 +3203,49 @@ def train_model(h, device, val_data):
             return max((1.0 - frac) / h.warmdown_frac, h.min_lr)
         return 1.0
 
+    # Spec 020: throughput diagnostics — CUDA event pairs for per-phase timing.
+    _diag_on = getattr(h, "throughput_diag", False)
+    if _diag_on:
+        _ev_fwd_s = torch.cuda.Event(enable_timing=True)
+        _ev_fwd_e = torch.cuda.Event(enable_timing=True)
+        _ev_bwd_s = torch.cuda.Event(enable_timing=True)
+        _ev_bwd_e = torch.cuda.Event(enable_timing=True)
+        _ev_opt_s = torch.cuda.Event(enable_timing=True)
+        _ev_opt_e = torch.cuda.Event(enable_timing=True)
+        _diag_dl_us = [0.0]  # mutable container; updated by step_fn
+    else:
+        _ev_fwd_s = _ev_fwd_e = _ev_bwd_s = _ev_bwd_e = _ev_opt_s = _ev_opt_e = None
+        _diag_dl_us = [0.0]
+
     def step_fn(step, lr_scale):
         optimizers.zero_grad_all()
         train_loss = torch.zeros((), device=device)
+        _dl_total_us = 0.0
         for micro_step in range(h.grad_accum_steps):
+            if _diag_on:
+                _dl_t0 = time.perf_counter()
             x, y, cu_seqlens, _max_seqlen = train_loader.next_batch(
                 h.train_batch_tokens, h.grad_accum_steps
             )
+            if _diag_on:
+                _dl_total_us += (time.perf_counter() - _dl_t0) * 1e6
+                torch.cuda.nvtx.range_push("forward")
+                _ev_fwd_s.record()
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y, cu_seqlens=cu_seqlens, max_seqlen=h.train_seq_len)
+            if _diag_on:
+                _ev_fwd_e.record()
+                torch.cuda.nvtx.range_pop()
             train_loss += loss.detach()
+            if _diag_on:
+                torch.cuda.nvtx.range_push("backward")
+                _ev_bwd_s.record()
             (loss / h.grad_accum_steps).backward()
+            if _diag_on:
+                _ev_bwd_e.record()
+                torch.cuda.nvtx.range_pop()
         train_loss /= h.grad_accum_steps
+        _diag_dl_us[0] = _dl_total_us
         frac = (
             min(step / h.muon_momentum_warmup_steps, 1.0)
             if h.muon_momentum_warmup_steps > 0
@@ -3237,7 +3269,13 @@ def train_model(h, device, val_data):
         ra = getattr(base_model, "recur_alpha", None)
         if ra is not None and ra.grad is not None:
             alpha_grad_norm = ra.grad.norm().item()
+        if _diag_on:
+            torch.cuda.nvtx.range_push("optimizer_step")
+            _ev_opt_s.record()
         optimizers.step(distributed=h.distributed)
+        if _diag_on:
+            _ev_opt_e.record()
+            torch.cuda.nvtx.range_pop()
         return train_loss, alpha_grad_norm
 
     if h.warmup_steps > 0:
@@ -3311,6 +3349,22 @@ def train_model(h, device, val_data):
     ema_decay = h.ema_decay
     training_time_ms = 0.0
     stop_after_step = None
+    # Spec 020 diag CSV writer (main rank only)
+    _diag_csv_f = None
+    _diag_csv_w = None
+    if _diag_on and h.is_main_process and h.artifact_dir:
+        import csv as _csv_mod
+        _diag_path = os.path.join(h.artifact_dir, "diag_steps.csv")
+        _diag_csv_f = open(_diag_path, "w", buffering=1)
+        _diag_csv_w = _csv_mod.writer(_diag_csv_f)
+        _diag_csv_w.writerow([
+            "step", "wallclock_s", "step_time_ms",
+            "fwd_us", "bwd_us", "opt_us", "dataloader_us",
+            "active_bytes", "reserved_bytes",
+            "num_alloc_retries", "num_device_alloc", "num_device_free",
+        ])
+        log(f"throughput_diag: writing per-step CSV to {_diag_path}")
+    _diag_prev_t = None
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     step = 0
@@ -3360,6 +3414,27 @@ def train_model(h, device, val_data):
                 )
         step += 1
         approx_training_time_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
+        # Spec 020: per-step diagnostic row (syncs on elapsed_time call)
+        if _diag_on and _diag_csv_w is not None:
+            _now = time.perf_counter()
+            _step_time_ms = (_now - _diag_prev_t) * 1e3 if _diag_prev_t is not None else 0.0
+            _diag_prev_t = _now
+            try:
+                _fwd = _ev_fwd_s.elapsed_time(_ev_fwd_e) * 1e3
+                _bwd = _ev_bwd_s.elapsed_time(_ev_bwd_e) * 1e3
+                _opt = _ev_opt_s.elapsed_time(_ev_opt_e) * 1e3
+            except Exception:
+                _fwd = _bwd = _opt = -1.0
+            _ms = torch.cuda.memory_stats()
+            _diag_csv_w.writerow([
+                step, f"{_now:.6f}", f"{_step_time_ms:.3f}",
+                f"{_fwd:.1f}", f"{_bwd:.1f}", f"{_opt:.1f}", f"{_diag_dl_us[0]:.1f}",
+                _ms.get("active_bytes.all.current", 0),
+                _ms.get("reserved_bytes.all.current", 0),
+                _ms.get("num_alloc_retries", 0),
+                _ms.get("num_device_alloc", 0),
+                _ms.get("num_device_free", 0),
+            ])
         should_log_train = h.train_log_every > 0 and (
             step <= 5 or step % h.train_log_every == 0 or stop_after_step is not None
         )
@@ -3394,6 +3469,9 @@ def train_model(h, device, val_data):
     log(
         f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB"
     )
+    if _diag_csv_f is not None:
+        _diag_csv_f.close()
+        log(f"throughput_diag: per-step CSV closed")
     log("ema:applying EMA weights")
     current_state = base_model.state_dict()
     avg_state = {
