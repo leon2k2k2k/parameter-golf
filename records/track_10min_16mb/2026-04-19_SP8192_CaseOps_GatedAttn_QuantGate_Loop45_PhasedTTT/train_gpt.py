@@ -1067,7 +1067,15 @@ class GPT(nn.Module):
                 f"017 endpoint table shape {_recur_alpha_017_endpoint.shape} "
                 f"!= (num_loops={h.num_loops}, num_looped={num_looped})"
             )
-            self.register_buffer("recur_alpha", _recur_alpha_017_endpoint)
+            # nn.Parameter(requires_grad=False) rather than register_buffer:
+            # torch.compile / Inductor may treat nn.Parameter tensors as more
+            # const-fold-friendly than buffers (parameters change slowly;
+            # buffers are treated as potentially-mutable runtime inputs).
+            # Testing whether this closes the residual post-loop train-loss
+            # gap vs 019b that bf16-only couldn't.
+            self.recur_alpha = nn.Parameter(
+                _recur_alpha_017_endpoint, requires_grad=False
+            )
             # Precompute alpha_info lists: parallel to encoder_indices and
             # decoder_indices, indicating (pass_offset, local_idx) or None for
             # each position. Pass counts span encoder + decoder (sequential).
@@ -1795,13 +1803,14 @@ class Optimizers:
         # Spec 015 Recur-Alpha: 6 scalars (num_loops × num_looped), route to scalar AdamW.
         # Not in .blocks so not picked up by block_named_params. ndim=2 but tiny —
         # would be silly to send to Muon. Append by hand like SmearGate.
-        # Spec 021: recur_alpha is a register_buffer (not Parameter), so DO NOT
-        # append to optimizer. Guard with isinstance check so the 015/016/017
-        # Parameter form still works if we ever revert.
+        # Spec 021: recur_alpha is frozen (buffer or Parameter(requires_grad=False)),
+        # so DO NOT append to optimizer. Guard on requires_grad so the
+        # 015/016/017 learnable-Parameter form still works if we ever revert.
         if (
             getattr(base_model, "recur_alpha_enabled", False)
             and base_model.recur_alpha is not None
             and isinstance(base_model.recur_alpha, nn.Parameter)
+            and base_model.recur_alpha.requires_grad
         ):
             scalar_params.append(base_model.recur_alpha)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
