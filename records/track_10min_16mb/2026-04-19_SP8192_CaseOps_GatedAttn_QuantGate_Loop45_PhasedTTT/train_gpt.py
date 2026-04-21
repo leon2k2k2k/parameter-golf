@@ -1052,7 +1052,7 @@ class GPT(nn.Module):
             # specialize kernels / fold the arithmetic. α is NOT learnable here.
             # Throughput test only — not a training spec.
             _ALPHA_CONSTANTS_017 = (
-                (1.078125, 1.2734375, 1.3984375),   # pass-2: L3, L4, L5
+                (1.078125, 1.2734375, 1.4296875),   # pass-2: L3, L4, L5
                 (1.015625, 0.97265625, 0.83203125), # pass-3: L3, L4, L5
             )
             self.recur_alpha = None  # not a Parameter; no gradient tracking
