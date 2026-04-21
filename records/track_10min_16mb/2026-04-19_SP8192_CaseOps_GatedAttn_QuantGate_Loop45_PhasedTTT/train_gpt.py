@@ -45,6 +45,7 @@ class Hyperparameters:
     num_loops = int(os.environ.get("NUM_LOOPS", 2))
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
+    ttt_extra_depth = int(os.environ.get("TTT_EXTRA_DEPTH", 0))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
@@ -3293,6 +3294,17 @@ def train_and_eval(h, device):
         ttt_model = deserialize(h, device)
         if h.num_loops > 0:
             ttt_model.looping_active = True
+        if h.ttt_extra_depth > 0 and h.num_loops > 0:
+            _loop_seg = list(range(h.loop_start, h.loop_end + 1))
+            _new_all = (
+                list(range(h.loop_start))
+                + _loop_seg * (h.num_loops + 1 + h.ttt_extra_depth)
+                + list(range(h.loop_end + 1, h.num_layers))
+            )
+            _n = len(_new_all) // 2
+            ttt_model.encoder_indices = _new_all[:_n]
+            ttt_model.decoder_indices = _new_all[_n:]
+            log(f"ttt_extra_depth:{h.ttt_extra_depth} slots:{len(_new_all)} enc:{len(_new_all[:_n])} dec:{len(_new_all[_n:])}")
         for p in ttt_model.parameters():
             p.requires_grad_(False)
 
