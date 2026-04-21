@@ -72,6 +72,7 @@ class Hyperparameters:
     embed_wd = float(os.environ.get("EMBED_WD", 0.085))
     ema_decay = float(os.environ.get("EMA_DECAY", 0.9965))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
+    ttt_only = bool(int(os.environ.get("TTT_ONLY", "0")))
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 96))
     ttt_lora_lr = float(os.environ.get("TTT_LORA_LR", 0.0001))
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 48))
@@ -208,7 +209,7 @@ class Hyperparameters:
         if artifact_dir
         else "final_model.pt"
     )
-    quantized_model_path = (
+    quantized_model_path = os.environ.get("QUANTIZED_MODEL_PATH") or (
         os.path.join(artifact_dir, "final_model.int6.ptz")
         if artifact_dir
         else "final_model.int6.ptz"
@@ -3255,6 +3256,51 @@ def train_and_eval(h, device):
         f"train_shards: {len(list(Path(h.datasets_dir).resolve().glob('fineweb_train_*.bin')))}"
     )
     log(f"val_tokens: {val_data.val_tokens.numel()-1}")
+    if h.ttt_only:
+        assert h.quantized_model_path and os.path.exists(h.quantized_model_path), \
+            f"TTT_ONLY requires QUANTIZED_MODEL_PATH pointing to an existing .ptz file, got: {h.quantized_model_path!r}"
+        log(f"ttt_only: skipping training and GPTQ, loading {h.quantized_model_path}")
+        ttt_model = deserialize(h, device)
+        if h.num_loops > 0:
+            ttt_model.looping_active = True
+        if h.ttt_extra_depth > 0 and h.num_loops > 0:
+            _loop_seg = list(range(h.loop_start, h.loop_end + 1))
+            _new_all = (
+                list(range(h.loop_start))
+                + _loop_seg * (h.num_loops + 1 + h.ttt_extra_depth)
+                + list(range(h.loop_end + 1, h.num_layers))
+            )
+            _n = len(_new_all) // 2
+            ttt_model.encoder_indices = _new_all[:_n]
+            ttt_model.decoder_indices = _new_all[_n:]
+            log(f"ttt_extra_depth:{h.ttt_extra_depth} slots:{len(_new_all)} enc:{len(_new_all[:_n])} dec:{len(_new_all[_n:])}")
+        for p in ttt_model.parameters():
+            p.requires_grad_(False)
+
+        def _fwd_ttt_inner(input_ids, target_ids, lora):
+            return ttt_model.forward_ttt(input_ids, target_ids, lora=lora)
+
+        _fwd_ttt_compiled_inner = None
+
+        def _fwd_ttt(input_ids, target_ids, lora):
+            nonlocal _fwd_ttt_compiled_inner
+            if _fwd_ttt_compiled_inner is None:
+                _fwd_ttt_compiled_inner = torch.compile(_fwd_ttt_inner, dynamic=True)
+            return _fwd_ttt_compiled_inner(input_ids, target_ids, lora=lora)
+
+        log("\nbeginning TTT eval timer")
+        torch.cuda.synchronize()
+        t_ttt = time.perf_counter()
+        ttt_val_loss, ttt_val_bpb = eval_val_ttt_phased(
+            h, ttt_model, device, val_data, forward_ttt_train=_fwd_ttt
+        )
+        torch.cuda.synchronize()
+        ttt_elapsed = time.perf_counter() - t_ttt
+        log(
+            f"quantized_ttt_phased val_loss:{ttt_val_loss:.8f} val_bpb:{ttt_val_bpb:.8f} eval_time:{1e3*ttt_elapsed:.0f}ms"
+        )
+        return
+
     base_model, compiled_model, compiled_forward_logits = train_model(
         h, device, val_data
     )
