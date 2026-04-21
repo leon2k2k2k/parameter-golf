@@ -1201,7 +1201,10 @@ class GPT(nn.Module):
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                x = alpha * x_new + (1.0 - alpha) * x_before
+                # Spec 018: torch.lerp fuses (1-a)*x + a*y into a single CUDA
+                # primitive, ~50-60% reduction in blend memory traffic + kernel
+                # launch overhead vs the unfused `a*x_new + (1-a)*x_before`.
+                x = torch.lerp(x_before, x_new, alpha)
                 # Diagnostic: p2p cosine similarity on block deltas (optional).
                 if self.recur_diag_p2p_cos:
                     delta_this = (x_new - x_before).detach()
@@ -1262,7 +1265,8 @@ class GPT(nn.Module):
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                    x = alpha * x_new + (1.0 - alpha) * x_before
+                    # Spec 018: see encoder-side comment.
+                    x = torch.lerp(x_before, x_new, alpha)
                     if self.recur_diag_p2p_cos:
                         delta_this = (x_new - x_before).detach()
                         prev = self._diag_prev_deltas.get(i, None)
