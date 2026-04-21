@@ -1310,10 +1310,28 @@ class GPT(nn.Module):
                 )
             )
         )
+        # Spec 019: apply constant-α blend in the TTT forward path too.
+        # alpha_info lists contain Python floats (set at __init__ from the 017
+        # endpoint table). The torch.lerp call sees the literal in the weight
+        # position just like forward_logits, so compile specialization applies.
+        enc_alpha_info = (
+            self._encoder_alpha_info
+            if (self.recur_alpha_enabled and self.looping_active)
+            else None
+        )
+        dec_alpha_info = (
+            self._decoder_alpha_info
+            if (self.recur_alpha_enabled and self.looping_active)
+            else None
+        )
         slot = 0
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            x_before = x
+            x = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                alpha = enc_alpha_info[step_idx]  # Python float constant
+                x = torch.lerp(x_before, x, alpha)
             slot += 1
             skips.append(x)
         psl = self.parallel_start_layer
@@ -1348,7 +1366,11 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                x_before = x
+                x = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    alpha = dec_alpha_info[skip_idx]  # Python float constant
+                    x = torch.lerp(x_before, x, alpha)
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
