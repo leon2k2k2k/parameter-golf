@@ -2805,6 +2805,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
     reusable_opt = _build_opt(reusable_lora)
     local_scored_docs = []
     global_ttt_done = prefix_doc_limit == 0
+    docs_processed = 0
     try:
       while True:
         queue_idx = _claim_next_batch(counter_path, queue_len)
@@ -2813,6 +2814,10 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         orig_batch_idx, batch_entries = global_batches_sorted[queue_idx]
         batch = [doc for _, doc in batch_entries]
         bsz = len(batch)
+        docs_processed += bsz
+        if h.rank == 0 and docs_processed % 5000 < bsz:
+            elapsed = time.perf_counter() - t_start
+            log(f"ttt_progress: docs:{docs_processed}/{queue_len} elapsed:{elapsed:.0f}s")
         prev_loss = loss_sum.item()
         prev_bytes = byte_sum.item()
         prev_tokens = token_count.item()
