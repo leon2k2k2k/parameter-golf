@@ -1206,8 +1206,8 @@ class GPT(nn.Module):
             x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 alpha = enc_alpha_info[step_idx]  # Python float from 017 endpoint
-                # Manual add with literal scalars — pointwise fusion, scale-robust.
-                x = alpha * x_new + (1.0 - alpha) * x_before
+                # Algebraic lerp form — matches lerp memory: no intermediate save needed.
+                x = x_before + alpha * (x_new - x_before)
                 # Note: p2p cos diagnostic omitted in 018c (alpha_info no longer
                 # stores pass_off/local_idx indices). recur_diag_p2p_cos is
                 # off-by-default anyway and unused in this throughput test.
@@ -1260,7 +1260,7 @@ class GPT(nn.Module):
                 x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     alpha = dec_alpha_info[skip_idx]  # Python float, compile-time constant
-                    x = alpha * x_new + (1.0 - alpha) * x_before
+                    x = x_before + alpha * (x_new - x_before)
                 else:
                     x = x_new
                     if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
@@ -1331,7 +1331,7 @@ class GPT(nn.Module):
             x = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 alpha = enc_alpha_info[step_idx]  # Python float constant
-                x = alpha * x + (1.0 - alpha) * x_before
+                x = x_before + alpha * (x - x_before)
             slot += 1
             skips.append(x)
         psl = self.parallel_start_layer
@@ -1370,7 +1370,7 @@ class GPT(nn.Module):
                 x = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     alpha = dec_alpha_info[skip_idx]  # Python float constant
-                    x = alpha * x + (1.0 - alpha) * x_before
+                    x = x_before + alpha * (x - x_before)
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
