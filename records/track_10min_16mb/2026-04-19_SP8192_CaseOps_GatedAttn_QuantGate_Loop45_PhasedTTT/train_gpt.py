@@ -1417,7 +1417,9 @@ class BatchedLinearLoRA(nn.Module):
     def forward(self, x):
         out = (x @ self.A.transpose(1, 2)) @ self.B.transpose(1, 2)
         if self.bias is not None:
-            out = out + self.bias
+            # Cast bias to out.dtype so it doesn't upcast (bf16 + fp32 → fp32)
+            # and break flash-attn downstream (which only accepts fp16/bf16/fp8).
+            out = out + self.bias.to(out.dtype)
         return out
 
 
