@@ -1046,19 +1046,17 @@ class GPT(nn.Module):
         self.loop_end = h.loop_end
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
-            # Spec 021h: learnable Parameter α in fp32 (matching 017's recipe
-            # exactly). 021g used bf16 α and saw per-step train loss +0.007
-            # above 017 at matched steps, with α converging to a slightly
-            # different basin (e.g. pass-2 L5 landed at 1.383 vs 017's 1.430).
-            # Likely cause: bf16's precision at α≈1.0 (LSB=1/128=0.0078125)
-            # is 100-1000× larger than AdamW's per-step update (~1e-4 to 1e-5),
-            # causing small-update rounding that traps α on a coarser grid.
-            # fp32 restores update precision to 2⁻²³ ≈ 1.2e-7, well below any
-            # optimizer step. α can freely navigate to 017's basin.
-            # Cost: scalar .to(x_new.dtype) cast at blend sites (near-free
-            # for 6 scalar values).
+            self.num_looped = num_looped
+            # Spec 024b: cross-layer carry blend. beta[i] scales x_new at layer i;
+            # alpha[i,j] scales detached first-pass output of layer j added to layer i.
+            # Init: beta=1 (full x_new), alpha=0 (no carry) — identical to baseline.
+            # All carries are detached so no backward retention cost.
+            self.recur_beta = nn.Parameter(
+                torch.ones(num_looped, dtype=torch.float32),
+                requires_grad=True,
+            )
             self.recur_alpha = nn.Parameter(
-                torch.ones(h.num_loops, num_looped, dtype=torch.float32),
+                torch.zeros(num_looped, num_looped, dtype=torch.float32),
                 requires_grad=True,
             )
             # Precompute alpha_info lists: parallel to encoder_indices and
@@ -1082,7 +1080,9 @@ class GPT(nn.Module):
                 else:
                     self._decoder_alpha_info.append(None)
         else:
+            self.recur_beta = None
             self.recur_alpha = None
+            self.num_looped = 0
             self._encoder_alpha_info = None
             self._decoder_alpha_info = None
         # Diagnostic buffers for p2p cosine. Updated in forward, read by logger.
@@ -1202,15 +1202,17 @@ class GPT(nn.Module):
             if (self.recur_alpha is not None and self.looping_active)
             else None
         )
+        carry = {} if enc_alpha_info is not None else None
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x_before = x
             x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                x_before_det = x_before.detach()
-                x = x_before_det + alpha * (x_new - x_before_det)
+                beta = self.recur_beta[local_idx].to(x_new.dtype)
+                x = beta * x_new
+                for j in range(self.num_looped):
+                    x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
                 # Diagnostic: p2p cosine similarity on block deltas (optional).
                 if self.recur_diag_p2p_cos:
                     delta_this = (x_new - x_before).detach()
@@ -1223,7 +1225,8 @@ class GPT(nn.Module):
                     self._diag_prev_deltas[i] = delta_this
             else:
                 x = x_new
-                # Seed first-pass delta for diagnostic.
+                if carry is not None and self.loop_start <= i <= self.loop_end:
+                    carry[i] = x_new.detach()
                 if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
                     self._diag_prev_deltas[i] = (x_new - x_before).detach()
             skips.append(x)
@@ -1270,9 +1273,10 @@ class GPT(nn.Module):
                 x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                    x_before_det = x_before.detach()
-                    x = x_before_det + alpha * (x_new - x_before_det)
+                    beta = self.recur_beta[local_idx].to(x_new.dtype)
+                    x = beta * x_new
+                    for j in range(self.num_looped):
+                        x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
                     if self.recur_diag_p2p_cos:
                         delta_this = (x_new - x_before).detach()
                         prev = self._diag_prev_deltas.get(i, None)
@@ -1284,6 +1288,8 @@ class GPT(nn.Module):
                         self._diag_prev_deltas[i] = delta_this
                 else:
                     x = x_new
+                    if carry is not None and self.loop_start <= i <= self.loop_end:
+                        carry[i] = x_new.detach()
                     if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
                         self._diag_prev_deltas[i] = (x_new - x_before).detach()
         if lane0 is not None:
@@ -1339,6 +1345,7 @@ class GPT(nn.Module):
             if (self.recur_alpha is not None and self.looping_active)
             else None
         )
+        carry = {} if enc_alpha_info is not None else None
         slot = 0
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
@@ -1346,11 +1353,14 @@ class GPT(nn.Module):
             x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                x_before_det = x_before.detach()
-                x = x_before_det + alpha * (x_new - x_before_det)
+                beta = self.recur_beta[local_idx].to(x_new.dtype)
+                x = beta * x_new
+                for j in range(self.num_looped):
+                    x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
             else:
                 x = x_new
+                if carry is not None and self.loop_start <= i <= self.loop_end:
+                    carry[i] = x_new.detach()
             slot += 1
             skips.append(x)
         psl = self.parallel_start_layer
@@ -1394,11 +1404,14 @@ class GPT(nn.Module):
                 x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
-                    x_before_det = x_before.detach()
-                    x = x_before_det + alpha * (x_new - x_before_det)
+                    beta = self.recur_beta[local_idx].to(x_new.dtype)
+                    x = beta * x_new
+                    for j in range(self.num_looped):
+                        x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
                 else:
                     x = x_new
+                    if carry is not None and self.loop_start <= i <= self.loop_end:
+                        carry[i] = x_new.detach()
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
@@ -1822,13 +1835,11 @@ class Optimizers:
         # Spec 021: recur_alpha is frozen (buffer or Parameter(requires_grad=False)),
         # so DO NOT append to optimizer. Guard on requires_grad so the
         # 015/016/017 learnable-Parameter form still works if we ever revert.
-        if (
-            getattr(base_model, "recur_alpha_enabled", False)
-            and base_model.recur_alpha is not None
-            and isinstance(base_model.recur_alpha, nn.Parameter)
-            and base_model.recur_alpha.requires_grad
-        ):
-            scalar_params.append(base_model.recur_alpha)
+        if getattr(base_model, "recur_alpha_enabled", False):
+            if base_model.recur_alpha is not None and base_model.recur_alpha.requires_grad:
+                scalar_params.append(base_model.recur_alpha)
+            if getattr(base_model, "recur_beta", None) is not None and base_model.recur_beta.requires_grad:
+                scalar_params.append(base_model.recur_beta)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
@@ -3264,8 +3275,11 @@ def train_model(h, device, val_data):
         # grad_norm was unusable as a plumbing-check signal.
         alpha_grad_norm = None
         ra = getattr(base_model, "recur_alpha", None)
+        rb = getattr(base_model, "recur_beta", None)
         if ra is not None and ra.grad is not None:
             alpha_grad_norm = ra.grad.norm().item()
+        if rb is not None and rb.grad is not None:
+            alpha_grad_norm = (alpha_grad_norm or 0.0) + rb.grad.norm().item()
         optimizers.step(distributed=h.distributed)
         return train_loss, alpha_grad_norm
 
@@ -3402,6 +3416,9 @@ def train_model(h, device, val_data):
             # zeros grads); reading base_model.recur_alpha.grad here would always be None.
             if getattr(base_model, "recur_alpha", None) is not None:
                 alpha_tensor = base_model.recur_alpha.detach().float().cpu().tolist()
+                beta_tensor = None
+                if getattr(base_model, "recur_beta", None) is not None:
+                    beta_tensor = base_model.recur_beta.detach().float().cpu().tolist()
                 if alpha_grad_norm is None:
                     alpha_grad_norm = 0.0
                 p2p_cos_str = ""
@@ -3409,7 +3426,7 @@ def train_model(h, device, val_data):
                     p2p = base_model._diag_p2p_cos.detach().float().cpu().tolist()
                     p2p_cos_str = f" p2p_cos: {p2p}"
                 log(
-                    f"recur_alpha: values={alpha_tensor} grad_norm={alpha_grad_norm:.6f}{p2p_cos_str}"
+                    f"recur_alpha: beta={beta_tensor} alpha={alpha_tensor} grad_norm={alpha_grad_norm:.6f}{p2p_cos_str}"
                 )
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
