@@ -1224,7 +1224,7 @@ class GPT(nn.Module):
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 alpha = self.recur_alpha[pass_off, local_idx]
-                x = alpha * x_new + (1.0 - alpha) * x_before
+                x = x_before + alpha * (x_new - x_before)
                 # Diagnostic: p2p cosine similarity on block deltas (optional).
                 if self.recur_diag_p2p_cos:
                     delta_this = (x_new - x_before).detach()
@@ -1285,7 +1285,7 @@ class GPT(nn.Module):
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     alpha = self.recur_alpha[pass_off, local_idx]
-                    x = alpha * x_new + (1.0 - alpha) * x_before
+                    x = x_before + alpha * (x_new - x_before)
                     if self.recur_diag_p2p_cos:
                         delta_this = (x_new - x_before).detach()
                         prev = self._diag_prev_deltas.get(i, None)
@@ -1360,7 +1360,7 @@ class GPT(nn.Module):
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 alpha = self.recur_alpha[pass_off, local_idx]
-                x = alpha * x_new + (1.0 - alpha) * x_before
+                x = x_before + alpha * (x_new - x_before)
             else:
                 x = x_new
             slot += 1
@@ -1407,7 +1407,7 @@ class GPT(nn.Module):
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     alpha = self.recur_alpha[pass_off, local_idx]
-                    x = alpha * x_new + (1.0 - alpha) * x_before
+                    x = x_before + alpha * (x_new - x_before)
                 else:
                     x = x_new
             slot += 1
