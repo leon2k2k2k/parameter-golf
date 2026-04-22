@@ -1344,15 +1344,35 @@ class GPT(nn.Module):
                 )
             )
         )
+        # TTT α fix: apply the same blend as forward_logits. Without this,
+        # TTT adaptation sees the un-α-weighted forward pass, which mismatches
+        # training and leaves ~0.002 of TTT delta on the table (017-era bug).
+        enc_alpha_info = (
+            self._encoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
         slot = 0
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            x_before = x
+            x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                pass_off, local_idx = enc_alpha_info[step_idx]
+                alpha = self.recur_alpha[pass_off, local_idx]
+                x = alpha * x_new + (1.0 - alpha) * x_before
+            else:
+                x = x_new
             slot += 1
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
+        dec_alpha_info = (
+            self._decoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
@@ -1382,7 +1402,14 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                x_before = x
+                x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    pass_off, local_idx = dec_alpha_info[skip_idx]
+                    alpha = self.recur_alpha[pass_off, local_idx]
+                    x = alpha * x_new + (1.0 - alpha) * x_before
+                else:
+                    x = x_new
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
