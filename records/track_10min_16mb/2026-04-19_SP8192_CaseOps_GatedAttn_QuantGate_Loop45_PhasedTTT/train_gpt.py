@@ -72,6 +72,7 @@ class Hyperparameters:
     ema_decay = float(os.environ.get("EMA_DECAY", 0.9965))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 96))
+    ttt_lora_alpha = int(os.environ.get("TTT_LORA_ALPHA", 96))
     ttt_lora_lr = float(os.environ.get("TTT_LORA_LR", 0.0001))
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 48))
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 2048))
@@ -1569,9 +1570,10 @@ class GPT(nn.Module):
 
 
 class BatchedLinearLoRA(nn.Module):
-    def __init__(self, bsz, in_features, out_features, rank):
+    def __init__(self, bsz, in_features, out_features, rank, alpha=96):
         super().__init__()
         self._bound = 1.0 / math.sqrt(in_features)
+        self._scale = alpha / rank
         self.A = nn.Parameter(
             torch.empty(bsz, rank, in_features).uniform_(-self._bound, self._bound)
         )
@@ -1579,15 +1581,16 @@ class BatchedLinearLoRA(nn.Module):
 
     def reset(self):
         with torch.no_grad():
-            self.A.uniform_(-self._bound, self._bound)
+            # warm-start A: keep accumulated feature directions; only zero B so
+            # LoRA output = 0 at each batch start (per-document reset preserved)
             self.B.zero_()
 
     def forward(self, x):
-        return (x @ self.A.transpose(1, 2)) @ self.B.transpose(1, 2)
+        return (x @ self.A.transpose(1, 2)) @ self.B.transpose(1, 2) * self._scale
 
 
 class BatchedTTTLoRA(nn.Module):
-    def __init__(self, bsz, model, rank, k_lora=True, mlp_lora=True, o_lora=True):
+    def __init__(self, bsz, model, rank, alpha=96, k_lora=True, mlp_lora=True, o_lora=True):
         super().__init__()
         self.bsz = bsz
         dim = model.qo_bank.shape[-1]
@@ -1600,30 +1603,30 @@ class BatchedTTTLoRA(nn.Module):
             dim // model.blocks[0].attn.num_heads
         )
         embed_dim = model.tok_emb.embedding_dim
-        self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank)
+        self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank, alpha)
         self.q_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
         )
         self.v_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, kv_dim, rank, alpha) for _ in range(num_slots)]
         )
         self.k_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, kv_dim, rank, alpha) for _ in range(num_slots)]
             )
             if k_lora
             else None
         )
         self.mlp_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
             )
             if mlp_lora
             else None
         )
         self.o_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
             )
             if o_lora
             else None
@@ -2960,7 +2963,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     t_start = time.perf_counter()
     reusable_lora = BatchedTTTLoRA(
-        h.ttt_batch_size, base_model, h.ttt_lora_rank,
+        h.ttt_batch_size, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
         k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
     ).to(device)
 
@@ -3002,7 +3005,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
             cur_opt = reusable_opt
         else:
             cur_lora = BatchedTTTLoRA(
-                bsz, base_model, h.ttt_lora_rank,
+                bsz, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
             ).to(device)
             cur_opt = _build_opt(cur_lora)
@@ -3173,7 +3176,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
                 for p in base_model.parameters():
                     p.requires_grad_(False)
                 reusable_lora = BatchedTTTLoRA(
-                    h.ttt_batch_size, base_model, h.ttt_lora_rank,
+                    h.ttt_batch_size, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                     k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
                 ).to(device)
                 reusable_opt = _build_opt(reusable_lora)
@@ -3539,7 +3542,7 @@ def train_and_eval(h, device):
         warmup_bszes = [h.ttt_batch_size]
         for bsz in warmup_bszes:
             wl = BatchedTTTLoRA(
-                bsz, ttt_model, h.ttt_lora_rank,
+                bsz, ttt_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
             ).to(device)
             wo = torch.optim.AdamW(
