@@ -1046,34 +1046,20 @@ class GPT(nn.Module):
         self.loop_end = h.loop_end
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
-            # Spec 021: α as a register_buffer frozen at 017's endpoint values.
-            # Not an nn.Parameter → no gradient, no optimizer state, no learning.
-            # Buffer (vs Python literal): Dynamo sees a runtime tensor input, not
-            # a compile-time constant, so the graph isn't specialized on α's value.
-            # This avoids the post-val graph recompile dip pattern that 019/019b
-            # suffered (where literal α kernels paid a cold-path penalty after
-            # every train→eval→train mode switch at val_loss_every=4000).
-            # Expected throughput profile matches 017's tensor-α recipe.
-            # dtype=bfloat16: matches activation dtype so no cast kernel is
-            # needed at blend time. All six α values are exact multiples of
-            # 1/128 (≤ 1.5) — fit bf16's 7-bit mantissa exactly, zero precision
-            # loss vs storing in float32.
-            _recur_alpha_017_endpoint = torch.tensor(
-                [[1.078125, 1.2734375, 1.4296875],     # pass-2 L3, L4, L5
-                 [1.015625, 0.97265625, 0.83203125]],  # pass-3 L3, L4, L5
-                dtype=torch.bfloat16,
+            # Spec 021g: learnable Parameter α, init=1.0, matching 017's recipe.
+            # 017's pre-quant was 1.06861 — best of any 8H run — because weights
+            # and α co-evolve during training. Frozen-α variants (019b, 021a-f)
+            # top out at ~1.0694 pre-quant. This variant combines 017's
+            # learnable-α co-evolution with the 021e stack's TTT α fix (which
+            # 017 was missing → TTT delta was only -0.01048 vs 019b's -0.01249)
+            # and algebraic blend form.
+            # Projected post-TTT: 1.07781 - 0.01249 = 1.06532, decisive beat
+            # of #1736 (1.06610) if 017's pre-quant advantage holds.
+            # dtype=bfloat16: matches activation dtype, no cast kernel at blend.
+            self.recur_alpha = nn.Parameter(
+                torch.ones(h.num_loops, num_looped, dtype=torch.bfloat16),
+                requires_grad=True,
             )
-            assert _recur_alpha_017_endpoint.shape == (h.num_loops, num_looped), (
-                f"017 endpoint table shape {_recur_alpha_017_endpoint.shape} "
-                f"!= (num_loops={h.num_loops}, num_looped={num_looped})"
-            )
-            # register_buffer rather than nn.Parameter(requires_grad=False):
-            # idiomatic PyTorch for a frozen tensor that isn't optimized.
-            # Spec 021f tests whether container choice (buffer vs Parameter)
-            # matters once the TTT α fix and algebraic blend form are in place.
-            # Prior 4H mini showed no difference between buffer and Parameter
-            # containers — this confirms at 8H.
-            self.register_buffer("recur_alpha", _recur_alpha_017_endpoint)
             # Precompute alpha_info lists: parallel to encoder_indices and
             # decoder_indices, indicating (pass_offset, local_idx) or None for
             # each position. Pass counts span encoder + decoder (sequential).
