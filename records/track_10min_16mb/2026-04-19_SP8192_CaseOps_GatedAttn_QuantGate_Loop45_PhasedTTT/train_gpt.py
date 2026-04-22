@@ -86,6 +86,8 @@ class Hyperparameters:
     ttt_mlp_lora = bool(int(os.environ.get("TTT_MLP_LORA", "1")))
     ttt_o_lora = bool(int(os.environ.get("TTT_O_LORA", "1")))
     ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "adam")
+    ttt_alpha_beta_enabled = bool(int(os.environ.get("TTT_ALPHA_BETA_ENABLED", "0")))
+    ttt_alpha_beta_lr_scale = float(os.environ.get("TTT_ALPHA_BETA_LR_SCALE", 0.25))
     ttt_eval_batches = os.environ.get("TTT_EVAL_BATCHES", "")
     val_doc_fraction = float(os.environ.get("VAL_DOC_FRACTION", 1.0))
     compressor = os.environ.get("COMPRESSOR", "brotli")
@@ -3010,15 +3012,73 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         h.ttt_batch_size, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
         k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
     ).to(device)
+    alpha_beta_tensors = []
+    alpha_beta_names = []
+    if h.ttt_alpha_beta_enabled and getattr(base_model, "recur_alpha_enabled", False):
+        if getattr(base_model, "recur_alpha", None) is not None:
+            alpha_beta_tensors.append(base_model.recur_alpha)
+            alpha_beta_names.append("recur_alpha")
+        if getattr(base_model, "recur_beta", None) is not None:
+            alpha_beta_tensors.append(base_model.recur_beta)
+            alpha_beta_names.append("recur_beta")
+    alpha_beta_before = []
+    if alpha_beta_tensors:
+        for t in alpha_beta_tensors:
+            t.requires_grad_(True)
+            alpha_beta_before.append(t.detach().float().cpu().clone())
+        log(
+            f"ttt_alpha_beta: enabled=1 names={alpha_beta_names} "
+            f"lr_scale={h.ttt_alpha_beta_lr_scale}"
+        )
+        if getattr(base_model, "recur_beta", None) is not None:
+            log(
+                f"ttt_alpha_beta: before_beta={base_model.recur_beta.detach().float().cpu().tolist()}"
+            )
+        if getattr(base_model, "recur_alpha", None) is not None:
+            log(
+                f"ttt_alpha_beta: before_alpha={base_model.recur_alpha.detach().float().cpu().tolist()}"
+            )
+    else:
+        log(f"ttt_alpha_beta: enabled=0")
 
-    def _build_opt(lora):
+    def _build_opt(lora, include_alpha_beta=True):
+        alpha_beta_lr = h.ttt_lora_lr * h.ttt_alpha_beta_lr_scale
         if h.ttt_optimizer == "sgd":
+            param_groups = [
+                {
+                    "params": list(lora.parameters()),
+                    "lr": h.ttt_lora_lr,
+                }
+            ]
+            if include_alpha_beta and alpha_beta_tensors:
+                param_groups.append(
+                    {
+                        "params": alpha_beta_tensors,
+                        "lr": alpha_beta_lr,
+                    }
+                )
             return torch.optim.SGD(
-                lora.parameters(), lr=h.ttt_lora_lr,
-                momentum=h.ttt_beta1, weight_decay=h.ttt_weight_decay,
+                param_groups,
+                lr=h.ttt_lora_lr,
+                momentum=h.ttt_beta1,
+                weight_decay=h.ttt_weight_decay,
+            )
+        param_groups = [
+            {
+                "params": list(lora.parameters()),
+                "lr": h.ttt_lora_lr,
+            }
+        ]
+        if include_alpha_beta and alpha_beta_tensors:
+            param_groups.append(
+                {
+                    "params": alpha_beta_tensors,
+                    "lr": alpha_beta_lr,
+                }
             )
         return torch.optim.AdamW(
-            lora.parameters(), lr=h.ttt_lora_lr,
+            param_groups,
+            lr=h.ttt_lora_lr,
             betas=(h.ttt_beta1, h.ttt_beta2),
             eps=1e-10, weight_decay=h.ttt_weight_decay, fused=True,
         )
@@ -3245,8 +3305,29 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(byte_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
+    if alpha_beta_tensors:
+        alpha_beta_after = [t.detach().float().cpu() for t in alpha_beta_tensors]
+        drift_parts = []
+        for name, before, after in zip(
+            alpha_beta_names, alpha_beta_before, alpha_beta_after, strict=True
+        ):
+            drift_parts.append(
+                f"{name}_max_drift={float((after - before).abs().max().item()):.6f}"
+            )
+        drift_str = " ".join(drift_parts)
+        if getattr(base_model, "recur_beta", None) is not None:
+            log(
+                f"ttt_alpha_beta: after_beta={base_model.recur_beta.detach().float().cpu().tolist()}"
+            )
+        if getattr(base_model, "recur_alpha", None) is not None:
+            log(
+                f"ttt_alpha_beta: after_alpha={base_model.recur_alpha.detach().float().cpu().tolist()}"
+            )
+        log(f"ttt_alpha_beta: {drift_str}")
     for p in base_model.parameters():
         p.requires_grad_(True)
+    for t in alpha_beta_tensors:
+        t.requires_grad_(False)
     base_model.train()
     return _loss_bpb_from_sums(loss_sum, token_count, byte_sum)
 
@@ -3617,14 +3698,7 @@ def train_and_eval(h, device):
                 bsz, ttt_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
             ).to(device)
-            wo = torch.optim.AdamW(
-                wl.parameters(),
-                lr=h.ttt_lora_lr,
-                betas=(h.ttt_beta1, h.ttt_beta2),
-                eps=1e-10,
-                weight_decay=h.ttt_weight_decay,
-                fused=True,
-            )
+            wo = _build_opt(wl, include_alpha_beta=False)
             for ctx_len in (h.ttt_chunk_size, h.ttt_eval_seq_len):
                 xw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
                 yw = torch.randint(0, h.vocab_size, (bsz, ctx_len), device=device, dtype=torch.int64)
