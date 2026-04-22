@@ -1047,17 +1047,21 @@ class GPT(nn.Module):
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
             self.num_looped = num_looped
-            # Spec 024c: cross-layer carry blend, per-pass parameterization.
-            # beta[pass_off, i] scales x_new at pass pass_off of layer i.
-            # alpha[pass_off, i, j] scales detached pass-1 output of layer j at pass pass_off of layer i.
-            # Init: beta=1, alpha=0 — identical to baseline at start.
-            self.recur_beta = nn.Parameter(
-                torch.ones(h.num_loops, num_looped, dtype=torch.float32),
-                requires_grad=True,
+            # Spec 025b: cross-layer carry blend, frozen at 024b converged values.
+            # beta[i] scales x_new; alpha[i,j] scales detached pass-1 output of layer j.
+            # Values hardcoded from 024b seed_42 final log (shared across passes).
+            self.register_buffer(
+                "recur_beta",
+                torch.tensor([1.5973426, 1.8826205, 1.9906198], dtype=torch.float32),
             )
-            self.recur_alpha = nn.Parameter(
-                torch.zeros(h.num_loops, num_looped, num_looped, dtype=torch.float32),
-                requires_grad=True,
+            self.register_buffer(
+                "recur_alpha",
+                torch.tensor(
+                    [[0.251953125, -0.02099609375, -0.01239013671875],
+                     [0.06689453125, -0.34765625, 0.0031280517578125],
+                     [0.138671875, 0.2412109375, 0.0272216796875]],
+                    dtype=torch.float32,
+                ),
             )
             # Precompute alpha_info lists: parallel to encoder_indices and
             # decoder_indices, indicating (pass_offset, local_idx) or None for
@@ -1209,10 +1213,10 @@ class GPT(nn.Module):
             x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                beta = self.recur_beta[pass_off, local_idx].to(x_new.dtype)
+                beta = self.recur_beta[local_idx].to(x_new.dtype)
                 x = beta * x_new
                 for j in range(self.num_looped):
-                    x = x + self.recur_alpha[pass_off, local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+                    x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
                 # Diagnostic: p2p cosine similarity on block deltas (optional).
                 if self.recur_diag_p2p_cos:
                     delta_this = (x_new - x_before).detach()
@@ -1273,10 +1277,10 @@ class GPT(nn.Module):
                 x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    beta = self.recur_beta[pass_off, local_idx].to(x_new.dtype)
+                    beta = self.recur_beta[local_idx].to(x_new.dtype)
                     x = beta * x_new
                     for j in range(self.num_looped):
-                        x = x + self.recur_alpha[pass_off, local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+                        x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
                     if self.recur_diag_p2p_cos:
                         delta_this = (x_new - x_before).detach()
                         prev = self._diag_prev_deltas.get(i, None)
@@ -1353,10 +1357,10 @@ class GPT(nn.Module):
             x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                beta = self.recur_beta[pass_off, local_idx].to(x_new.dtype)
+                beta = self.recur_beta[local_idx].to(x_new.dtype)
                 x = beta * x_new
                 for j in range(self.num_looped):
-                    x = x + self.recur_alpha[pass_off, local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+                    x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
             else:
                 x = x_new
                 if carry is not None and self.loop_start <= i <= self.loop_end:
@@ -1404,10 +1408,10 @@ class GPT(nn.Module):
                 x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    beta = self.recur_beta[pass_off, local_idx].to(x_new.dtype)
+                    beta = self.recur_beta[local_idx].to(x_new.dtype)
                     x = beta * x_new
                     for j in range(self.num_looped):
-                        x = x + self.recur_alpha[pass_off, local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+                        x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
                 else:
                     x = x_new
                     if carry is not None and self.loop_start <= i <= self.loop_end:
@@ -3273,13 +3277,7 @@ def train_model(h, device, val_data):
         # zero_grad_all(); reading recur_alpha.grad after step() always sees None/0.
         # Spec 015 hit this bug — cosmetic (α values moved fine) but the logged
         # grad_norm was unusable as a plumbing-check signal.
-        alpha_grad_norm = None
-        ra = getattr(base_model, "recur_alpha", None)
-        rb = getattr(base_model, "recur_beta", None)
-        if ra is not None and ra.grad is not None:
-            alpha_grad_norm = ra.grad.norm().item()
-        if rb is not None and rb.grad is not None:
-            alpha_grad_norm = (alpha_grad_norm or 0.0) + rb.grad.norm().item()
+        alpha_grad_norm = None  # Spec 025b: recur_beta/recur_alpha are frozen buffers
         optimizers.step(distributed=h.distributed)
         return train_loss, alpha_grad_norm
 
