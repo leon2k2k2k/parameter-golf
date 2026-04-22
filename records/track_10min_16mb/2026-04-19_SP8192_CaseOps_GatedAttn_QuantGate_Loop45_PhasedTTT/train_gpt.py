@@ -1099,12 +1099,40 @@ class GPT(nn.Module):
                     self._decoder_alpha_info.append((pi - 1, idx - self.loop_start))
                 else:
                     self._decoder_alpha_info.append(None)
+            # Depth curriculum: _dec_idx_intermediate is NOT a prefix of
+            # decoder_indices (enc/dec split shifts with one fewer loop pass),
+            # so _decoder_alpha_info indexed by dec_int step_idx is misaligned.
+            # Build separate alpha_info lists from the intermediate sequences.
+            if (h.loop_depth_upgrade_at > 0 and h.num_loops >= 2
+                    and hasattr(self, '_enc_idx_intermediate')):
+                visits_int = {}
+                self._encoder_alpha_info_int = []
+                for idx in self._enc_idx_intermediate:
+                    pi = visits_int.get(idx, 0)
+                    visits_int[idx] = pi + 1
+                    if self.loop_start <= idx <= self.loop_end and pi > 0:
+                        self._encoder_alpha_info_int.append((pi - 1, idx - self.loop_start))
+                    else:
+                        self._encoder_alpha_info_int.append(None)
+                self._decoder_alpha_info_int = []
+                for idx in self._dec_idx_intermediate:
+                    pi = visits_int.get(idx, 0)
+                    visits_int[idx] = pi + 1
+                    if self.loop_start <= idx <= self.loop_end and pi > 0:
+                        self._decoder_alpha_info_int.append((pi - 1, idx - self.loop_start))
+                    else:
+                        self._decoder_alpha_info_int.append(None)
+            else:
+                self._encoder_alpha_info_int = None
+                self._decoder_alpha_info_int = None
         else:
             self.recur_beta = None
             self.recur_alpha = None
             self.num_looped = 0
             self._encoder_alpha_info = None
             self._decoder_alpha_info = None
+            self._encoder_alpha_info_int = None
+            self._decoder_alpha_info_int = None
         # Diagnostic buffers for p2p cosine. Updated in forward, read by logger.
         # Detached values only; no backprop through these.
         if self.recur_diag_p2p_cos:
@@ -1217,11 +1245,16 @@ class GPT(nn.Module):
             )
         # Spec 015: use precomputed alpha_info only when Recur-Alpha enabled AND
         # looping is active. When inactive, behavior is byte-identical to baseline.
-        enc_alpha_info = (
-            self._encoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
-            else None
-        )
+        # Spec 029: during depth curriculum (looping_depth < _num_loops), use
+        # the intermediate-sequence alpha_info to avoid misalignment.
+        if self.recur_alpha is not None and self.looping_active:
+            if (self.looping_depth < self._num_loops
+                    and self._encoder_alpha_info_int is not None):
+                enc_alpha_info = self._encoder_alpha_info_int
+            else:
+                enc_alpha_info = self._encoder_alpha_info
+        else:
+            enc_alpha_info = None
         carry = {} if enc_alpha_info is not None else None
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
@@ -1255,11 +1288,14 @@ class GPT(nn.Module):
         lane1 = None
         # Spec 015: alpha_info for decoder; shares visit-count state with encoder
         # (see __init__ precompute). None when Recur-Alpha disabled or looping inactive.
-        dec_alpha_info = (
-            self._decoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
-            else None
-        )
+        if self.recur_alpha is not None and self.looping_active:
+            if (self.looping_depth < self._num_loops
+                    and self._decoder_alpha_info_int is not None):
+                dec_alpha_info = self._decoder_alpha_info_int
+            else:
+                dec_alpha_info = self._decoder_alpha_info
+        else:
+            dec_alpha_info = None
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
@@ -3335,6 +3371,10 @@ def train_model(h, device, val_data):
         if h.num_loops > 0:
             base_model.looping_active = True
             _run_cu_bucket_warmup()
+            if h.loop_depth_upgrade_at > 0 and h.num_loops >= 2:
+                base_model.looping_depth = h.num_loops  # pre-warm full-depth state
+                _run_cu_bucket_warmup()
+                base_model.looping_depth = h.num_loops - 1  # reset to curriculum start
             base_model.looping_active = False
         for warmup_step in range(h.warmup_steps):
             step_fn(warmup_step, 1.0)
@@ -3357,6 +3397,18 @@ def train_model(h, device, val_data):
                     or warmup_step + 1 == h.warmup_steps
                 ):
                     log(f"loop_warmup_step: {warmup_step+1}/{h.warmup_steps}")
+            if h.loop_depth_upgrade_at > 0 and h.num_loops >= 2:
+                base_model.looping_depth = h.num_loops  # pre-warm full-depth state
+                log(f"loop_warmup:depth_upgraded looping_depth:{h.num_loops + 1}")
+                for warmup_step in range(h.warmup_steps):
+                    step_fn(warmup_step, 1.0)
+                    if (
+                        warmup_step <= 5
+                        or (warmup_step + 1) % 10 == 0
+                        or warmup_step + 1 == h.warmup_steps
+                    ):
+                        log(f"loop_depth_warmup_step: {warmup_step+1}/{h.warmup_steps}")
+                base_model.looping_depth = h.num_loops - 1  # reset to curriculum start
             base_model.looping_active = False
         base_model.load_state_dict(initial_model_state, strict=True)
         for (opt, state) in zip(optimizers, initial_optimizer_states, strict=True):
