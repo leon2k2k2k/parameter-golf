@@ -4,7 +4,7 @@
 **Created:** 2026-04-23
 **Status:** READY
 **Branch:** `exp/033b-ttt-adapt-alpha-beta-high-lr`
-**Commit:** `<PINNED_COMMIT>`
+**Commit:** `250e06a`
 **Links to:** `research/ideas/033b-ttt-adapt-alpha-beta-high-lr.md`, `research/specs/033-ttt-adapt-alpha-beta.md`, `research/specs/028-ttt-only-026-seed42.md`, `research/specs/026-cross-layer-carry-frozen-8xh.md`
 
 ## Hypothesis
