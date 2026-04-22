@@ -46,6 +46,7 @@ class Hyperparameters:
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
+    loop_depth_upgrade_at = float(os.environ.get("LOOP_DEPTH_UPGRADE_AT", 0.0))
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
@@ -72,6 +73,7 @@ class Hyperparameters:
     ema_decay = float(os.environ.get("EMA_DECAY", 0.9965))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 96))
+    ttt_lora_alpha = int(os.environ.get("TTT_LORA_ALPHA", 96))
     ttt_lora_lr = float(os.environ.get("TTT_LORA_LR", 0.0001))
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 48))
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 2048))
@@ -995,6 +997,7 @@ class GPT(nn.Module):
             for i in range(max(0, h.num_layers - h.xsa_last_n), h.num_layers):
                 self.blocks[i].attn.use_xsa = True
         self.looping_active = False
+        self._num_loops = h.num_loops
         if h.num_loops > 0:
             loop_seg = list(range(h.loop_start, h.loop_end + 1))
             all_indices = list(range(h.loop_start))
@@ -1004,9 +1007,22 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            # depth curriculum: precompute intermediate (num_loops-1) indices for phase 2
+            if h.loop_depth_upgrade_at > 0 and h.num_loops >= 2:
+                all_int = list(range(h.loop_start))
+                for _ in range(h.num_loops):  # num_loops-1+1 passes = num_loops passes
+                    all_int.extend(loop_seg)
+                all_int.extend(range(h.loop_end + 1, h.num_layers))
+                num_enc_int = len(all_int) // 2
+                self._enc_idx_intermediate = all_int[:num_enc_int]
+                self._dec_idx_intermediate = all_int[num_enc_int:]
+                self.looping_depth = h.num_loops - 1  # start at intermediate after activation
+            else:
+                self.looping_depth = h.num_loops
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.looping_depth = 0
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1186,19 +1202,19 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips = []
-        enc_iter = (
-            self.encoder_indices
-            if self.looping_active
-            else range(self.num_encoder_layers)
-        )
-        dec_iter = (
-            self.decoder_indices
-            if self.looping_active
-            else range(
+        if self.looping_active:
+            if self.looping_depth < self._num_loops and hasattr(self, '_enc_idx_intermediate'):
+                enc_iter = self._enc_idx_intermediate
+                dec_iter = self._dec_idx_intermediate
+            else:
+                enc_iter = self.encoder_indices
+                dec_iter = self.decoder_indices
+        else:
+            enc_iter = range(self.num_encoder_layers)
+            dec_iter = range(
                 self.num_encoder_layers,
                 self.num_encoder_layers + self.num_decoder_layers,
             )
-        )
         # Spec 015: use precomputed alpha_info only when Recur-Alpha enabled AND
         # looping is active. When inactive, behavior is byte-identical to baseline.
         enc_alpha_info = (
@@ -1562,9 +1578,10 @@ class GPT(nn.Module):
 
 
 class BatchedLinearLoRA(nn.Module):
-    def __init__(self, bsz, in_features, out_features, rank):
+    def __init__(self, bsz, in_features, out_features, rank, alpha=96):
         super().__init__()
         self._bound = 1.0 / math.sqrt(in_features)
+        self._scale = alpha / rank
         self.A = nn.Parameter(
             torch.empty(bsz, rank, in_features).uniform_(-self._bound, self._bound)
         )
@@ -1572,15 +1589,16 @@ class BatchedLinearLoRA(nn.Module):
 
     def reset(self):
         with torch.no_grad():
-            self.A.uniform_(-self._bound, self._bound)
+            # warm-start A: keep accumulated feature directions; only zero B so
+            # LoRA output = 0 at each batch start (per-document reset preserved)
             self.B.zero_()
 
     def forward(self, x):
-        return (x @ self.A.transpose(1, 2)) @ self.B.transpose(1, 2)
+        return (x @ self.A.transpose(1, 2)) @ self.B.transpose(1, 2) * self._scale
 
 
 class BatchedTTTLoRA(nn.Module):
-    def __init__(self, bsz, model, rank, k_lora=True, mlp_lora=True, o_lora=True):
+    def __init__(self, bsz, model, rank, alpha=96, k_lora=True, mlp_lora=True, o_lora=True):
         super().__init__()
         self.bsz = bsz
         dim = model.qo_bank.shape[-1]
@@ -1593,30 +1611,30 @@ class BatchedTTTLoRA(nn.Module):
             dim // model.blocks[0].attn.num_heads
         )
         embed_dim = model.tok_emb.embedding_dim
-        self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank)
+        self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank, alpha)
         self.q_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
         )
         self.v_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, kv_dim, rank, alpha) for _ in range(num_slots)]
         )
         self.k_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, kv_dim, rank, alpha) for _ in range(num_slots)]
             )
             if k_lora
             else None
         )
         self.mlp_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
             )
             if mlp_lora
             else None
         )
         self.o_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
             )
             if o_lora
             else None
@@ -2953,7 +2971,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     t_start = time.perf_counter()
     reusable_lora = BatchedTTTLoRA(
-        h.ttt_batch_size, base_model, h.ttt_lora_rank,
+        h.ttt_batch_size, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
         k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
     ).to(device)
 
@@ -2995,7 +3013,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
             cur_opt = reusable_opt
         else:
             cur_lora = BatchedTTTLoRA(
-                bsz, base_model, h.ttt_lora_rank,
+                bsz, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
             ).to(device)
             cur_opt = _build_opt(cur_lora)
@@ -3391,7 +3409,17 @@ def train_model(h, device, val_data):
         ):
             base_model.looping_active = True
             log(
-                f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
+                f"layer_loop:enabled step:{step} frac:{frac:.3f} depth:{base_model.looping_depth + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
+            )
+        if (
+            h.loop_depth_upgrade_at > 0
+            and base_model.looping_active
+            and base_model.looping_depth < h.num_loops
+            and frac >= h.loop_depth_upgrade_at
+        ):
+            base_model.looping_depth = h.num_loops
+            log(
+                f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
         train_loss, alpha_grad_norm = step_fn(step, scale)
         with torch.no_grad():
@@ -3478,6 +3506,7 @@ def train_and_eval(h, device):
     eval_model = deserialize(h, device)
     if h.num_loops > 0:
         eval_model.looping_active = True
+        eval_model.looping_depth = h.num_loops  # always full depth at eval/TTT
     compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
     compiled_forward_logits = torch.compile(
         eval_model.forward_logits, dynamic=False, fullgraph=True
@@ -3498,6 +3527,7 @@ def train_and_eval(h, device):
         ttt_model = deserialize(h, device)
         if h.num_loops > 0:
             ttt_model.looping_active = True
+            ttt_model.looping_depth = h.num_loops  # always full depth at TTT
         for p in ttt_model.parameters():
             p.requires_grad_(False)
 
@@ -3532,7 +3562,7 @@ def train_and_eval(h, device):
         warmup_bszes = [h.ttt_batch_size]
         for bsz in warmup_bszes:
             wl = BatchedTTTLoRA(
-                bsz, ttt_model, h.ttt_lora_rank,
+                bsz, ttt_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
             ).to(device)
             wo = torch.optim.AdamW(
