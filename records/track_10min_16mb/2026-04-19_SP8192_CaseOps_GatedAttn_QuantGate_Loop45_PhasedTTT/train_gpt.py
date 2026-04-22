@@ -1046,18 +1046,19 @@ class GPT(nn.Module):
         self.loop_end = h.loop_end
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
-            # Spec 021g: learnable Parameter α, init=1.0, matching 017's recipe.
-            # 017's pre-quant was 1.06861 — best of any 8H run — because weights
-            # and α co-evolve during training. Frozen-α variants (019b, 021a-f)
-            # top out at ~1.0694 pre-quant. This variant combines 017's
-            # learnable-α co-evolution with the 021e stack's TTT α fix (which
-            # 017 was missing → TTT delta was only -0.01048 vs 019b's -0.01249)
-            # and algebraic blend form.
-            # Projected post-TTT: 1.07781 - 0.01249 = 1.06532, decisive beat
-            # of #1736 (1.06610) if 017's pre-quant advantage holds.
-            # dtype=bfloat16: matches activation dtype, no cast kernel at blend.
+            # Spec 021h: learnable Parameter α in fp32 (matching 017's recipe
+            # exactly). 021g used bf16 α and saw per-step train loss +0.007
+            # above 017 at matched steps, with α converging to a slightly
+            # different basin (e.g. pass-2 L5 landed at 1.383 vs 017's 1.430).
+            # Likely cause: bf16's precision at α≈1.0 (LSB=1/128=0.0078125)
+            # is 100-1000× larger than AdamW's per-step update (~1e-4 to 1e-5),
+            # causing small-update rounding that traps α on a coarser grid.
+            # fp32 restores update precision to 2⁻²³ ≈ 1.2e-7, well below any
+            # optimizer step. α can freely navigate to 017's basin.
+            # Cost: scalar .to(x_new.dtype) cast at blend sites (near-free
+            # for 6 scalar values).
             self.recur_alpha = nn.Parameter(
-                torch.ones(h.num_loops, num_looped, dtype=torch.bfloat16),
+                torch.ones(h.num_loops, num_looped, dtype=torch.float32),
                 requires_grad=True,
             )
             # Precompute alpha_info lists: parallel to encoder_indices and
@@ -1207,7 +1208,7 @@ class GPT(nn.Module):
             x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx]
+                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
                 x = x_before + alpha * (x_new - x_before)
                 # Diagnostic: p2p cosine similarity on block deltas (optional).
                 if self.recur_diag_p2p_cos:
@@ -1268,7 +1269,7 @@ class GPT(nn.Module):
                 x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx]
+                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
                     x = x_before + alpha * (x_new - x_before)
                     if self.recur_diag_p2p_cos:
                         delta_this = (x_new - x_before).detach()
@@ -1343,7 +1344,7 @@ class GPT(nn.Module):
             x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx]
+                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
                 x = x_before + alpha * (x_new - x_before)
             else:
                 x = x_new
@@ -1390,7 +1391,7 @@ class GPT(nn.Module):
                 x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx]
+                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
                     x = x_before + alpha * (x_new - x_before)
                 else:
                     x = x_new
