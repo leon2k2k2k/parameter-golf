@@ -1067,15 +1067,13 @@ class GPT(nn.Module):
                 f"017 endpoint table shape {_recur_alpha_017_endpoint.shape} "
                 f"!= (num_loops={h.num_loops}, num_looped={num_looped})"
             )
-            # nn.Parameter(requires_grad=False) rather than register_buffer:
-            # torch.compile / Inductor may treat nn.Parameter tensors as more
-            # const-fold-friendly than buffers (parameters change slowly;
-            # buffers are treated as potentially-mutable runtime inputs).
-            # Testing whether this closes the residual post-loop train-loss
-            # gap vs 019b that bf16-only couldn't.
-            self.recur_alpha = nn.Parameter(
-                _recur_alpha_017_endpoint, requires_grad=False
-            )
+            # register_buffer rather than nn.Parameter(requires_grad=False):
+            # idiomatic PyTorch for a frozen tensor that isn't optimized.
+            # Spec 021f tests whether container choice (buffer vs Parameter)
+            # matters once the TTT α fix and algebraic blend form are in place.
+            # Prior 4H mini showed no difference between buffer and Parameter
+            # containers — this confirms at 8H.
+            self.register_buffer("recur_alpha", _recur_alpha_017_endpoint)
             # Precompute alpha_info lists: parallel to encoder_indices and
             # decoder_indices, indicating (pass_offset, local_idx) or None for
             # each position. Pass counts span encoder + decoder (sequential).
