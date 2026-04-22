@@ -4,7 +4,7 @@
 **Created:** 2026-04-23
 **Status:** READY
 **Branch:** `exp/033-ttt-adapt-alpha-beta`
-**Commit:** `TBD`
+**Commit:** `3513aac`
 **Links to:** `research/ideas/033-ttt-adapt-alpha-beta.md`, `research/specs/028-ttt-only-026-seed42.md`, `research/specs/026-cross-layer-carry-frozen-8xh.md`
 
 ## Hypothesis
@@ -113,7 +113,7 @@ python -c "import brotli"
 
 cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
 git fetch fork
-git checkout <PINNED_COMMIT>
+git checkout 3513aac
 
 # Sanity verify
 grep -n "TTT_ALPHA_BETA_ENABLED" train_gpt.py
