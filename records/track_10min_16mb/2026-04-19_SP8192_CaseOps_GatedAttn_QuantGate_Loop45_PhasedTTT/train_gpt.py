@@ -3041,6 +3041,27 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
     else:
         log(f"ttt_alpha_beta: enabled=0")
 
+    def _log_alpha_beta_snapshot(prefix):
+        if not alpha_beta_tensors:
+            return
+        alpha_beta_now = [t.detach().float().cpu() for t in alpha_beta_tensors]
+        drift_parts = []
+        for name, before, now in zip(
+            alpha_beta_names, alpha_beta_before, alpha_beta_now, strict=True
+        ):
+            drift_parts.append(
+                f"{name}_max_drift={float((now - before).abs().max().item()):.6f}"
+            )
+        if getattr(base_model, "recur_beta", None) is not None:
+            log(
+                f"ttt_alpha_beta: {prefix}_beta={base_model.recur_beta.detach().float().cpu().tolist()}"
+            )
+        if getattr(base_model, "recur_alpha", None) is not None:
+            log(
+                f"ttt_alpha_beta: {prefix}_alpha={base_model.recur_alpha.detach().float().cpu().tolist()}"
+            )
+        log(f"ttt_alpha_beta: {prefix} {' '.join(drift_parts)}")
+
     def _build_opt(lora, include_alpha_beta=True):
         alpha_beta_lr = h.ttt_lora_lr * h.ttt_alpha_beta_lr_scale
         if h.ttt_optimizer == "sgd":
@@ -3225,6 +3246,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
                 f"rl:{r_loss:.4f} rb:{r_bpb:.4f} dl:{min(doc_lens)}-{max(doc_lens)} "
                 f"gd:{int(global_ttt_done)}"
             )
+            _log_alpha_beta_snapshot(f"live_b{batch_num}")
         if not global_ttt_done:
             local_scored_docs.extend(
                 (orig_batch_idx, pos, doc_start, doc_len)
@@ -3306,24 +3328,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         dist.all_reduce(byte_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
     if alpha_beta_tensors:
-        alpha_beta_after = [t.detach().float().cpu() for t in alpha_beta_tensors]
-        drift_parts = []
-        for name, before, after in zip(
-            alpha_beta_names, alpha_beta_before, alpha_beta_after, strict=True
-        ):
-            drift_parts.append(
-                f"{name}_max_drift={float((after - before).abs().max().item()):.6f}"
-            )
-        drift_str = " ".join(drift_parts)
-        if getattr(base_model, "recur_beta", None) is not None:
-            log(
-                f"ttt_alpha_beta: after_beta={base_model.recur_beta.detach().float().cpu().tolist()}"
-            )
-        if getattr(base_model, "recur_alpha", None) is not None:
-            log(
-                f"ttt_alpha_beta: after_alpha={base_model.recur_alpha.detach().float().cpu().tolist()}"
-            )
-        log(f"ttt_alpha_beta: {drift_str}")
+        _log_alpha_beta_snapshot("after")
     for p in base_model.parameters():
         p.requires_grad_(True)
     for t in alpha_beta_tensors:

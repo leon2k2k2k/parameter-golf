@@ -4,7 +4,7 @@
 **Created:** 2026-04-23
 **Status:** READY
 **Branch:** `exp/033b-ttt-adapt-alpha-beta-high-lr`
-**Commit:** `3513aac`
+**Commit:** `<PINNED_COMMIT>`
 **Links to:** `research/ideas/033b-ttt-adapt-alpha-beta-high-lr.md`, `research/specs/033-ttt-adapt-alpha-beta.md`, `research/specs/028-ttt-only-026-seed42.md`, `research/specs/026-cross-layer-carry-frozen-8xh.md`
 
 ## Hypothesis
@@ -142,9 +142,13 @@ The run must log:
 - `ttt_alpha_beta: enabled=1 ...`
 - `ttt_alpha_beta: before_beta=...`
 - `ttt_alpha_beta: before_alpha=...`
+- periodic live snapshots during phased TTT, for example:
+  - `ttt_alpha_beta: live_b17_beta=...`
+  - `ttt_alpha_beta: live_b17_alpha=...`
+  - `ttt_alpha_beta: live_b17 recur_alpha_max_drift=... recur_beta_max_drift=...`
 - `ttt_alpha_beta: after_beta=...`
 - `ttt_alpha_beta: after_alpha=...`
-- `ttt_alpha_beta: recur_alpha_max_drift=... recur_beta_max_drift=...`
+- `ttt_alpha_beta: after recur_alpha_max_drift=... recur_beta_max_drift=...`
 
 ## Hotstart validation contract
 
@@ -173,6 +177,6 @@ Same class as `033`: one 4×H TTT-only run, low single-digit dollars.
 Execution should validate:
 
 - checkpoint path exists
-- commit `3513aac` contains the patched alpha/beta TTT path
+- pinned commit contains the patched alpha/beta TTT path and live alpha/beta logging
 - data root is `/workspace/parameter-golf/data`
 - `spinquant_hotstart.py` is the entrypoint being launched
