@@ -1450,7 +1450,7 @@ class GPT(nn.Module):
             return lane0
         return 0.5 * (lane0 + lane1)
 
-    def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0):
+    def _forward_hidden(self, input_ids, cu_seqlens=None, max_seqlen=0):
         x = self.tok_emb(input_ids)
         # SmearGate (PR #1667). Inline gate compute with .contiguous() on the slice fed
         # to the projection so torch.compile fullgraph is happy. lam=0 + W=0 -> identity
@@ -1584,11 +1584,18 @@ class GPT(nn.Module):
                         self._diag_prev_deltas[i] = (x_new - x_before).detach()
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
-        x = self.final_norm(x)
+        return self.final_norm(x)
+
+    def _project_logits(self, hidden):
         if self.tie_embeddings:
-            logits_proj = F.linear(x, self.tok_emb.weight)
-        else:
-            logits_proj = self.lm_head(x)
+            return F.linear(hidden, self.tok_emb.weight)
+        return self.lm_head(hidden)
+
+    def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0):
+        hidden = self._forward_hidden(
+            input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+        )
+        logits_proj = self._project_logits(hidden)
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
 
     def forward(self, input_ids, target_ids, cu_seqlens=None, max_seqlen=0):
