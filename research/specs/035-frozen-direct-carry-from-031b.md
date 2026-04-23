@@ -4,7 +4,7 @@
 **Created:** 2026-04-23
 **Status:** READY
 **Branch:** `exp/035-frozen-direct-carry-from-031b`
-**Commit:** `TBD`
+**Commit:** `4919e3b`
 **Links to:** `research/ideas/035-frozen-direct-carry-from-031b.md`, `research/specs/031-direct-carry-freefloat-neutral.md`, `research/specs/034-frozen-direct-carry-from-031a.md`
 
 ## Hypothesis
@@ -128,7 +128,7 @@ python -c "import brotli"
 
 cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
 git fetch fork
-git checkout <PINNED_COMMIT>
+git checkout 4919e3b
 
 # Sanity verify
 grep -n "frozen_edge_self_carrygate" train_gpt.py
