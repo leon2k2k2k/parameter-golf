@@ -343,6 +343,9 @@ class Hyperparameters:
     # "attn_gate" so CONTROL_TENSOR_NAME_PATTERNS routes it to scalar AdamW.
     gated_attn_enabled = bool(int(os.environ.get("GATED_ATTN_ENABLED", "0")))
     gated_attn_init_std = float(os.environ.get("GATED_ATTN_INIT_STD", 0.01))
+    sparse_attn_gate_enabled = bool(int(os.environ.get("SPARSE_ATTN_GATE_ENABLED", "0")))
+    sparse_attn_gate_init_std = float(os.environ.get("SPARSE_ATTN_GATE_INIT_STD", 0.0))
+    sparse_attn_gate_scale = float(os.environ.get("SPARSE_ATTN_GATE_SCALE", 1.0))
     # Dedicated int8-per-row quantization for `attn_gate_w` tensors. These are
     # small ((num_heads, dim) = (8, 512) = 4096 params) and bypass GPTQ via the
     # numel<=65536 passthrough branch -> stored as fp16 (8 KB/layer, ~65 KB total
@@ -955,12 +958,17 @@ class CausalSelfAttention(nn.Module):
         self, dim, num_heads, num_kv_heads, rope_base, qk_gain_init, train_seq_len, yarn=True,
         attn_out_gate=False, attn_out_gate_src="proj", gate_window=12,
         gated_attn=False, gated_attn_init_std=0.01,
+        sparse_attn_gate=False, sparse_attn_gate_init_std=0.0, sparse_attn_gate_scale=1.0,
     ):
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("model_dim must be divisible by num_heads")
         if num_heads % num_kv_heads != 0:
             raise ValueError("num_heads must be divisible by num_kv_heads")
+        if int(attn_out_gate) + int(gated_attn) + int(sparse_attn_gate) > 1:
+            raise ValueError(
+                "attn_out_gate, gated_attn, and sparse_attn_gate are mutually exclusive"
+            )
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = dim // num_heads
@@ -991,6 +999,15 @@ class CausalSelfAttention(nn.Module):
         if gated_attn:
             W = torch.empty(num_heads, dim, dtype=torch.float32)
             nn.init.normal_(W, mean=0.0, std=gated_attn_init_std)
+            self.attn_gate_w = nn.Parameter(W)
+        self.sparse_attn_gate = sparse_attn_gate
+        self.sparse_attn_gate_scale = sparse_attn_gate_scale
+        if sparse_attn_gate:
+            W = torch.empty(num_heads, gate_window, dtype=torch.float32)
+            if sparse_attn_gate_init_std > 0:
+                nn.init.normal_(W, mean=0.0, std=sparse_attn_gate_init_std)
+            else:
+                nn.init.zeros_(W)
             self.attn_gate_w = nn.Parameter(W)
 
     def _xsa_efficient(self, y, v):
@@ -1056,6 +1073,13 @@ class CausalSelfAttention(nn.Module):
         if self.gated_attn:
             x_c = x.contiguous()
             g = torch.sigmoid(F.linear(x_c, self.attn_gate_w.to(x.dtype)))
+            y = y * g[..., None]
+        if self.sparse_attn_gate:
+            gate_in = x[..., : self.gate_window].contiguous()
+            g = torch.sigmoid(
+                self.sparse_attn_gate_scale
+                * F.linear(gate_in, self.attn_gate_w.to(x.dtype))
+            )
             y = y * g[..., None]
         y = y.reshape(bsz, seqlen, dim)
         self._last_proj_input = y.detach() if getattr(self, "_calib", False) else None
@@ -1177,6 +1201,9 @@ class GPT(nn.Module):
                     gate_window=h.gate_window,
                     gated_attn=h.gated_attn_enabled,
                     gated_attn_init_std=h.gated_attn_init_std,
+                    sparse_attn_gate=h.sparse_attn_gate_enabled,
+                    sparse_attn_gate_init_std=h.sparse_attn_gate_init_std,
+                    sparse_attn_gate_scale=h.sparse_attn_gate_scale,
                 )
                 for i in range(h.num_layers)
             ]
