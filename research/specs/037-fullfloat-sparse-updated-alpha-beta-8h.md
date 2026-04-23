@@ -4,7 +4,7 @@
 **Created:** 2026-04-24
 **Status:** READY
 **Branch:** `exp/037-fullfloat-8h-promotion`
-**Commit:** `TBD after final spec pin`
+**Commit:** `8fc64b0`
 **Links to:** `research/specs/035e-sparse-gate-on-1779-family.md`, `research/specs/035h-learnable-alpha-beta-on-sparse-gate-family.md`, `research/specs/030-025b-seed314-new-ttt.md`, `runs/035-series-report.md`
 
 ## Hypothesis
