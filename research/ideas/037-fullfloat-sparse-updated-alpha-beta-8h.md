@@ -41,6 +41,7 @@ under the same:
 - `GPTQ_RESERVE_SECONDS=0.5`
 - phased LoRA-TTT
 - `8×H`, `600s`
+- no separate smoke rung
 
 ## Carry values
 

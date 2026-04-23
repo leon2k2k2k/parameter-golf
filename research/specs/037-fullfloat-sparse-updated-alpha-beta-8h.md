@@ -4,7 +4,7 @@
 **Created:** 2026-04-24
 **Status:** READY
 **Branch:** `exp/037-fullfloat-8h-promotion`
-**Commit:** `8fc64b0`
+**Commit:** `TBD after final spec pin`
 **Links to:** `research/specs/035e-sparse-gate-on-1779-family.md`, `research/specs/035h-learnable-alpha-beta-on-sparse-gate-family.md`, `research/specs/030-025b-seed314-new-ttt.md`, `runs/035-series-report.md`
 
 ## Hypothesis
@@ -98,7 +98,6 @@ the chosen seed in `notes.md` and `config.json`.
 
 ## Hardware ladder
 
-0. optional smoke: `8×H100`, `600s`, no TTT, compile/preflight only
 1. `8×H100` full pipeline, `600s`, first promotion seed from the approved shortlist
 
 Optional later:
@@ -106,15 +105,6 @@ Optional later:
 2. additional seeds if the first run is competitive
 
 ## Run protocol
-
-Optional smoke rung:
-
-- `037-smoke`
-- `8×H100`
-- `MAX_WALLCLOCK_SECONDS=600`
-- `TTT_ENABLED=0`
-- same training stack otherwise
-- discard result; use only for compile/path warmup
 
 First promotion rung:
 
@@ -168,37 +158,6 @@ case "$SEED_CHOICE" in
   1|777|2025) ;;
   *) echo "SEED_CHOICE must be one of: 1, 777, 2025" >&2; exit 1 ;;
 esac
-```
-
-Smoke:
-
-```bash
-mkdir -p /workspace/runs/037-fullfloat-sparse-updated-alpha-beta-8h/smoke_seed_${SEED_CHOICE}
-mkdir -p /tmp/torch_inductor_cache_037_smoke
-
-NCCL_NET=Socket DATA_DIR=$DATA_DIR \
-ARTIFACT_DIR=/workspace/runs/037-fullfloat-sparse-updated-alpha-beta-8h/smoke_seed_${SEED_CHOICE} \
-TORCHINDUCTOR_CACHE_DIR=/tmp/torch_inductor_cache_037_smoke \
-CASEOPS_ENABLED=1 \
-TTT_ENABLED=0 \
-MLP_CLIP_SIGMAS=12.0 ATTN_CLIP_SIGMAS=13.0 \
-EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 \
-MATRIX_LR=0.026 \
-GATED_ATTN_ENABLED=0 GATED_ATTN_INIT_STD=0.005 GATED_ATTN_QUANT_GATE=1 \
-SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_INIT_STD=0.0 SPARSE_ATTN_GATE_SCALE=1.0 \
-RECUR_ALPHA_ENABLED=1 \
-NUM_LOOPS=2 \
-LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.35 \
-MUON_BACKEND_STEPS=5 \
-GPTQ_RESERVE_SECONDS=0.5 GPTQ_CALIBRATION_BATCHES=16 \
-VAL_LOSS_EVERY=0 \
-FUSED_CE_ENABLED=1 \
-MIN_LR=0.10 \
-MAX_WALLCLOCK_SECONDS=600 \
-TRAIN_LOG_EVERY=100 \
-SEED=$SEED_CHOICE \
-torchrun --standalone --nproc_per_node=8 train_gpt.py \
-  > /workspace/runs/037-fullfloat-sparse-updated-alpha-beta-8h/smoke_seed_${SEED_CHOICE}/train.log 2>&1
 ```
 
 Full pipeline:
