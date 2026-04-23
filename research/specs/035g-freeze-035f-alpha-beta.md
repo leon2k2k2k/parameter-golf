@@ -4,7 +4,7 @@
 **Created:** 2026-04-24
 **Status:** BLOCKED ON `035fA` PARAMETERS
 **Branch:** `exp/035g-freeze-035f-alpha-beta`
-**Commit:** `3cb9374`
+**Commit:** `d151697`
 **Links to:** `research/ideas/035g-freeze-035f-alpha-beta.md`, `research/specs/035f-learnable-alpha-beta-on-1779-family.md`, `research/specs/030-025b-seed314-new-ttt.md`
 
 ## Hypothesis
