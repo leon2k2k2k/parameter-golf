@@ -6,8 +6,8 @@
 want a plain `035e` promotion. The promotion target is now:
 
 - sparse gate from `035e`
-- updated recurrent `alpha/beta` learned later and then frozen again
-- those coefficients rounded coarsely to 2 significant digits
+- updated recurrent `alpha/beta` learned later in `035h` and then frozen again
+- those coefficients rounded to 2 decimal places
 - standard `#1779` / `030` `8×H` full pipeline with phased LoRA-TTT
 
 ## Why this is the right promotion candidate
@@ -27,7 +27,8 @@ So:
 - the non-sparse `#1787`-lite bundle alone was not enough
 
 That makes sparse gate the natural `8×H` promotion base. The open question is
-whether swapping in the later updated recurrent carry helps once promoted.
+whether swapping in the later updated recurrent carry from `035h` helps once
+promoted.
 
 ## What this promotion should preserve
 
@@ -39,8 +40,9 @@ Training-side stack from the successful `035eA` run:
 - budget polish
 - sparse gate
 - updated rounded recurrent carry:
-  - `beta = [1.7, 2.0, 2.2]`
-  - `alpha = [[0.28, -0.026, 0.046], [0.068, -0.42, -0.0033], [0.11, 0.25, -0.0048]]`
+  - source: final `035h` learned `alpha/beta`
+  - rounding rule: 2 decimal places
+  - exact values: `TBD after 035h completes`
 
 Then add:
 
@@ -50,14 +52,15 @@ Then add:
 
 ## Why leave parts open right now
 
-We already know the runnable code line:
+We do not know the final runnable code line yet, because it depends on the
+final `035h` parameters.
 
-- branch: `exp/036-sparse-updated-alpha-beta`
-- runnable code commit: `38e44e4`
+- future runnable code branch: `TBD after 035h completes`
+- future runnable code commit: `TBD after 035h completes`
 
 What we may still want to decide with execution later:
 
-- exact seed choice from the approved shortlist (`314`, `2025`, `777`)
+- exact seed choice from the approved shortlist (`1`, `777`, `2025`)
 - whether to mirror the current best `030` TTT contract literally or update any
   small operational defaults
 - exact accept threshold for the first `8×H` promotion rung
@@ -68,5 +71,5 @@ Operational note:
   warmup
 - but it should stay clearly separate from the real `036A` quality run
 
-So `036` should exist now as a real draft shell, but not fake certainty on the
-last-mile launch choices.
+So `036` should exist now as a blocked shell, waiting only on the final `035h`
+parameters before freezing the runnable branch.
