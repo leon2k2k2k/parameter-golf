@@ -40,6 +40,7 @@ Requires a small Muon optimizer patch on top of the `030` family code line.
 Only intended diffs from the intended `030` `4×H` screen stack:
 
 - Polar NS code present via this branch
+- optional `MIN_LR` override chosen at launch from the pinned shortlist below
 
 Everything else must remain identical, including:
 
@@ -64,6 +65,16 @@ Everything else must remain identical, including:
 - `MAX_WALLCLOCK_SECONDS=1200`
 - `TRAIN_LOG_EVERY=100`
 - `SEED=314`
+
+Runtime-selectable `MIN_LR` shortlist:
+
+- `0.0` (default, pure Polar NS isolation)
+- `0.05`
+- `0.10`
+- `0.15`
+
+Execution may choose one of those values at launch time.
+Any other `MIN_LR` value makes the rung invalid.
 
 ## Polar NS semantics
 
@@ -95,17 +106,24 @@ Pinned intent:
 
 ## Run protocol
 
-First rung only:
+Launch variants:
 
 - `035cA`
 - `SEED=314`
+- `MIN_LR=0.0` by default
+
+Optional combo-prep variants:
+
+- `035cB`
+- same branch/commit, but with `MIN_LR` chosen from the shortlist above
 
 Execution rule:
 
 - launch from `exp/035c-polar-ns-on-030-family`
 - use the pinned runnable code commit in this spec
 - match the original intended `030` `4×H` screen stack exactly
-- apply only the Polar NS code lineage change
+- apply only the Polar NS code lineage change, plus an optional `MIN_LR`
+  override from the pinned shortlist
 - if the produced `config.json` differs on anything else, the rung is invalid
 
 Pinned command:
@@ -143,6 +161,7 @@ NUM_LOOPS=2 \
 LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.35 \
 MUON_BACKEND_STEPS=5 \
 GPTQ_RESERVE_SECONDS=4 GPTQ_CALIBRATION_BATCHES=16 \
+MIN_LR=${MIN_LR:-0.0} \
 MAX_WALLCLOCK_SECONDS=1200 \
 TRAIN_LOG_EVERY=100 \
 SEED=314 \
@@ -160,7 +179,8 @@ torchrun --standalone --nproc_per_node=4 train_gpt.py \
 
 Before accepting the result, execution must verify from `config.json` that the
 only intentional diff from the intended `030` `4×H` screen stack is the Polar
-NS code lineage itself.
+NS code lineage itself, plus an optional `MIN_LR` value from the pinned
+shortlist.
 
 Data-root rule:
 
@@ -178,7 +198,8 @@ Strong success:
 
 Weak success:
 
-- directionally positive enough to justify a `035d = Polar NS + MIN_LR` combo
+- directionally positive enough to justify promoting the chosen `MIN_LR`
+  combination or a dedicated follow-up
 
 Failure:
 
