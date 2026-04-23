@@ -1303,19 +1303,19 @@ class GPT(nn.Module):
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
             self.num_looped = num_looped
-            # Spec 036: sparse-gate 8×H promotion using updated recurrent carry
-            # from the latest learnable-alpha/beta experiment, rounded to 2
-            # significant digits for a coarse but stable frozen carry prior.
+            # Spec 036: sparse-gate 8xH promotion using updated recurrent carry
+            # from the sparse learnable-alpha/beta experiment, rounded to 2
+            # decimal places before freezing.
             self.register_buffer(
                 "recur_beta",
-                torch.tensor([1.7, 2.0, 2.2], dtype=torch.float32),
+                torch.tensor([1.56, 1.85, 2.13], dtype=torch.float32),
             )
             self.register_buffer(
                 "recur_alpha",
                 torch.tensor(
-                    [[0.28, -0.026, 0.046],
-                     [0.068, -0.42, -0.0033],
-                     [0.11, 0.25, -0.0048]],
+                    [[0.23, 0.04, 0.03],
+                     [0.13, -0.34, 0.01],
+                     [0.06, 0.19, -0.02]],
                     dtype=torch.float32,
                 ),
             )
