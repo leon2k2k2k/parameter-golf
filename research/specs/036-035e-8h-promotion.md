@@ -86,14 +86,13 @@ Pinned intent:
 
 Promotion seed is runtime-selectable from the approved shortlist:
 
-- `42`
-- `314`
-- `2025`
+- `1`
 - `777`
+- `2025`
 
 Recommended first seed:
 
-- `42`
+- `1`
 
 Execution may choose any one of the approved seeds at launch, but must record
 the chosen seed in `notes.md` and `config.json`.
@@ -133,10 +132,9 @@ Execution rule:
 - match the successful `035eA` training stack exactly
 - only add the standard `030` / `#1779` full-pipeline / TTT settings
 - allow execution to choose `SEED` from:
-  - `42`
-  - `314`
-  - `2025`
+  - `1`
   - `777`
+  - `2025`
 - if the produced `config.json` differs on anything else, the rung is invalid
 
 Pinned smoke command:
@@ -157,10 +155,10 @@ else
   exit 1
 fi
 
-: "${SEED_CHOICE:=42}"
+: "${SEED_CHOICE:=1}"
 case "$SEED_CHOICE" in
-  42|314|2025|777) ;;
-  *) echo "SEED_CHOICE must be one of: 42, 314, 2025, 777" >&2; exit 1 ;;
+  1|777|2025) ;;
+  *) echo "SEED_CHOICE must be one of: 1, 777, 2025" >&2; exit 1 ;;
 esac
 
 mkdir -p /workspace/runs/036-035e-8h-promotion/smoke_seed_${SEED_CHOICE}
@@ -209,10 +207,10 @@ else
   exit 1
 fi
 
-: "${SEED_CHOICE:=42}"
+: "${SEED_CHOICE:=1}"
 case "$SEED_CHOICE" in
-  42|314|2025|777) ;;
-  *) echo "SEED_CHOICE must be one of: 42, 314, 2025, 777" >&2; exit 1 ;;
+  1|777|2025) ;;
+  *) echo "SEED_CHOICE must be one of: 1, 777, 2025" >&2; exit 1 ;;
 esac
 
 mkdir -p /workspace/runs/036-035e-8h-promotion/seed_${SEED_CHOICE}
