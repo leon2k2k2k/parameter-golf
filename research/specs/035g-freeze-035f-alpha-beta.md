@@ -44,7 +44,7 @@ Primary freeze variant:
 
 Optional later robustness variant:
 
-2. `035gB` — same values rounded to 4 significant digits
+2. `035gB` — same values rounded aggressively to 2 decimal places
 
 The purpose of `035gB` is not score-chasing. It is a robustness / simplicity
 check:
@@ -60,10 +60,10 @@ Exact `035gA` freeze values from terminal `035fA`:
 - `recur_beta = [1.6940048933029175, 2.0385119915008545, 2.229182004928589]`
 - `recur_alpha = [[0.27734375, -0.0260009765625, 0.045654296875], [0.06787109375, -0.421875, -0.0032501220703125], [0.1123046875, 0.25390625, -0.00482177734375]]`
 
-Rounded `035gB` freeze values (4 significant digits):
+Rounded `035gB` freeze values (2 decimal places):
 
-- `recur_beta = [1.694, 2.039, 2.229]`
-- `recur_alpha = [[0.2773, -0.026, 0.04565], [0.06787, -0.4219, -0.00325], [0.1123, 0.2539, -0.004822]]`
+- `recur_beta = [1.69, 2.04, 2.23]`
+- `recur_alpha = [[0.28, -0.03, 0.05], [0.07, -0.42, -0.00], [0.11, 0.25, -0.00]]`
 
 Drift from the baked `025b` initialization:
 
@@ -104,7 +104,7 @@ Pinned intent:
 Order:
 
 1. run `035gA` first using exact learned values
-2. only if `035gA` looks good, consider `035gB` with 4-significant-digit rounding
+2. only if `035gA` looks good, consider `035gB` with 2-decimal rounding
 
 If clearly positive, then consider promotion to a fuller `8×H` run with the
 normal `030` / `#1779` TTT stack.
@@ -123,14 +123,14 @@ Optional later rung:
 - `035gB`
 - same stack
 - same seed
-- same learned values, but rounded to 4 significant digits before freezing
+- same learned values, but rounded to 2 decimal places before freezing
 
 Execution rule:
 
 - inherit the intended `030` `4×H` screen stack exactly
 - apply only the frozen-`alpha/beta` replacement
 - if `035gB` is used, the only extra diff is rounding the copied values to
-  4 significant digits
+  2 decimal places
 - if the produced `config.json` differs on anything else, the rung is invalid
 
 ## What to watch

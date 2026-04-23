@@ -1066,14 +1066,14 @@ class GPT(nn.Module):
             num_looped = h.loop_end - h.loop_start + 1
             self.num_looped = num_looped
             recur_beta_init = torch.tensor(
-                [1.6940048933029175, 2.0385119915008545, 2.229182004928589],
+                [1.69, 2.04, 2.23],
                 dtype=torch.float32,
             )
             recur_alpha_init = torch.tensor(
                 [
-                    [0.27734375, -0.0260009765625, 0.045654296875],
-                    [0.06787109375, -0.421875, -0.0032501220703125],
-                    [0.1123046875, 0.25390625, -0.00482177734375],
+                    [0.28, -0.03, 0.05],
+                    [0.07, -0.42, -0.0],
+                    [0.11, 0.25, -0.0],
                 ],
                 dtype=torch.float32,
             )
