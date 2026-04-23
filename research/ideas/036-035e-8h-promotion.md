@@ -66,7 +66,7 @@ What we may still want to decide with execution later:
 
 Operational note:
 
-- an optional `2`-minute `8×H` no-TTT smoke rung is fine as a compile/path
+- an optional `60s` `8×H` no-TTT smoke rung is fine as a compile/path
   warmup
 - but it should stay clearly separate from the real `036A` quality run
 
