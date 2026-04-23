@@ -86,6 +86,8 @@ class Hyperparameters:
     ttt_mlp_lora = bool(int(os.environ.get("TTT_MLP_LORA", "1")))
     ttt_o_lora = bool(int(os.environ.get("TTT_O_LORA", "1")))
     ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "adam")
+    ttt_direct_carry_enabled = bool(int(os.environ.get("TTT_DIRECT_CARRY_ENABLED", "0")))
+    ttt_direct_carry_lr_scale = float(os.environ.get("TTT_DIRECT_CARRY_LR_SCALE", 0.25))
     ttt_eval_batches = os.environ.get("TTT_EVAL_BATCHES", "")
     val_doc_fraction = float(os.environ.get("VAL_DOC_FRACTION", 1.0))
     compressor = os.environ.get("COMPRESSOR", "brotli")
@@ -2985,15 +2987,84 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         h.ttt_batch_size, base_model, h.ttt_lora_rank,
         k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
     ).to(device)
+    direct_carry_tensors = []
+    direct_carry_names = []
+    if (
+        h.ttt_direct_carry_enabled
+        and getattr(base_model, "direct_carry_mode", "off") == "frozen_edge_self"
+    ):
+        for name in (
+            "direct_carry_self_frozen",
+            "direct_carry_edges_frozen_pass1",
+            "direct_carry_edges_frozen_pass2",
+        ):
+            tensor = getattr(base_model, name, None)
+            if tensor is not None:
+                tensor.requires_grad_(True)
+                direct_carry_tensors.append(tensor)
+                direct_carry_names.append(name)
+    direct_carry_before = [t.detach().float().cpu().clone() for t in direct_carry_tensors]
+    if direct_carry_tensors:
+        log(
+            f"ttt_direct_carry: enabled=1 names={direct_carry_names} "
+            f"lr_scale={h.ttt_direct_carry_lr_scale}"
+        )
+        log(
+            f"ttt_direct_carry: before_self={base_model.direct_carry_self_frozen.detach().float().cpu().tolist()}"
+        )
+        log(
+            f"ttt_direct_carry: before_edges_pass1={base_model.direct_carry_edges_frozen_pass1.detach().float().cpu().tolist()}"
+        )
+        log(
+            f"ttt_direct_carry: before_edges_pass2={base_model.direct_carry_edges_frozen_pass2.detach().float().cpu().tolist()}"
+        )
+    else:
+        log("ttt_direct_carry: enabled=0")
 
-    def _build_opt(lora):
+    def _log_direct_carry_ttt_snapshot(prefix):
+        if not direct_carry_tensors:
+            return
+        direct_carry_now = [t.detach().float().cpu() for t in direct_carry_tensors]
+        drift_parts = []
+        for name, before, now in zip(
+            direct_carry_names, direct_carry_before, direct_carry_now, strict=True
+        ):
+            drift_parts.append(
+                f"{name}_max_drift={float((now - before).abs().max().item()):.6f}"
+            )
+        log(
+            f"ttt_direct_carry: {prefix}_self={base_model.direct_carry_self_frozen.detach().float().cpu().tolist()}"
+        )
+        log(
+            f"ttt_direct_carry: {prefix}_edges_pass1={base_model.direct_carry_edges_frozen_pass1.detach().float().cpu().tolist()}"
+        )
+        log(
+            f"ttt_direct_carry: {prefix}_edges_pass2={base_model.direct_carry_edges_frozen_pass2.detach().float().cpu().tolist()}"
+        )
+        log(f"ttt_direct_carry: {prefix} {' '.join(drift_parts)}")
+
+    def _build_opt(lora, include_direct_carry=True):
+        direct_carry_lr = h.ttt_lora_lr * h.ttt_direct_carry_lr_scale
+        param_groups = [
+            {
+                "params": list(lora.parameters()),
+                "lr": h.ttt_lora_lr,
+            }
+        ]
+        if include_direct_carry and direct_carry_tensors:
+            param_groups.append(
+                {
+                    "params": direct_carry_tensors,
+                    "lr": direct_carry_lr,
+                }
+            )
         if h.ttt_optimizer == "sgd":
             return torch.optim.SGD(
-                lora.parameters(), lr=h.ttt_lora_lr,
+                param_groups, lr=h.ttt_lora_lr,
                 momentum=h.ttt_beta1, weight_decay=h.ttt_weight_decay,
             )
         return torch.optim.AdamW(
-            lora.parameters(), lr=h.ttt_lora_lr,
+            param_groups, lr=h.ttt_lora_lr,
             betas=(h.ttt_beta1, h.ttt_beta2),
             eps=1e-10, weight_decay=h.ttt_weight_decay, fused=True,
         )
@@ -3140,6 +3211,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
                 f"rl:{r_loss:.4f} rb:{r_bpb:.4f} dl:{min(doc_lens)}-{max(doc_lens)} "
                 f"gd:{int(global_ttt_done)}"
             )
+            _log_direct_carry_ttt_snapshot(f"live_b{batch_num}")
         if not global_ttt_done:
             local_scored_docs.extend(
                 (orig_batch_idx, pos, doc_start, doc_len)
@@ -3220,8 +3292,12 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(byte_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
+    if direct_carry_tensors:
+        _log_direct_carry_ttt_snapshot("after")
     for p in base_model.parameters():
         p.requires_grad_(True)
+    for t in direct_carry_tensors:
+        t.requires_grad_(False)
     base_model.train()
     return _loss_bpb_from_sums(loss_sum, token_count, byte_sum)
 
