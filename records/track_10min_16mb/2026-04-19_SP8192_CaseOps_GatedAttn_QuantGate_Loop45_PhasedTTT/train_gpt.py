@@ -50,6 +50,9 @@ class Hyperparameters:
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
+    lr_plateau_enabled = bool(int(os.environ.get("LR_PLATEAU_ENABLED", "0")))
+    lr_plateau_start = float(os.environ.get("LR_PLATEAU_START", 0.35))
+    lr_plateau_end = float(os.environ.get("LR_PLATEAU_END", 0.45))
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.03))
     tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
@@ -3294,11 +3297,32 @@ def train_model(h, device, val_data):
         return elapsed_ms / max(max_wallclock_ms, 1e-09)
 
     def lr_mul(frac):
-        if h.warmdown_frac <= 0:
+        def base_lr_mul(frac_):
+            if h.warmdown_frac <= 0:
+                return 1.0
+            if frac_ >= 1.0 - h.warmdown_frac:
+                return max((1.0 - frac_) / h.warmdown_frac, h.min_lr)
             return 1.0
-        if frac >= 1.0 - h.warmdown_frac:
-            return max((1.0 - frac) / h.warmdown_frac, h.min_lr)
-        return 1.0
+
+        if h.lr_plateau_enabled:
+            start = h.lr_plateau_start
+            end = h.lr_plateau_end
+            if end <= start:
+                raise ValueError(
+                    f"LR_PLATEAU_END must be greater than LR_PLATEAU_START, got {start} -> {end}"
+                )
+            width = end - start
+            if frac < start:
+                return base_lr_mul(frac)
+            plateau_val = base_lr_mul(start)
+            if frac <= end:
+                return plateau_val
+            # Pause schedule time during the plateau so decay resumes smoothly
+            # instead of dropping off a cliff at plateau end.
+            effective_frac = max(0.0, frac - width)
+            return base_lr_mul(effective_frac)
+
+        return base_lr_mul(frac)
 
     def step_fn(step, lr_scale):
         optimizers.zero_grad_all()
