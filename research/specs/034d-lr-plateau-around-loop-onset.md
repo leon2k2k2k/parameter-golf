@@ -20,6 +20,12 @@ Direct baseline:
 
 - corrected `034`
 
+Pinned lineage:
+
+- branch `exp/034d-lr-plateau-around-loop-onset`
+- runnable code commit `d856957`
+- inherited `034` stack from `exp/034-frozen-direct-carry-from-031a`
+
 Schedule comparison baseline:
 
 - `034cB` with `MIN_LR=0.10`
@@ -36,6 +42,23 @@ Proposed envs:
 - `LR_PLATEAU_ENABLED`
 - `LR_PLATEAU_START`
 - `LR_PLATEAU_END`
+
+Only intended diffs from corrected `034` are:
+
+- plateau code present via the pinned `034d` branch/commit
+- `LR_PLATEAU_ENABLED=1`
+- `LR_PLATEAU_START=0.35`
+- `LR_PLATEAU_END=0.45`
+
+Everything else must remain identical to the inherited `034` stack:
+
+- dataset/tokenizer paths
+- CaseOps / gated-attn / quant-gate settings
+- model width/depth/head counts
+- quantization bits and clip sigmas
+- TTT settings and phase count
+- shard selection and validation token count
+- any other env not explicitly changed in this spec
 
 Pinned semantics:
 
@@ -120,6 +143,14 @@ Single first rung:
 
 - `034dA`
 
+Execution rule:
+
+- launch from `exp/034d-lr-plateau-around-loop-onset`
+- use runnable code commit `d856957`
+- only schedule diffs allowed are the three plateau envs above
+- if the produced `config.json` differs from inherited `034` on anything else,
+  the rung is invalid and must be aborted/relaunched
+
 Pinned command shape after patch lands:
 
 ```bash
@@ -142,6 +173,24 @@ torchrun --standalone --nproc_per_node=4 train_gpt.py
 - quantized diagnostic
 - post-TTT `val_bpb`
 - whether the plateau helps more cleanly than `MIN_LR`
+
+## Required artifacts
+
+- `final_model.pt`
+- `final_model.int6.ptz`
+- training log
+- final metrics JSON
+- `config.json`
+
+## Sanity gate before accepting the rung
+
+Before comparing to `034` or `034c`, execution must verify from `config.json`
+that the only intentional diffs are:
+
+- the plateau-support code lineage
+- `LR_PLATEAU_ENABLED`
+- `LR_PLATEAU_START`
+- `LR_PLATEAU_END`
 
 ## Accept criteria
 
