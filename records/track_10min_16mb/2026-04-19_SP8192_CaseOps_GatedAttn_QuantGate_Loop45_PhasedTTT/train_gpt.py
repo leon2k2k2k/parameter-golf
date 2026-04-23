@@ -1131,6 +1131,9 @@ class Block(nn.Module):
         gate_window=12,
         gated_attn=False,
         gated_attn_init_std=0.01,
+        sparse_attn_gate=False,
+        sparse_attn_gate_init_std=0.0,
+        sparse_attn_gate_scale=1.0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
@@ -1139,6 +1142,9 @@ class Block(nn.Module):
             dim, num_heads, num_kv_heads, rope_base, qk_gain_init, train_seq_len, yarn=yarn,
             attn_out_gate=attn_out_gate, attn_out_gate_src=attn_out_gate_src, gate_window=gate_window,
             gated_attn=gated_attn, gated_attn_init_std=gated_attn_init_std,
+            sparse_attn_gate=sparse_attn_gate,
+            sparse_attn_gate_init_std=sparse_attn_gate_init_std,
+            sparse_attn_gate_scale=sparse_attn_gate_scale,
         )
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
