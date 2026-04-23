@@ -4,7 +4,7 @@
 **Created:** 2026-04-24
 **Status:** READY
 **Branch:** `exp/035b-plateau-on-030-family`
-**Commit:** `TBD after freeze`
+**Commit:** `89ffbe7`
 **Links to:** `research/ideas/035b-plateau-on-030-family.md`, `research/specs/035-min-lr-on-030-family.md`, `research/specs/030-025b-seed314-new-ttt.md`
 
 ## Hypothesis
@@ -119,7 +119,7 @@ python -c "import brotli"
 
 cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
 git fetch fork
-git checkout TBD_AFTER_FREEZE
+git checkout 89ffbe7
 
 if [ -f /workspace/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model ]; then
   export DATA_DIR=/workspace
