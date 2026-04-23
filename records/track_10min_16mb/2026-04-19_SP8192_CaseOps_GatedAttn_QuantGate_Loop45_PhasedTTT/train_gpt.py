@@ -1022,18 +1022,18 @@ class GPT(nn.Module):
             torch.full((h.num_layers, 2), 1.1, dtype=torch.float32)
         )
         self.direct_carry_mode = h.direct_carry_mode
-        if self.direct_carry_mode not in ("off", "edge_self", "edge_self_carrygate", "frozen_edge_self"):
+        if self.direct_carry_mode not in ("off", "edge_self", "edge_self_carrygate", "frozen_edge_self", "frozen_edge_self_carrygate"):
             raise ValueError(
-                f"DIRECT_CARRY_MODE must be one of off/edge_self/edge_self_carrygate/frozen_edge_self, got {self.direct_carry_mode}"
+                f"DIRECT_CARRY_MODE must be one of off/edge_self/edge_self_carrygate/frozen_edge_self/frozen_edge_self_carrygate, got {self.direct_carry_mode}"
             )
         self.direct_carry_enabled = self.direct_carry_mode != "off" and h.num_loops > 0
         if self.direct_carry_enabled:
             num_looped = h.loop_end - h.loop_start + 1
             self.direct_carry_num_looped = num_looped
-            if self.direct_carry_mode == "frozen_edge_self":
+            if self.direct_carry_mode in ("frozen_edge_self", "frozen_edge_self_carrygate"):
                 if h.num_loops != 2 or num_looped != 3:
                     raise ValueError(
-                        "frozen_edge_self is pinned for NUM_LOOPS=2 and 3 looped layers"
+                        "frozen_edge_self* modes are pinned for NUM_LOOPS=2 and 3 looped layers"
                     )
                 self.direct_carry_edges = nn.ParameterList()
                 self.direct_carry_self = None
@@ -1070,6 +1070,19 @@ class GPT(nn.Module):
                         dtype=torch.float32,
                     ),
                 )
+                if self.direct_carry_mode == "frozen_edge_self_carrygate":
+                    self.register_buffer(
+                        "direct_carry_gate_frozen",
+                        torch.tensor(
+                            [
+                                [0.44921875, 0.53515625, 0.6953125],
+                                [1.046875, 0.6484375, 0.3984375],
+                            ],
+                            dtype=torch.float32,
+                        ),
+                    )
+                else:
+                    self.direct_carry_gate_frozen = None
             else:
                 self.direct_carry_edges = nn.ParameterList(
                     [
@@ -1117,6 +1130,7 @@ class GPT(nn.Module):
             self.direct_carry_self_frozen = None
             self.direct_carry_edges_frozen_pass1 = None
             self.direct_carry_edges_frozen_pass2 = None
+            self.direct_carry_gate_frozen = None
             self._encoder_direct_carry_info = None
             self._decoder_direct_carry_info = None
         # SmearGate (PR #1667 / modded-nanogpt @classiclarryd):
@@ -1208,7 +1222,7 @@ class GPT(nn.Module):
             or carry_history is None
         ):
             return x_new
-        if self.direct_carry_mode == "frozen_edge_self":
+        if self.direct_carry_mode in ("frozen_edge_self", "frozen_edge_self_carrygate"):
             edge_bank = (
                 self.direct_carry_edges_frozen_pass1
                 if pass_idx - 1 == 0
@@ -1234,7 +1248,10 @@ class GPT(nn.Module):
                 edge_idx += 1
         x = self_weight * x_new
         if carry_mix is not None:
-            if self.direct_carry_gate is not None:
+            if self.direct_carry_mode == "frozen_edge_self_carrygate":
+                gate = self.direct_carry_gate_frozen[pass_idx - 1, local_idx].to(dtype=x_new.dtype)
+                x = x + gate * carry_mix
+            elif self.direct_carry_gate is not None:
                 gate = self.direct_carry_gate[pass_idx - 1, local_idx].to(dtype=x_new.dtype)
                 x = x + gate * carry_mix
             else:
@@ -1855,7 +1872,7 @@ class Optimizers:
             scalar_params.append(base_model.smear_lambda)
         carry_params = []
         if getattr(base_model, "direct_carry_enabled", False):
-            if getattr(base_model, "direct_carry_mode", "off") != "frozen_edge_self":
+            if getattr(base_model, "direct_carry_mode", "off") not in ("frozen_edge_self", "frozen_edge_self_carrygate"):
                 carry_params.extend(list(base_model.direct_carry_edges.parameters()))
                 carry_params.append(base_model.direct_carry_self)
                 if base_model.direct_carry_gate is not None:
@@ -3375,20 +3392,25 @@ def train_model(h, device, val_data):
         nonlocal prev_direct_carry_snapshot
         if not getattr(base_model, "direct_carry_enabled", False):
             return
-        if base_model.direct_carry_mode == "frozen_edge_self":
+        if base_model.direct_carry_mode in ("frozen_edge_self", "frozen_edge_self_carrygate"):
             edge_tensors = [
                 base_model.direct_carry_edges_frozen_pass1.detach().float().cpu(),
                 base_model.direct_carry_edges_frozen_pass2.detach().float().cpu(),
             ]
             self_tensor = base_model.direct_carry_self_frozen.detach().float().cpu()
+            gate_tensor = (
+                base_model.direct_carry_gate_frozen.detach().float().cpu()
+                if getattr(base_model, "direct_carry_gate_frozen", None) is not None
+                else None
+            )
         else:
             edge_tensors = [p.detach().float().cpu() for p in base_model.direct_carry_edges]
             self_tensor = base_model.direct_carry_self.detach().float().cpu()
-        gate_tensor = (
-            base_model.direct_carry_gate.detach().float().cpu()
-            if base_model.direct_carry_gate is not None
-            else None
-        )
+            gate_tensor = (
+                base_model.direct_carry_gate.detach().float().cpu()
+                if base_model.direct_carry_gate is not None
+                else None
+            )
         edge_row_norms = [
             t.norm(dim=1).tolist() for t in edge_tensors
         ]
