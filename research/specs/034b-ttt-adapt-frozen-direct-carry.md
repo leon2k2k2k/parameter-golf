@@ -4,7 +4,7 @@
 **Created:** 2026-04-23
 **Status:** READY
 **Branch:** `exp/034b-ttt-adapt-frozen-direct-carry`
-**Commit:** `<PINNED_COMMIT>`
+**Commit:** `5a698a0`
 **Links to:** `research/ideas/034b-ttt-adapt-frozen-direct-carry.md`, `research/specs/034-frozen-direct-carry-from-031a.md`, `research/specs/033-ttt-adapt-alpha-beta.md`, `research/specs/033b-ttt-adapt-alpha-beta-high-lr.md`
 
 ## Hypothesis
@@ -72,7 +72,7 @@ python -c "import brotli"
 
 cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
 git fetch fork
-git checkout <PINNED_COMMIT>
+git checkout 5a698a0
 
 # Sanity verify
 grep -n "TTT_DIRECT_CARRY_ENABLED" train_gpt.py
