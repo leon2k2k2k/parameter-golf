@@ -4,7 +4,7 @@
 **Created:** 2026-04-23
 **Status:** READY
 **Branch:** `exp/034d-lr-plateau-around-loop-onset`
-**Commit:** `TBD`
+**Commit:** `d856957`
 **Links to:** `research/ideas/034d-lr-plateau-around-loop-onset.md`, `research/ideas/lr-schedule-ideas.md`, `research/specs/034-frozen-direct-carry-from-031a.md`, `research/specs/034c-min-lr-on-034.md`
 
 ## Hypothesis
