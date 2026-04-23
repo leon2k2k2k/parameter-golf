@@ -331,6 +331,7 @@ class Hyperparameters:
     # Model learns how much to commit per pass via gradient descent.
     # Default off -> byte-identical to #1736 baseline.
     recur_alpha_enabled = bool(int(os.environ.get("RECUR_ALPHA_ENABLED", "0")))
+    recur_alpha_beta_learnable = bool(int(os.environ.get("RECUR_ALPHA_BETA_LEARNABLE", "0")))
     # Diagnostics: compute/store pass-to-pass cosine similarity on block deltas.
     # Answers "is cross-pass XSA the right follow-up?" informational side-channel.
     recur_diag_p2p_cos = bool(int(os.environ.get("RECUR_DIAG_P2P_COS", "0")))
@@ -1297,28 +1298,31 @@ class GPT(nn.Module):
         # Spec 015 Recur-Alpha (port #1714). All state attr-guarded so default=off
         # is byte-identical to baseline (attr checks in forward look for None).
         self.recur_alpha_enabled = bool(h.recur_alpha_enabled) and h.num_loops > 0
+        self.recur_alpha_beta_learnable = bool(h.recur_alpha_beta_learnable)
         self.recur_diag_p2p_cos = bool(h.recur_diag_p2p_cos) and h.num_loops > 0
         self.loop_start = h.loop_start
         self.loop_end = h.loop_end
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
             self.num_looped = num_looped
+            recur_beta_init = torch.tensor(
+                [1.5973426, 1.8826205, 1.9906198], dtype=torch.float32
+            )
+            recur_alpha_init = torch.tensor(
+                [[0.251953125, -0.02099609375, -0.01239013671875],
+                 [0.06689453125, -0.34765625, 0.0031280517578125],
+                 [0.138671875, 0.2412109375, 0.0272216796875]],
+                dtype=torch.float32,
+            )
             # Spec 025b: cross-layer carry blend, frozen at 024b converged values.
             # beta[i] scales x_new; alpha[i,j] scales detached pass-1 output of layer j.
             # Values hardcoded from 024b seed_42 final log (shared across passes).
-            self.register_buffer(
-                "recur_beta",
-                torch.tensor([1.5973426, 1.8826205, 1.9906198], dtype=torch.float32),
-            )
-            self.register_buffer(
-                "recur_alpha",
-                torch.tensor(
-                    [[0.251953125, -0.02099609375, -0.01239013671875],
-                     [0.06689453125, -0.34765625, 0.0031280517578125],
-                     [0.138671875, 0.2412109375, 0.0272216796875]],
-                    dtype=torch.float32,
-                ),
-            )
+            if self.recur_alpha_beta_learnable:
+                self.recur_beta = nn.Parameter(recur_beta_init.clone())
+                self.recur_alpha = nn.Parameter(recur_alpha_init.clone())
+            else:
+                self.register_buffer("recur_beta", recur_beta_init)
+                self.register_buffer("recur_alpha", recur_alpha_init)
             # Precompute alpha_info lists: parallel to encoder_indices and
             # decoder_indices, indicating (pass_offset, local_idx) or None for
             # each position. Pass counts span encoder + decoder (sequential).
@@ -3543,7 +3547,8 @@ def train_model(h, device, val_data):
     log(
         f"recur_alpha: enabled={h.recur_alpha_enabled} "
         f"num_loops={h.num_loops} loop_start={h.loop_start} loop_end={h.loop_end} "
-        f"diag_p2p_cos={h.recur_diag_p2p_cos}"
+        f"diag_p2p_cos={h.recur_diag_p2p_cos} "
+        f"learnable={h.recur_alpha_beta_learnable}"
     )
     optimizers = Optimizers(h, base_model)
     train_loader = DocumentPackingLoader(h, device)
@@ -3599,9 +3604,16 @@ def train_model(h, device, val_data):
         # zero_grad_all(); reading recur_alpha.grad after step() always sees None/0.
         # Spec 015 hit this bug — cosmetic (α values moved fine) but the logged
         # grad_norm was unusable as a plumbing-check signal.
-        alpha_grad_norm = None  # Spec 025b: recur_beta/recur_alpha are frozen buffers
+        alpha_grad_norm = None
+        beta_grad_norm = None
+        if getattr(base_model, "recur_alpha", None) is not None and base_model.recur_alpha.requires_grad:
+            if base_model.recur_alpha.grad is not None:
+                alpha_grad_norm = base_model.recur_alpha.grad.detach().float().norm().item()
+        if getattr(base_model, "recur_beta", None) is not None and base_model.recur_beta.requires_grad:
+            if base_model.recur_beta.grad is not None:
+                beta_grad_norm = base_model.recur_beta.grad.detach().float().norm().item()
         optimizers.step(distributed=h.distributed)
-        return train_loss, alpha_grad_norm
+        return train_loss, alpha_grad_norm, beta_grad_norm
 
     if h.warmup_steps > 0:
         initial_model_state = {
@@ -3741,7 +3753,7 @@ def train_model(h, device, val_data):
             log(
                 f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
-        train_loss, alpha_grad_norm = step_fn(step, scale)
+        train_loss, alpha_grad_norm, beta_grad_norm = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
                 ema_state[name].mul_(ema_decay).add_(
@@ -3767,12 +3779,15 @@ def train_model(h, device, val_data):
                     beta_tensor = base_model.recur_beta.detach().float().cpu().tolist()
                 if alpha_grad_norm is None:
                     alpha_grad_norm = 0.0
+                if beta_grad_norm is None:
+                    beta_grad_norm = 0.0
                 p2p_cos_str = ""
                 if getattr(base_model, "recur_diag_p2p_cos", False):
                     p2p = base_model._diag_p2p_cos.detach().float().cpu().tolist()
                     p2p_cos_str = f" p2p_cos: {p2p}"
                 log(
-                    f"recur_alpha: beta={beta_tensor} alpha={alpha_tensor} grad_norm={alpha_grad_norm:.6f}{p2p_cos_str}"
+                    f"recur_alpha: beta={beta_tensor} alpha={alpha_tensor} "
+                    f"alpha_grad_norm={alpha_grad_norm:.6f} beta_grad_norm={beta_grad_norm:.6f}{p2p_cos_str}"
                 )
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
