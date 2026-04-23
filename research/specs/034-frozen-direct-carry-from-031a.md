@@ -76,7 +76,7 @@ Pinned intent:
   - train
   - pre-quant diagnostic
   - quantized diagnostic
-  - quantized phased TTT
+  - quantized phased TTT with the newer 3-phase path
 
 ## Timing
 
@@ -106,6 +106,20 @@ Must preserve persistent artifacts under `/workspace/runs/...`, including:
 This is already supported by the current training code when `ARTIFACT_DIR` is
 set, but the spec requires it explicitly because we may want to reuse the float
 checkpoint later.
+
+Important correction:
+
+- `TTT_ENABLED=1` alone is not sufficient to match the newer phased TTT path.
+- In this codepath, `PHASED_TTT_NUM_PHASES` defaults to `1`.
+- So this spec must explicitly set:
+  - `PHASED_TTT_PREFIX_DOCS=2000`
+  - `PHASED_TTT_NUM_PHASES=3`
+
+If a prior `034` training rung completed with inline TTT but omitted those
+envs, then its post-TTT result is not the intended `034` result. In that case,
+do not retrain solely for TTT. Reuse the saved `final_model.pt` and rerun the
+post-training quantized phased-TTT stage through `spinquant_hotstart.py`, the
+same way `034b` consumes a saved checkpoint.
 
 ## Hardware ladder
 
@@ -142,6 +156,7 @@ ARTIFACT_DIR=/workspace/runs/034-frozen-direct-carry-from-031a/seed_314 \
 TORCHINDUCTOR_CACHE_DIR=/tmp/torch_inductor_cache_034_4h \
 CASEOPS_ENABLED=1 \
 TTT_ENABLED=1 \
+PHASED_TTT_PREFIX_DOCS=2000 PHASED_TTT_NUM_PHASES=3 \
 MLP_CLIP_SIGMAS=12.0 ATTN_CLIP_SIGMAS=13.0 \
 EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 \
 MATRIX_LR=0.026 \
