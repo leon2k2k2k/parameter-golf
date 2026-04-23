@@ -76,7 +76,7 @@ Pinned runnable code source:
 
 - shell/spec branch: `exp/036-035e-8h-promotion`
 - runnable code branch: `exp/036-sparse-updated-alpha-beta`
-- runnable code commit: `74a060d`
+- runnable code commit: `1d12cb6`
 
 ## Regime
 
@@ -133,10 +133,19 @@ First promotion rung:
 - use the updated rounded frozen recurrent carry from `035h`
 - seed chosen at launch from the approved shortlist
 
+TTT bugfix note:
+
+- `036A` seed `1` showed healthy pre-quant and quantized eval but catastrophic
+  post-TTT (`1.8089`)
+- root cause was a code bug: sparse gate existed in normal eval but was missing
+  from the two LoRA-TTT forward paths
+- runnable commit `1d12cb6` fixes sparse gate in both `_block_with_lora(...)`
+  and `_parallel_block_with_lora(...)`
+
 Execution rule:
 
 - launch from `exp/036-sparse-updated-alpha-beta`
-- use runnable code commit `74a060d`
+- use runnable code commit `1d12cb6`
 - keep the successful `035eA` sparse-gate stack otherwise
 - add the standard `030` / `#1779` full-pipeline / TTT settings
 - allow execution to choose `SEED` from:

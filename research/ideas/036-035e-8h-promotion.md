@@ -55,7 +55,15 @@ Then add:
 We now know the runnable code line:
 
 - runnable code branch: `exp/036-sparse-updated-alpha-beta`
-- runnable code commit: `74a060d`
+- runnable code commit: `1d12cb6`
+
+Important correction:
+
+- the first `036A` `8×H` run proved training and quantization were healthy
+- failure happened only in TTT
+- root cause was a code-path mismatch: sparse gate was present in normal eval
+  but absent in the LoRA-TTT forward functions
+- runnable commit `1d12cb6` fixes that mismatch
 
 What we may still want to decide with execution later:
 
