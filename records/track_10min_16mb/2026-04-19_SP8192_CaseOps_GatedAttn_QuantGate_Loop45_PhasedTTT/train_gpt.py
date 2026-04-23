@@ -46,8 +46,7 @@ class Hyperparameters:
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
-    direct_carry_mode = os.environ.get("DIRECT_CARRY_MODE", "off").lower()
-    direct_carry_lr_scale = float(os.environ.get("DIRECT_CARRY_LR_SCALE", 1.5))
+    loop_depth_upgrade_at = float(os.environ.get("LOOP_DEPTH_UPGRADE_AT", 0.0))
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
@@ -74,6 +73,7 @@ class Hyperparameters:
     ema_decay = float(os.environ.get("EMA_DECAY", 0.9965))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 96))
+    ttt_lora_alpha = int(os.environ.get("TTT_LORA_ALPHA", 96))
     ttt_lora_lr = float(os.environ.get("TTT_LORA_LR", 0.0001))
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 48))
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 2048))
@@ -119,6 +119,16 @@ class Hyperparameters:
     smear_gate_enabled = bool(int(os.environ.get("SMEAR_GATE_ENABLED", "0")))
     # Window: first GATE_WINDOW dims of the source feed the gate projection.
     gate_window = int(os.environ.get("GATE_WINDOW", 12))
+    # Spec 015 Recur-Alpha (port #1714 Anakintano). Learnable scalar per
+    # non-first recurrence pass per looped block. At init all zero -> pure
+    # passthrough on extra passes (equivalent to NUM_LOOPS=0 effective behavior).
+    # Model learns how much to commit per pass via gradient descent.
+    # Default off -> byte-identical to #1736 baseline.
+    recur_alpha_enabled = bool(int(os.environ.get("RECUR_ALPHA_ENABLED", "0")))
+    recur_alpha_beta_learnable = bool(int(os.environ.get("RECUR_ALPHA_BETA_LEARNABLE", "0")))
+    # Diagnostics: compute/store pass-to-pass cosine similarity on block deltas.
+    # Answers "is cross-pass XSA the right follow-up?" informational side-channel.
+    recur_diag_p2p_cos = bool(int(os.environ.get("RECUR_DIAG_P2P_COS", "0")))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -988,6 +998,7 @@ class GPT(nn.Module):
             for i in range(max(0, h.num_layers - h.xsa_last_n), h.num_layers):
                 self.blocks[i].attn.use_xsa = True
         self.looping_active = False
+        self._num_loops = h.num_loops
         if h.num_loops > 0:
             loop_seg = list(range(h.loop_start, h.loop_end + 1))
             all_indices = list(range(h.loop_start))
@@ -997,9 +1008,22 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            # depth curriculum: precompute intermediate (num_loops-1) indices for phase 2
+            if h.loop_depth_upgrade_at > 0 and h.num_loops >= 2:
+                all_int = list(range(h.loop_start))
+                for _ in range(h.num_loops):  # num_loops-1+1 passes = num_loops passes
+                    all_int.extend(loop_seg)
+                all_int.extend(range(h.loop_end + 1, h.num_layers))
+                num_enc_int = len(all_int) // 2
+                self._enc_idx_intermediate = all_int[:num_enc_int]
+                self._dec_idx_intermediate = all_int[num_enc_int:]
+                self.looping_depth = h.num_loops - 1  # start at intermediate after activation
+            else:
+                self.looping_depth = h.num_loops
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.looping_depth = 0
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1021,60 +1045,6 @@ class GPT(nn.Module):
         self.parallel_resid_lambdas = nn.Parameter(
             torch.full((h.num_layers, 2), 1.1, dtype=torch.float32)
         )
-        self.direct_carry_mode = h.direct_carry_mode
-        if self.direct_carry_mode not in ("off", "edge_self", "edge_self_carrygate"):
-            raise ValueError(
-                f"DIRECT_CARRY_MODE must be one of off/edge_self/edge_self_carrygate, got {self.direct_carry_mode}"
-            )
-        self.direct_carry_enabled = self.direct_carry_mode != "off" and h.num_loops > 0
-        if self.direct_carry_enabled:
-            num_looped = h.loop_end - h.loop_start + 1
-            self.direct_carry_num_looped = num_looped
-            self.direct_carry_edges = nn.ParameterList(
-                [
-                    nn.Parameter(
-                        torch.zeros(
-                            num_looped, (pass_off + 1) * num_looped, dtype=torch.float32
-                        )
-                    )
-                    for pass_off in range(h.num_loops)
-                ]
-            )
-            self.direct_carry_self = nn.Parameter(
-                torch.ones(h.num_loops, num_looped, dtype=torch.float32)
-            )
-            self.direct_carry_gate = (
-                nn.Parameter(torch.ones(h.num_loops, num_looped, dtype=torch.float32))
-                if self.direct_carry_mode == "edge_self_carrygate"
-                else None
-            )
-
-            def _build_direct_carry_info(indices, visit_counts):
-                info = []
-                for i in indices:
-                    if h.loop_start <= i <= h.loop_end:
-                        local_idx = i - h.loop_start
-                        pass_idx = visit_counts[local_idx]
-                        visit_counts[local_idx] += 1
-                        info.append((pass_idx, local_idx))
-                    else:
-                        info.append(None)
-                return info
-
-            visit_counts = [0] * num_looped
-            self._encoder_direct_carry_info = _build_direct_carry_info(
-                self.encoder_indices, visit_counts
-            )
-            self._decoder_direct_carry_info = _build_direct_carry_info(
-                self.decoder_indices, visit_counts
-            )
-        else:
-            self.direct_carry_num_looped = 0
-            self.direct_carry_edges = nn.ParameterList()
-            self.direct_carry_self = None
-            self.direct_carry_gate = None
-            self._encoder_direct_carry_info = None
-            self._decoder_direct_carry_info = None
         # SmearGate (PR #1667 / modded-nanogpt @classiclarryd):
         #   x_t <- x_t + lam * sigmoid(W * x_t[:gate_window]) * x_{t-1}.
         # Per-token forward-1 smear of the embedding lane. W zero-init + lam=0 ->
@@ -1085,6 +1055,101 @@ class GPT(nn.Module):
             self.smear_gate = CastedLinear(self.smear_window, 1, bias=False)
             self.smear_gate._zero_init = True
             self.smear_lambda = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        # Spec 015 Recur-Alpha (port #1714). All state attr-guarded so default=off
+        # is byte-identical to baseline (attr checks in forward look for None).
+        self.recur_alpha_enabled = bool(h.recur_alpha_enabled) and h.num_loops > 0
+        self.recur_alpha_beta_learnable = bool(h.recur_alpha_beta_learnable)
+        self.recur_diag_p2p_cos = bool(h.recur_diag_p2p_cos) and h.num_loops > 0
+        self.loop_start = h.loop_start
+        self.loop_end = h.loop_end
+        if self.recur_alpha_enabled:
+            num_looped = h.loop_end - h.loop_start + 1
+            self.num_looped = num_looped
+            recur_beta_init = torch.tensor(
+                [1.6940048933029175, 2.0385119915008545, 2.229182004928589],
+                dtype=torch.float32,
+            )
+            recur_alpha_init = torch.tensor(
+                [
+                    [0.27734375, -0.0260009765625, 0.045654296875],
+                    [0.06787109375, -0.421875, -0.0032501220703125],
+                    [0.1123046875, 0.25390625, -0.00482177734375],
+                ],
+                dtype=torch.float32,
+            )
+            # Spec 035gA: freeze the exact terminal 035fA learned coefficients back
+            # into the standard recurrent carry path.
+            if self.recur_alpha_beta_learnable:
+                self.recur_beta = nn.Parameter(recur_beta_init.clone())
+                self.recur_alpha = nn.Parameter(recur_alpha_init.clone())
+            else:
+                self.register_buffer("recur_beta", recur_beta_init)
+                self.register_buffer("recur_alpha", recur_alpha_init)
+            # Precompute alpha_info lists: parallel to encoder_indices and
+            # decoder_indices, indicating (pass_offset, local_idx) or None for
+            # each position. Pass counts span encoder + decoder (sequential).
+            visits = {}
+            self._encoder_alpha_info = []
+            for idx in self.encoder_indices:
+                pi = visits.get(idx, 0)
+                visits[idx] = pi + 1
+                if self.loop_start <= idx <= self.loop_end and pi > 0:
+                    self._encoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                else:
+                    self._encoder_alpha_info.append(None)
+            self._decoder_alpha_info = []
+            for idx in self.decoder_indices:
+                pi = visits.get(idx, 0)
+                visits[idx] = pi + 1
+                if self.loop_start <= idx <= self.loop_end and pi > 0:
+                    self._decoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                else:
+                    self._decoder_alpha_info.append(None)
+            # Depth curriculum: _dec_idx_intermediate is NOT a prefix of
+            # decoder_indices (enc/dec split shifts with one fewer loop pass),
+            # so _decoder_alpha_info indexed by dec_int step_idx is misaligned.
+            # Build separate alpha_info lists from the intermediate sequences.
+            if (h.loop_depth_upgrade_at > 0 and h.num_loops >= 2
+                    and hasattr(self, '_enc_idx_intermediate')):
+                visits_int = {}
+                self._encoder_alpha_info_int = []
+                for idx in self._enc_idx_intermediate:
+                    pi = visits_int.get(idx, 0)
+                    visits_int[idx] = pi + 1
+                    if self.loop_start <= idx <= self.loop_end and pi > 0:
+                        self._encoder_alpha_info_int.append((pi - 1, idx - self.loop_start))
+                    else:
+                        self._encoder_alpha_info_int.append(None)
+                self._decoder_alpha_info_int = []
+                for idx in self._dec_idx_intermediate:
+                    pi = visits_int.get(idx, 0)
+                    visits_int[idx] = pi + 1
+                    if self.loop_start <= idx <= self.loop_end and pi > 0:
+                        self._decoder_alpha_info_int.append((pi - 1, idx - self.loop_start))
+                    else:
+                        self._decoder_alpha_info_int.append(None)
+            else:
+                self._encoder_alpha_info_int = None
+                self._decoder_alpha_info_int = None
+        else:
+            self.recur_beta = None
+            self.recur_alpha = None
+            self.num_looped = 0
+            self._encoder_alpha_info = None
+            self._decoder_alpha_info = None
+            self._encoder_alpha_info_int = None
+            self._decoder_alpha_info_int = None
+        # Diagnostic buffers for p2p cosine. Updated in forward, read by logger.
+        # Detached values only; no backprop through these.
+        if self.recur_diag_p2p_cos:
+            num_looped = h.loop_end - h.loop_start + 1
+            # Mean cosine per (pass_pair, layer) — num_loops pass pairs × num_looped layers.
+            self.register_buffer(
+                "_diag_p2p_cos",
+                torch.zeros(h.num_loops, num_looped, dtype=torch.float32),
+                persistent=False,
+            )
+            self._diag_prev_deltas = {}  # layer_idx -> tensor (updated in forward)
         self._init_weights()
 
     def _init_weights(self):
@@ -1157,34 +1222,6 @@ class GPT(nn.Module):
             return lane0
         return 0.5 * (lane0 + lane1)
 
-    def _apply_direct_carry(self, x_new, pass_idx, local_idx, carry_history):
-        if (
-            not self.direct_carry_enabled
-            or pass_idx == 0
-            or carry_history is None
-        ):
-            return x_new
-        edge_weights = self.direct_carry_edges[pass_idx - 1][local_idx].to(dtype=x_new.dtype)
-        carry_mix = None
-        edge_idx = 0
-        for prior_pass in range(pass_idx):
-            for src_local_idx in range(self.direct_carry_num_looped):
-                if len(carry_history[src_local_idx]) <= prior_pass:
-                    raise RuntimeError(
-                        f"direct carry source missing for local_idx={src_local_idx} prior_pass={prior_pass}"
-                    )
-                term = edge_weights[edge_idx] * carry_history[src_local_idx][prior_pass]
-                carry_mix = term if carry_mix is None else carry_mix + term
-                edge_idx += 1
-        x = self.direct_carry_self[pass_idx - 1, local_idx].to(dtype=x_new.dtype) * x_new
-        if carry_mix is not None:
-            if self.direct_carry_gate is not None:
-                gate = self.direct_carry_gate[pass_idx - 1, local_idx].to(dtype=x_new.dtype)
-                x = x + gate * carry_mix
-            else:
-                x = x + carry_mix
-        return x
-
     def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0):
         x = self.tok_emb(input_ids)
         # SmearGate (PR #1667). Inline gate compute with .contiguous() on the slice fed
@@ -1199,46 +1236,72 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips = []
-        enc_iter = (
-            self.encoder_indices
-            if self.looping_active
-            else range(self.num_encoder_layers)
-        )
-        dec_iter = (
-            self.decoder_indices
-            if self.looping_active
-            else range(
+        if self.looping_active:
+            if self.looping_depth < self._num_loops and hasattr(self, '_enc_idx_intermediate'):
+                enc_iter = self._enc_idx_intermediate
+                dec_iter = self._dec_idx_intermediate
+            else:
+                enc_iter = self.encoder_indices
+                dec_iter = self.decoder_indices
+        else:
+            enc_iter = range(self.num_encoder_layers)
+            dec_iter = range(
                 self.num_encoder_layers,
                 self.num_encoder_layers + self.num_decoder_layers,
             )
-        )
-        enc_direct_carry_info = (
-            self._encoder_direct_carry_info
-            if (self.direct_carry_enabled and self.looping_active)
-            else None
-        )
-        dec_direct_carry_info = (
-            self._decoder_direct_carry_info
-            if (self.direct_carry_enabled and self.looping_active)
-            else None
-        )
-        carry_history = (
-            [[] for _ in range(self.direct_carry_num_looped)]
-            if enc_direct_carry_info is not None
-            else None
-        )
-        for i in enc_iter:
-            step_idx = len(skips)
+        # Spec 015: use precomputed alpha_info only when Recur-Alpha enabled AND
+        # looping is active. When inactive, behavior is byte-identical to baseline.
+        # Spec 029: during depth curriculum (looping_depth < _num_loops), use
+        # the intermediate-sequence alpha_info to avoid misalignment.
+        if self.recur_alpha is not None and self.looping_active:
+            if (self.looping_depth < self._num_loops
+                    and self._encoder_alpha_info_int is not None):
+                enc_alpha_info = self._encoder_alpha_info_int
+            else:
+                enc_alpha_info = self._encoder_alpha_info
+        else:
+            enc_alpha_info = None
+        carry = {} if enc_alpha_info is not None else None
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-            if enc_direct_carry_info is not None and enc_direct_carry_info[step_idx] is not None:
-                pass_idx, local_idx = enc_direct_carry_info[step_idx]
-                x = self._apply_direct_carry(x, pass_idx, local_idx, carry_history)
-                carry_history[local_idx].append(x.detach())
+            x_before = x
+            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                pass_off, local_idx = enc_alpha_info[step_idx]
+                beta = self.recur_beta[local_idx].to(x_new.dtype)
+                x = beta * x_new
+                for j in range(self.num_looped):
+                    x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+                # Diagnostic: p2p cosine similarity on block deltas (optional).
+                if self.recur_diag_p2p_cos:
+                    delta_this = (x_new - x_before).detach()
+                    prev = self._diag_prev_deltas.get(i, None)
+                    if prev is not None:
+                        flat_this = delta_this.reshape(-1, delta_this.size(-1))
+                        flat_prev = prev.reshape(-1, prev.size(-1))
+                        cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
+                        self._diag_p2p_cos[pass_off, local_idx] = cos
+                    self._diag_prev_deltas[i] = delta_this
+            else:
+                x = x_new
+                if carry is not None and self.loop_start <= i <= self.loop_end:
+                    carry[i] = x_new.detach()
+                if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
+                    self._diag_prev_deltas[i] = (x_new - x_before).detach()
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
+        # Spec 015: alpha_info for decoder; shares visit-count state with encoder
+        # (see __init__ precompute). None when Recur-Alpha disabled or looping inactive.
+        if self.recur_alpha is not None and self.looping_active:
+            if (self.looping_depth < self._num_loops
+                    and self._decoder_alpha_info_int is not None):
+                dec_alpha_info = self._decoder_alpha_info_int
+            else:
+                dec_alpha_info = self._decoder_alpha_info
+        else:
+            dec_alpha_info = None
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
@@ -1268,11 +1331,29 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-                if dec_direct_carry_info is not None and dec_direct_carry_info[skip_idx] is not None:
-                    pass_idx, local_idx = dec_direct_carry_info[skip_idx]
-                    x = self._apply_direct_carry(x, pass_idx, local_idx, carry_history)
-                    carry_history[local_idx].append(x.detach())
+                x_before = x
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    pass_off, local_idx = dec_alpha_info[skip_idx]
+                    beta = self.recur_beta[local_idx].to(x_new.dtype)
+                    x = beta * x_new
+                    for j in range(self.num_looped):
+                        x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+                    if self.recur_diag_p2p_cos:
+                        delta_this = (x_new - x_before).detach()
+                        prev = self._diag_prev_deltas.get(i, None)
+                        if prev is not None:
+                            flat_this = delta_this.reshape(-1, delta_this.size(-1))
+                            flat_prev = prev.reshape(-1, prev.size(-1))
+                            cos = F.cosine_similarity(flat_this, flat_prev, dim=-1).mean()
+                            self._diag_p2p_cos[pass_off, local_idx] = cos
+                        self._diag_prev_deltas[i] = delta_this
+                else:
+                    x = x_new
+                    if carry is not None and self.loop_start <= i <= self.loop_end:
+                        carry[i] = x_new.detach()
+                    if self.recur_diag_p2p_cos and self.loop_start <= i <= self.loop_end:
+                        self._diag_prev_deltas[i] = (x_new - x_before).detach()
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
@@ -1318,34 +1399,40 @@ class GPT(nn.Module):
                 )
             )
         )
-        enc_direct_carry_info = (
-            self._encoder_direct_carry_info
-            if (self.direct_carry_enabled and self.looping_active)
+        # TTT α fix: apply the same blend as forward_logits. Without this,
+        # TTT adaptation sees the un-α-weighted forward pass, which mismatches
+        # training and leaves ~0.002 of TTT delta on the table (017-era bug).
+        enc_alpha_info = (
+            self._encoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
             else None
         )
-        dec_direct_carry_info = (
-            self._decoder_direct_carry_info
-            if (self.direct_carry_enabled and self.looping_active)
-            else None
-        )
-        carry_history = (
-            [[] for _ in range(self.direct_carry_num_looped)]
-            if enc_direct_carry_info is not None
-            else None
-        )
+        carry = {} if enc_alpha_info is not None else None
         slot = 0
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            x_before = x
+            x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                pass_off, local_idx = enc_alpha_info[step_idx]
+                beta = self.recur_beta[local_idx].to(x_new.dtype)
+                x = beta * x_new
+                for j in range(self.num_looped):
+                    x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+            else:
+                x = x_new
+                if carry is not None and self.loop_start <= i <= self.loop_end:
+                    carry[i] = x_new.detach()
             slot += 1
-            if enc_direct_carry_info is not None and enc_direct_carry_info[step_idx] is not None:
-                pass_idx, local_idx = enc_direct_carry_info[step_idx]
-                x = self._apply_direct_carry(x, pass_idx, local_idx, carry_history)
-                carry_history[local_idx].append(x.detach())
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
+        dec_alpha_info = (
+            self._decoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
@@ -1375,11 +1462,18 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
-                if dec_direct_carry_info is not None and dec_direct_carry_info[skip_idx] is not None:
-                    pass_idx, local_idx = dec_direct_carry_info[skip_idx]
-                    x = self._apply_direct_carry(x, pass_idx, local_idx, carry_history)
-                    carry_history[local_idx].append(x.detach())
+                x_before = x
+                x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    pass_off, local_idx = dec_alpha_info[skip_idx]
+                    beta = self.recur_beta[local_idx].to(x_new.dtype)
+                    x = beta * x_new
+                    for j in range(self.num_looped):
+                        x = x + self.recur_alpha[local_idx, j].to(x_new.dtype) * carry[self.loop_start + j]
+                else:
+                    x = x_new
+                    if carry is not None and self.loop_start <= i <= self.loop_end:
+                        carry[i] = x_new.detach()
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
@@ -1526,9 +1620,10 @@ class GPT(nn.Module):
 
 
 class BatchedLinearLoRA(nn.Module):
-    def __init__(self, bsz, in_features, out_features, rank):
+    def __init__(self, bsz, in_features, out_features, rank, alpha=96):
         super().__init__()
         self._bound = 1.0 / math.sqrt(in_features)
+        self._scale = alpha / rank
         self.A = nn.Parameter(
             torch.empty(bsz, rank, in_features).uniform_(-self._bound, self._bound)
         )
@@ -1536,15 +1631,16 @@ class BatchedLinearLoRA(nn.Module):
 
     def reset(self):
         with torch.no_grad():
-            self.A.uniform_(-self._bound, self._bound)
+            # warm-start A: keep accumulated feature directions; only zero B so
+            # LoRA output = 0 at each batch start (per-document reset preserved)
             self.B.zero_()
 
     def forward(self, x):
-        return (x @ self.A.transpose(1, 2)) @ self.B.transpose(1, 2)
+        return (x @ self.A.transpose(1, 2)) @ self.B.transpose(1, 2) * self._scale
 
 
 class BatchedTTTLoRA(nn.Module):
-    def __init__(self, bsz, model, rank, k_lora=True, mlp_lora=True, o_lora=True):
+    def __init__(self, bsz, model, rank, alpha=96, k_lora=True, mlp_lora=True, o_lora=True):
         super().__init__()
         self.bsz = bsz
         dim = model.qo_bank.shape[-1]
@@ -1557,30 +1653,30 @@ class BatchedTTTLoRA(nn.Module):
             dim // model.blocks[0].attn.num_heads
         )
         embed_dim = model.tok_emb.embedding_dim
-        self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank)
+        self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank, alpha)
         self.q_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
         )
         self.v_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, kv_dim, rank, alpha) for _ in range(num_slots)]
         )
         self.k_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, kv_dim, rank, alpha) for _ in range(num_slots)]
             )
             if k_lora
             else None
         )
         self.mlp_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
             )
             if mlp_lora
             else None
         )
         self.o_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, rank, alpha) for _ in range(num_slots)]
             )
             if o_lora
             else None
@@ -1797,12 +1893,17 @@ class Optimizers:
         if getattr(base_model, "smear_gate_enabled", False):
             scalar_params.append(base_model.smear_gate.weight)
             scalar_params.append(base_model.smear_lambda)
-        carry_params = []
-        if getattr(base_model, "direct_carry_enabled", False):
-            carry_params.extend(list(base_model.direct_carry_edges.parameters()))
-            carry_params.append(base_model.direct_carry_self)
-            if base_model.direct_carry_gate is not None:
-                carry_params.append(base_model.direct_carry_gate)
+        # Spec 015 Recur-Alpha: 6 scalars (num_loops × num_looped), route to scalar AdamW.
+        # Not in .blocks so not picked up by block_named_params. ndim=2 but tiny —
+        # would be silly to send to Muon. Append by hand like SmearGate.
+        # Spec 021: recur_alpha is frozen (buffer or Parameter(requires_grad=False)),
+        # so DO NOT append to optimizer. Guard on requires_grad so the
+        # 015/016/017 learnable-Parameter form still works if we ever revert.
+        if getattr(base_model, "recur_alpha_enabled", False):
+            if base_model.recur_alpha is not None and base_model.recur_alpha.requires_grad:
+                scalar_params.append(base_model.recur_alpha)
+            if getattr(base_model, "recur_beta", None) is not None and base_model.recur_beta.requires_grad:
+                scalar_params.append(base_model.recur_beta)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
@@ -1824,20 +1925,8 @@ class Optimizers:
         )
         for group in self.optimizer_muon.param_groups:
             group["base_lr"] = h.matrix_lr
-        scalar_param_groups = [
-            {"params": scalar_params, "lr": h.scalar_lr, "base_lr": h.scalar_lr}
-        ]
-        if carry_params:
-            direct_carry_lr = h.scalar_lr * h.direct_carry_lr_scale
-            scalar_param_groups.append(
-                {
-                    "params": carry_params,
-                    "lr": direct_carry_lr,
-                    "base_lr": direct_carry_lr,
-                }
-            )
         self.optimizer_scalar = torch.optim.AdamW(
-            scalar_param_groups,
+            [{"params": scalar_params, "lr": h.scalar_lr, "base_lr": h.scalar_lr}],
             betas=(h.beta1, h.beta2),
             eps=h.adam_eps,
             weight_decay=h.adam_wd,
@@ -1850,7 +1939,6 @@ class Optimizers:
         ]
         self.replicated_params = list(tok_params[0]["params"])
         self.replicated_params.extend(scalar_params)
-        self.replicated_params.extend(carry_params)
         self.replicated_large_params = []
         self.replicated_packed_params = []
         for p in self.replicated_params:
@@ -2925,7 +3013,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     t_start = time.perf_counter()
     reusable_lora = BatchedTTTLoRA(
-        h.ttt_batch_size, base_model, h.ttt_lora_rank,
+        h.ttt_batch_size, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
         k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
     ).to(device)
 
@@ -2967,7 +3055,7 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
             cur_opt = reusable_opt
         else:
             cur_lora = BatchedTTTLoRA(
-                bsz, base_model, h.ttt_lora_rank,
+                bsz, base_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
             ).to(device)
             cur_opt = _build_opt(cur_lora)
@@ -3190,6 +3278,12 @@ def train_model(h, device, val_data):
     )
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
+    log(
+        f"recur_alpha: enabled={h.recur_alpha_enabled} "
+        f"num_loops={h.num_loops} loop_start={h.loop_start} loop_end={h.loop_end} "
+        f"diag_p2p_cos={h.recur_diag_p2p_cos} "
+        f"learnable={h.recur_alpha_beta_learnable}"
+    )
     optimizers = Optimizers(h, base_model)
     train_loader = DocumentPackingLoader(h, device)
     max_wallclock_ms = (
@@ -3240,8 +3334,20 @@ def train_model(h, device, val_data):
                 group["lr"] = group["base_lr"] * lr_scale
         if h.grad_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), h.grad_clip_norm)
+        # Snapshot α grad norm BEFORE optimizers.step() since step() ends with
+        # zero_grad_all(); reading recur_alpha.grad after step() always sees None/0.
+        # Spec 015 hit this bug — cosmetic (α values moved fine) but the logged
+        # grad_norm was unusable as a plumbing-check signal.
+        alpha_grad_norm = None
+        beta_grad_norm = None
+        if getattr(base_model, "recur_alpha", None) is not None and base_model.recur_alpha.requires_grad:
+            if base_model.recur_alpha.grad is not None:
+                alpha_grad_norm = base_model.recur_alpha.grad.detach().float().norm().item()
+        if getattr(base_model, "recur_beta", None) is not None and base_model.recur_beta.requires_grad:
+            if base_model.recur_beta.grad is not None:
+                beta_grad_norm = base_model.recur_beta.grad.detach().float().norm().item()
         optimizers.step(distributed=h.distributed)
-        return train_loss
+        return train_loss, alpha_grad_norm, beta_grad_norm
 
     if h.warmup_steps > 0:
         initial_model_state = {
@@ -3279,6 +3385,10 @@ def train_model(h, device, val_data):
         if h.num_loops > 0:
             base_model.looping_active = True
             _run_cu_bucket_warmup()
+            if h.loop_depth_upgrade_at > 0 and h.num_loops >= 2:
+                base_model.looping_depth = h.num_loops  # pre-warm full-depth state
+                _run_cu_bucket_warmup()
+                base_model.looping_depth = h.num_loops - 1  # reset to curriculum start
             base_model.looping_active = False
         for warmup_step in range(h.warmup_steps):
             step_fn(warmup_step, 1.0)
@@ -3301,6 +3411,18 @@ def train_model(h, device, val_data):
                     or warmup_step + 1 == h.warmup_steps
                 ):
                     log(f"loop_warmup_step: {warmup_step+1}/{h.warmup_steps}")
+            if h.loop_depth_upgrade_at > 0 and h.num_loops >= 2:
+                base_model.looping_depth = h.num_loops  # pre-warm full-depth state
+                log(f"loop_warmup:depth_upgraded looping_depth:{h.num_loops + 1}")
+                for warmup_step in range(h.warmup_steps):
+                    step_fn(warmup_step, 1.0)
+                    if (
+                        warmup_step <= 5
+                        or (warmup_step + 1) % 10 == 0
+                        or warmup_step + 1 == h.warmup_steps
+                    ):
+                        log(f"loop_depth_warmup_step: {warmup_step+1}/{h.warmup_steps}")
+                base_model.looping_depth = h.num_loops - 1  # reset to curriculum start
             base_model.looping_active = False
         base_model.load_state_dict(initial_model_state, strict=True)
         for (opt, state) in zip(optimizers, initial_optimizer_states, strict=True):
@@ -3312,57 +3434,6 @@ def train_model(h, device, val_data):
         for (name, t) in base_model.state_dict().items()
     }
     ema_decay = h.ema_decay
-    prev_direct_carry_snapshot = None
-
-    def log_direct_carry_snapshot(tag):
-        nonlocal prev_direct_carry_snapshot
-        if not getattr(base_model, "direct_carry_enabled", False):
-            return
-        edge_tensors = [p.detach().float().cpu() for p in base_model.direct_carry_edges]
-        self_tensor = base_model.direct_carry_self.detach().float().cpu()
-        gate_tensor = (
-            base_model.direct_carry_gate.detach().float().cpu()
-            if base_model.direct_carry_gate is not None
-            else None
-        )
-        edge_row_norms = [
-            t.norm(dim=1).tolist() for t in edge_tensors
-        ]
-        edge_max_abs = [float(t.abs().max().item()) for t in edge_tensors]
-        self_max_abs = float(self_tensor.abs().max().item())
-        drift_str = ""
-        if prev_direct_carry_snapshot is not None:
-            prev_edges, prev_self, prev_gate = prev_direct_carry_snapshot
-            edge_drifts = [
-                float((cur - prev).abs().max().item())
-                for cur, prev in zip(edge_tensors, prev_edges, strict=True)
-            ]
-            self_drift = float((self_tensor - prev_self).abs().max().item())
-            drift_str = (
-                f" edge_max_drift={edge_drifts}"
-                f" self_max_drift={self_drift:.6f}"
-            )
-            if gate_tensor is not None and prev_gate is not None:
-                gate_drift = float((gate_tensor - prev_gate).abs().max().item())
-                drift_str += f" gate_max_drift={gate_drift:.6f}"
-        log(
-            f"direct_carry_summary[{tag}]: mode={base_model.direct_carry_mode} "
-            f"edge_row_norms={edge_row_norms} edge_max_abs={edge_max_abs} "
-            f"self_max_abs={self_max_abs:.6f}{drift_str}"
-        )
-        gate_str = ""
-        if gate_tensor is not None:
-            gate_str = f" carry_gate={gate_tensor.tolist()}"
-        log(
-            f"direct_carry[{tag}]: self={self_tensor.tolist()} "
-            f"edges={[t.tolist() for t in edge_tensors]}{gate_str}"
-        )
-        prev_direct_carry_snapshot = (
-            [t.clone() for t in edge_tensors],
-            self_tensor.clone(),
-            None if gate_tensor is None else gate_tensor.clone(),
-        )
-
     training_time_ms = 0.0
     stop_after_step = None
     torch.cuda.synchronize()
@@ -3386,7 +3457,6 @@ def train_model(h, device, val_data):
             log(
                 f"{step}/{h.iterations} val_loss: {val_loss:.4f} val_bpb: {val_bpb:.4f}"
             )
-            log_direct_carry_snapshot(f"val_step_{step}")
             torch.cuda.synchronize()
             t0 = time.perf_counter()
         if last_step:
@@ -3405,9 +3475,19 @@ def train_model(h, device, val_data):
         ):
             base_model.looping_active = True
             log(
-                f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
+                f"layer_loop:enabled step:{step} frac:{frac:.3f} depth:{base_model.looping_depth + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
-        train_loss = step_fn(step, scale)
+        if (
+            h.loop_depth_upgrade_at > 0
+            and base_model.looping_active
+            and base_model.looping_depth < h.num_loops
+            and frac >= h.loop_depth_upgrade_at
+        ):
+            base_model.looping_depth = h.num_loops
+            log(
+                f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
+            )
+        train_loss, alpha_grad_norm, beta_grad_norm = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
                 ema_state[name].mul_(ema_decay).add_(
@@ -3423,7 +3503,26 @@ def train_model(h, device, val_data):
             log(
                 f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_training_time_ms/60000:.1f}m tok/s: {tok_per_sec:.0f}"
             )
-            log_direct_carry_snapshot(f"train_step_{step}")
+            # Spec 015/016: Recur-Alpha diagnostics (alpha values, grad norms, p2p cosine).
+            # alpha_grad_norm comes from step_fn (snapshotted before optimizers.step()
+            # zeros grads); reading base_model.recur_alpha.grad here would always be None.
+            if getattr(base_model, "recur_alpha", None) is not None:
+                alpha_tensor = base_model.recur_alpha.detach().float().cpu().tolist()
+                beta_tensor = None
+                if getattr(base_model, "recur_beta", None) is not None:
+                    beta_tensor = base_model.recur_beta.detach().float().cpu().tolist()
+                if alpha_grad_norm is None:
+                    alpha_grad_norm = 0.0
+                if beta_grad_norm is None:
+                    beta_grad_norm = 0.0
+                p2p_cos_str = ""
+                if getattr(base_model, "recur_diag_p2p_cos", False):
+                    p2p = base_model._diag_p2p_cos.detach().float().cpu().tolist()
+                    p2p_cos_str = f" p2p_cos: {p2p}"
+                log(
+                    f"recur_alpha: beta={beta_tensor} alpha={alpha_tensor} "
+                    f"alpha_grad_norm={alpha_grad_norm:.6f} beta_grad_norm={beta_grad_norm:.6f}{p2p_cos_str}"
+                )
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
         )
@@ -3476,6 +3575,7 @@ def train_and_eval(h, device):
     eval_model = deserialize(h, device)
     if h.num_loops > 0:
         eval_model.looping_active = True
+        eval_model.looping_depth = h.num_loops  # always full depth at eval/TTT
     compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
     compiled_forward_logits = torch.compile(
         eval_model.forward_logits, dynamic=False, fullgraph=True
@@ -3496,6 +3596,7 @@ def train_and_eval(h, device):
         ttt_model = deserialize(h, device)
         if h.num_loops > 0:
             ttt_model.looping_active = True
+            ttt_model.looping_depth = h.num_loops  # always full depth at TTT
         for p in ttt_model.parameters():
             p.requires_grad_(False)
 
@@ -3530,7 +3631,7 @@ def train_and_eval(h, device):
         warmup_bszes = [h.ttt_batch_size]
         for bsz in warmup_bszes:
             wl = BatchedTTTLoRA(
-                bsz, ttt_model, h.ttt_lora_rank,
+                bsz, ttt_model, h.ttt_lora_rank, alpha=h.ttt_lora_alpha,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
             ).to(device)
             wo = torch.optim.AdamW(

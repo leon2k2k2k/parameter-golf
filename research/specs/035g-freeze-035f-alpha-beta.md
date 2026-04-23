@@ -2,9 +2,9 @@
 
 **Slug:** `freeze-035f-alpha-beta`
 **Created:** 2026-04-24
-**Status:** BLOCKED ON `035fA` PARAMETERS
+**Status:** READY
 **Branch:** `exp/035g-freeze-035f-alpha-beta`
-**Commit:** `d151697`
+**Commit:** `TBD after 035gA freeze commit`
 **Links to:** `research/ideas/035g-freeze-035f-alpha-beta.md`, `research/specs/035f-learnable-alpha-beta-on-1779-family.md`, `research/specs/030-025b-seed314-new-ttt.md`
 
 ## Hypothesis
@@ -38,9 +38,12 @@ Relative to the intended `030` `4×H` screen stack:
 - replace the baked `025b` values with the learned terminal `035fA` values
 - no TTT for the first test
 
-Two freeze variants are allowed once `035fA` finishes:
+Primary freeze variant:
 
 1. `035gA` — exact learned `alpha/beta` from `035fA`
+
+Optional later robustness variant:
+
 2. `035gB` — same values rounded to 4 significant digits
 
 The purpose of `035gB` is not score-chasing. It is a robustness / simplicity
@@ -52,17 +55,36 @@ check:
 
 ## Source values
 
-Blocked until `035fA` completes.
+Exact `035gA` freeze values from terminal `035fA`:
 
-When `035fA` finishes, pin:
+- `recur_beta = [1.6940048933029175, 2.0385119915008545, 2.229182004928589]`
+- `recur_alpha = [[0.27734375, -0.0260009765625, 0.045654296875], [0.06787109375, -0.421875, -0.0032501220703125], [0.1123046875, 0.25390625, -0.00482177734375]]`
 
-- final learned `recur_beta`
-- final learned `recur_alpha`
-- before/after drift from the `025b` initialization
+Rounded `035gB` freeze values (4 significant digits):
 
-The spec should not be promoted to READY until those values are copied into the
-branch-local spec and code. This draft may live on a real remote branch early,
-but it is not runnable until the learned coefficients are pinned.
+- `recur_beta = [1.694, 2.039, 2.229]`
+- `recur_alpha = [[0.2773, -0.026, 0.04565], [0.06787, -0.4219, -0.00325], [0.1123, 0.2539, -0.004822]]`
+
+Drift from the baked `025b` initialization:
+
+- `recur_beta_init = [1.5973426, 1.8826205, 1.9906198]`
+- `recur_beta_delta = [0.09666229330291747, 0.15589149150085455, 0.23856220492858875]`
+- `recur_alpha_init = [[0.251953125, -0.02099609375, -0.01239013671875], [0.06689453125, -0.34765625, 0.0031280517578125], [0.138671875, 0.2412109375, 0.0272216796875]]`
+- `recur_alpha_delta = [[0.025390625, -0.0050048828125, 0.05804443359375], [0.0009765625, -0.07421875, -0.006378173828125], [-0.0263671875, 0.0126953125, -0.03204345703125]]`
+
+`035fA` reference outcome:
+
+- stop step: `5008`
+- stop `val_bpb`: `1.0682`
+- post-EMA pre-quant `val_bpb`: `1.06775175`
+- quantized diagnostic `val_bpb`: `1.07712583`
+
+Comparisons:
+
+- vs `035eA`: `+0.00157526`
+- vs `035A`: `+0.00096123`
+- vs `035dA`: `+0.00044813`
+- vs `026`: `+0.00004803`
 
 ## Regime
 
@@ -82,7 +104,7 @@ Pinned intent:
 Order:
 
 1. run `035gA` first using exact learned values
-2. only if `035gA` looks good, run `035gB` with 4-significant-digit rounding
+2. only if `035gA` looks good, consider `035gB` with 4-significant-digit rounding
 
 If clearly positive, then consider promotion to a fuller `8×H` run with the
 normal `030` / `#1779` TTT stack.
@@ -96,7 +118,7 @@ First rung:
 - no TTT
 - exact learned frozen `alpha/beta` from `035fA`
 
-Optional second rung:
+Optional later rung:
 
 - `035gB`
 - same stack
@@ -135,7 +157,7 @@ Strong success:
 Useful partial success:
 
 - `035gA` improves on `026` and the old frozen `025b` line
-- `035gB` is close enough that rounding looks viable
+- `035gB` is close enough that rounding looks viable, if we choose to run it
 
 Failure:
 
@@ -144,7 +166,6 @@ Failure:
 
 ## Notes
 
-- This spec is intentionally contingent on `035fA`.
-- Do not freeze or run it until the actual learned coefficients are available.
+- `035gA` is now the concrete main rung.
 - The 4-significant-digit variant is optional and should not block the main
   exact-value follow-up.
