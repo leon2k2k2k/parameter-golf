@@ -2,18 +2,17 @@
 
 **Slug:** `sparse-updated-alpha-beta-8h-promotion`
 **Created:** 2026-04-24
-**Status:** BLOCKED ON `035h` PARAMETERS
+**Status:** READY
 **Branch:** `exp/036-035e-8h-promotion`
-**Commit:** `TBD after `035h` completes`
+**Commit:** `TBD after final spec pin`
 **Links to:** `research/specs/035e-sparse-gate-on-1779-family.md`, `research/specs/035h-learnable-alpha-beta-on-sparse-gate-family.md`, `research/specs/030-025b-seed314-new-ttt.md`, `runs/035-series-report.md`
 
 ## Hypothesis
 
 `035eA` was the strongest completed `4×H` screen in the current `035` family.
-The next intended promotion is therefore the sparse-gate stack at `8×H`, but
-using the updated recurrent carry from the newer sparse learnable-alpha/beta
-run `035h`, not the older non-sparse learned carry. This spec stays blocked
-until those final `035h` parameters are available.
+The next promotion is therefore the sparse-gate stack at `8×H`, using the
+updated recurrent carry learned on the sparse learnable-alpha/beta run `035h`
+and then frozen back into the model.
 
 ## Baseline
 
@@ -38,15 +37,12 @@ Updated rounded recurrent carry to promote:
 
 - source: final `035h` learned `alpha/beta`
 - rounding rule: **2 decimal places**, not 2 significant digits
-- exact values: `TBD after 035h completes`
-
-Older non-authoritative example from the earlier non-sparse `035f` line:
-
-- `beta = [1.69, 2.04, 2.23]`
-- `alpha = [[0.28, -0.03, 0.05], [0.07, -0.42, -0.00], [0.11, 0.25, -0.00]]`
-
-These example values are here only to pin the intended rounding convention.
-They are not the values to run unless `035h` independently lands on them.
+- exact source values:
+  - `beta = [1.5610, 1.8531, 2.1320]`
+  - `alpha = [[0.2314, 0.0388, 0.0347], [0.1260, -0.3438, 0.0145], [0.0557, 0.1934, -0.0172]]`
+- frozen rounded values used in `036`:
+  - `beta = [1.56, 1.85, 2.13]`
+  - `alpha = [[0.23, 0.04, 0.03], [0.13, -0.34, 0.01], [0.06, 0.19, -0.02]]`
 
 ## Config diff
 
@@ -67,8 +63,7 @@ Inherited successful `035e` training-side stack:
 - `GPTQ_RESERVE_SECONDS=0.5`
 - `VAL_LOSS_EVERY=0`
 - sparse gate on, dense gated-attn off
-- recurrent carry still frozen, but using the final rounded `035h` values once
-  they are available
+- recurrent carry frozen to the rounded `035h` values above
 
 Pinned TTT-side intent:
 
@@ -80,8 +75,8 @@ Pinned TTT-side intent:
 Pinned runnable code source:
 
 - shell/spec branch: `exp/036-035e-8h-promotion`
-- future runnable code branch: `TBD after 035h completes`
-- future runnable code commit: `TBD after 035h completes`
+- runnable code branch: `exp/036-sparse-updated-alpha-beta`
+- runnable code commit: `74a060d`
 
 ## Regime
 
@@ -135,13 +130,13 @@ First promotion rung:
 - `8×H100`
 - full quantized eval + phased LoRA-TTT
 - preserve the successful `035e` sparse-gate stack
-- use the updated rounded frozen recurrent carry from final `035h`
+- use the updated rounded frozen recurrent carry from `035h`
 - seed chosen at launch from the approved shortlist
 
-Execution rule after unblocking:
+Execution rule:
 
-- launch from the future `036` runnable code branch derived from `035e`
-- freeze in the final rounded `035h` recurrent carry
+- launch from `exp/036-sparse-updated-alpha-beta`
+- use runnable code commit `74a060d`
 - keep the successful `035eA` sparse-gate stack otherwise
 - add the standard `030` / `#1779` full-pipeline / TTT settings
 - allow execution to choose `SEED` from:
@@ -154,7 +149,99 @@ Execution rule after unblocking:
 
 Pinned smoke/full commands:
 
-- `TBD after 035h completes`
+```bash
+python -c "import brotli"
+
+cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
+git fetch fork
+git checkout 74a060d
+
+if [ -f /workspace/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model ]; then
+  export DATA_DIR=/workspace
+elif [ -f /workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model ]; then
+  export DATA_DIR=/workspace/parameter-golf/data
+else
+  echo "CaseOps tokenizer not found under either JP or NE/NA layout" >&2
+  exit 1
+fi
+
+: "${SEED_CHOICE:=1}"
+case "$SEED_CHOICE" in
+  1|777|2025) ;;
+  *) echo "SEED_CHOICE must be one of: 1, 777, 2025" >&2; exit 1 ;;
+esac
+```
+
+Smoke:
+
+```bash
+mkdir -p /workspace/runs/036-035e-8h-promotion/smoke_seed_${SEED_CHOICE}
+mkdir -p /tmp/torch_inductor_cache_036_smoke
+
+NCCL_NET=Socket DATA_DIR=$DATA_DIR \
+ARTIFACT_DIR=/workspace/runs/036-035e-8h-promotion/smoke_seed_${SEED_CHOICE} \
+TORCHINDUCTOR_CACHE_DIR=/tmp/torch_inductor_cache_036_smoke \
+CASEOPS_ENABLED=1 \
+TTT_ENABLED=0 \
+MLP_CLIP_SIGMAS=12.0 ATTN_CLIP_SIGMAS=13.0 \
+EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 \
+MATRIX_LR=0.026 \
+GATED_ATTN_ENABLED=0 GATED_ATTN_INIT_STD=0.005 GATED_ATTN_QUANT_GATE=1 \
+SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_INIT_STD=0.0 SPARSE_ATTN_GATE_SCALE=1.0 \
+RECUR_ALPHA_ENABLED=1 \
+NUM_LOOPS=2 \
+LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.35 \
+MUON_BACKEND_STEPS=5 \
+GPTQ_RESERVE_SECONDS=0.5 GPTQ_CALIBRATION_BATCHES=16 \
+VAL_LOSS_EVERY=0 \
+FUSED_CE_ENABLED=1 \
+MIN_LR=0.10 \
+MAX_WALLCLOCK_SECONDS=120 \
+TRAIN_LOG_EVERY=100 \
+SEED=$SEED_CHOICE \
+torchrun --standalone --nproc_per_node=8 train_gpt.py \
+  > /workspace/runs/036-035e-8h-promotion/smoke_seed_${SEED_CHOICE}/train.log 2>&1
+```
+
+Full pipeline:
+
+```bash
+mkdir -p /workspace/runs/036-035e-8h-promotion/seed_${SEED_CHOICE}
+mkdir -p /tmp/torch_inductor_cache_036_8h
+
+nvidia-smi --query-gpu=timestamp,index,temperature.gpu,clocks.current.sm,power.draw,utilization.gpu,memory.used \
+  --format=csv -l 1 \
+  > /workspace/runs/036-035e-8h-promotion/seed_${SEED_CHOICE}/diag_nvsmi.csv &
+NVSMI_PID=$!
+
+NCCL_NET=Socket DATA_DIR=$DATA_DIR \
+ARTIFACT_DIR=/workspace/runs/036-035e-8h-promotion/seed_${SEED_CHOICE} \
+TORCHINDUCTOR_CACHE_DIR=/tmp/torch_inductor_cache_036_8h \
+CASEOPS_ENABLED=1 \
+TTT_ENABLED=1 PHASED_TTT_PREFIX_DOCS=2000 PHASED_TTT_NUM_PHASES=3 \
+MLP_CLIP_SIGMAS=12.0 ATTN_CLIP_SIGMAS=13.0 \
+EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 \
+MATRIX_LR=0.026 \
+GATED_ATTN_ENABLED=0 GATED_ATTN_INIT_STD=0.005 GATED_ATTN_QUANT_GATE=1 \
+SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_INIT_STD=0.0 SPARSE_ATTN_GATE_SCALE=1.0 \
+RECUR_ALPHA_ENABLED=1 \
+NUM_LOOPS=2 \
+LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.35 \
+MUON_BACKEND_STEPS=5 \
+TTT_LORA_ALPHA=144 TTT_WEIGHT_DECAY=1.0 \
+GPTQ_RESERVE_SECONDS=0.5 GPTQ_CALIBRATION_BATCHES=16 \
+VAL_LOSS_EVERY=0 \
+FUSED_CE_ENABLED=1 \
+MIN_LR=0.10 \
+MAX_WALLCLOCK_SECONDS=1200 \
+TRAIN_LOG_EVERY=100 \
+SEED=$SEED_CHOICE \
+torchrun --standalone --nproc_per_node=8 train_gpt.py \
+  > /workspace/runs/036-035e-8h-promotion/seed_${SEED_CHOICE}/train.log 2>&1
+
+kill $NVSMI_PID
+wait $NVSMI_PID 2>/dev/null || true
+```
 
 ## Acceptance
 
@@ -169,12 +256,10 @@ Secondary target:
 
 - no sign that the updated rounded carry breaks the successful sparse-gate line
 
-## Why blocked
+## Why this is now ready
 
-The current open issue is not the `8×H` protocol itself. It is the source of
-the promoted recurrent carry:
+The open parameter question is resolved:
 
-- we want final `035h` sparse learned `alpha/beta`
-- rounded to 2 decimal places
-- not the older non-sparse `035f` values
-- and not the earlier mistaken 2-significant-digit version
+- source run is `035h`
+- rounding is 2 decimal places
+- the runnable code branch now bakes in the resulting frozen values

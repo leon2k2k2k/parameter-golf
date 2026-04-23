@@ -2,8 +2,8 @@
 
 ## Thesis
 
-`035eA` is still the best completed `4×H` sparse-gate screen, but we no longer
-want a plain `035e` promotion. The promotion target is now:
+`035eA` is still the best completed `4×H` sparse-gate screen, and the next
+promotion target is:
 
 - sparse gate from `035e`
 - updated recurrent `alpha/beta` learned later in `035h` and then frozen again
@@ -52,11 +52,10 @@ Then add:
 
 ## Why leave parts open right now
 
-We do not know the final runnable code line yet, because it depends on the
-final `035h` parameters.
+We now know the runnable code line:
 
-- future runnable code branch: `TBD after 035h completes`
-- future runnable code commit: `TBD after 035h completes`
+- runnable code branch: `exp/036-sparse-updated-alpha-beta`
+- runnable code commit: `74a060d`
 
 What we may still want to decide with execution later:
 
@@ -71,5 +70,4 @@ Operational note:
   warmup
 - but it should stay clearly separate from the real `036A` quality run
 
-So `036` should exist now as a blocked shell, waiting only on the final `035h`
-parameters before freezing the runnable branch.
+So `036` is now a real promotion candidate rather than a blocked shell.
