@@ -1,7 +1,7 @@
 import base64, collections, copy, fcntl, glob, hashlib, io, lzma, math, os
 from pathlib import Path
 import random, re, subprocess, sys, time, uuid, numpy as np, sentencepiece as spm, torch, torch.distributed as dist, torch.nn.functional as F
-from torch import nn
+from torch import Tensor, nn
 from flash_attn_interface import (
     flash_attn_func as flash_attn_3_func,
     flash_attn_varlen_func,
@@ -12,6 +12,211 @@ import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 
 
+# ===== Fused softcapped cross-entropy (Triton) — training-only path =====
+_FUSED_CE_LIBRARY = "pg035dfusedce"
+_FUSED_CE_BLOCK_SIZE = 1024
+_FUSED_CE_NUM_WARPS = 4
+
+
+@triton.jit
+def _softcapped_ce_fwd_kernel(
+    logits_ptr, losses_ptr, lse_ptr, targets_ptr,
+    stride_logits_n, stride_logits_v,
+    n_rows, n_cols, softcap,
+    block_size: tl.constexpr,
+):
+    row_idx = tl.program_id(0).to(tl.int64)
+    logits_row_ptr = logits_ptr + row_idx * stride_logits_n
+    max_val = -float("inf")
+    sum_exp = 0.0
+    A = 2.0 * softcap
+    inv_C = 2.0 / softcap
+    for off in range(0, n_cols, block_size):
+        cols = off + tl.arange(0, block_size)
+        mask = cols < n_cols
+        val = tl.load(
+            logits_row_ptr + cols * stride_logits_v,
+            mask=mask, other=-float("inf"),
+        ).to(tl.float32)
+        z = A * tl.sigmoid(val * inv_C)
+        z = tl.where(mask, z, -float("inf"))
+        curr_max = tl.max(z, axis=0)
+        new_max = tl.maximum(max_val, curr_max)
+        sum_exp = sum_exp * tl.exp(max_val - new_max) + tl.sum(tl.exp(z - new_max), axis=0)
+        max_val = new_max
+    lse = max_val + tl.log(sum_exp)
+    tl.store(lse_ptr + row_idx, lse)
+    target = tl.load(targets_ptr + row_idx).to(tl.int32)
+    target_val = tl.load(logits_row_ptr + target * stride_logits_v).to(tl.float32)
+    target_z = A * tl.sigmoid(target_val * inv_C)
+    tl.store(losses_ptr + row_idx, lse - target_z)
+
+
+@triton.jit
+def _softcapped_ce_bwd_kernel(
+    grad_logits_ptr, grad_losses_ptr, lse_ptr, logits_ptr, targets_ptr,
+    stride_logits_n, stride_logits_v,
+    stride_grad_n, stride_grad_v,
+    n_rows, n_cols, softcap,
+    block_size: tl.constexpr,
+):
+    row_idx = tl.program_id(0).to(tl.int64)
+    logits_row_ptr = logits_ptr + row_idx * stride_logits_n
+    grad_row_ptr = grad_logits_ptr + row_idx * stride_grad_n
+    lse = tl.load(lse_ptr + row_idx)
+    grad_loss = tl.load(grad_losses_ptr + row_idx).to(tl.float32)
+    target = tl.load(targets_ptr + row_idx).to(tl.int32)
+    A = 2.0 * softcap
+    inv_C = 2.0 / softcap
+    dz_dx_scale = A * inv_C
+    for off in range(0, n_cols, block_size):
+        cols = off + tl.arange(0, block_size)
+        mask = cols < n_cols
+        val = tl.load(
+            logits_row_ptr + cols * stride_logits_v,
+            mask=mask, other=0.0,
+        ).to(tl.float32)
+        sigmoid_u = tl.sigmoid(val * inv_C)
+        z = A * sigmoid_u
+        probs = tl.exp(z - lse)
+        grad_z = grad_loss * (probs - tl.where(cols == target, 1.0, 0.0))
+        grad_x = grad_z * (dz_dx_scale * sigmoid_u * (1.0 - sigmoid_u))
+        tl.store(grad_row_ptr + cols * stride_grad_v, grad_x, mask=mask)
+
+
+def _validate_softcapped_ce_inputs(
+    logits: Tensor, targets: Tensor, softcap: float,
+) -> tuple[Tensor, Tensor]:
+    if logits.ndim != 2:
+        raise ValueError(f"Expected logits.ndim=2, got {logits.ndim}")
+    if targets.ndim != 1:
+        raise ValueError(f"Expected targets.ndim=1, got {targets.ndim}")
+    if logits.shape[0] != targets.shape[0]:
+        raise ValueError(
+            f"Expected matching rows, got logits={tuple(logits.shape)} targets={tuple(targets.shape)}"
+        )
+    if not logits.is_cuda or not targets.is_cuda:
+        raise ValueError("softcapped_cross_entropy requires CUDA tensors")
+    if softcap <= 0.0:
+        raise ValueError(f"softcap must be positive, got {softcap}")
+    if logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError(f"Unsupported logits dtype: {logits.dtype}")
+    logits = logits.contiguous()
+    targets = targets.contiguous()
+    if targets.dtype != torch.int64:
+        targets = targets.to(dtype=torch.int64)
+    return logits, targets
+
+
+@torch.library.custom_op(f"{_FUSED_CE_LIBRARY}::softcapped_ce", mutates_args=())
+def softcapped_ce_op(logits: Tensor, targets: Tensor, softcap: float) -> tuple[Tensor, Tensor]:
+    logits, targets = _validate_softcapped_ce_inputs(logits, targets, float(softcap))
+    n_rows, n_cols = logits.shape
+    losses = torch.empty((n_rows,), device=logits.device, dtype=torch.float32)
+    lse = torch.empty((n_rows,), device=logits.device, dtype=torch.float32)
+    _softcapped_ce_fwd_kernel[(n_rows,)](
+        logits, losses, lse, targets,
+        logits.stride(0), logits.stride(1),
+        n_rows, n_cols, float(softcap),
+        block_size=_FUSED_CE_BLOCK_SIZE, num_warps=_FUSED_CE_NUM_WARPS,
+    )
+    return losses, lse
+
+
+@softcapped_ce_op.register_fake
+def _(logits: Tensor, targets: Tensor, softcap: float):
+    if logits.ndim != 2 or targets.ndim != 1:
+        raise ValueError("softcapped_ce fake impl expects 2D logits and 1D targets")
+    if logits.shape[0] != targets.shape[0]:
+        raise ValueError(
+            f"Expected matching rows, got logits={tuple(logits.shape)} targets={tuple(targets.shape)}"
+        )
+    n_rows = logits.shape[0]
+    return (
+        logits.new_empty((n_rows,), dtype=torch.float32),
+        logits.new_empty((n_rows,), dtype=torch.float32),
+    )
+
+
+@torch.library.custom_op(f"{_FUSED_CE_LIBRARY}::softcapped_ce_backward", mutates_args=())
+def softcapped_ce_backward_op(
+    logits: Tensor, targets: Tensor, lse: Tensor, grad_losses: Tensor, softcap: float,
+) -> Tensor:
+    logits, targets = _validate_softcapped_ce_inputs(logits, targets, float(softcap))
+    lse = lse.contiguous()
+    grad_losses = grad_losses.contiguous().to(dtype=torch.float32)
+    if lse.ndim != 1 or grad_losses.ndim != 1:
+        raise ValueError("Expected 1D lse and grad_losses")
+    if lse.shape[0] != logits.shape[0] or grad_losses.shape[0] != logits.shape[0]:
+        raise ValueError(
+            f"Expected row-aligned lse/grad_losses, got logits={tuple(logits.shape)} "
+            f"lse={tuple(lse.shape)} grad_losses={tuple(grad_losses.shape)}"
+        )
+    grad_logits = torch.empty_like(logits)
+    n_rows, n_cols = logits.shape
+    _softcapped_ce_bwd_kernel[(n_rows,)](
+        grad_logits, grad_losses, lse, logits, targets,
+        logits.stride(0), logits.stride(1),
+        grad_logits.stride(0), grad_logits.stride(1),
+        n_rows, n_cols, float(softcap),
+        block_size=_FUSED_CE_BLOCK_SIZE, num_warps=_FUSED_CE_NUM_WARPS,
+    )
+    return grad_logits
+
+
+@softcapped_ce_backward_op.register_fake
+def _(logits: Tensor, targets: Tensor, lse: Tensor, grad_losses: Tensor, softcap: float):
+    if logits.ndim != 2 or targets.ndim != 1 or lse.ndim != 1 or grad_losses.ndim != 1:
+        raise ValueError("softcapped_ce_backward fake impl expects 2D logits and 1D row tensors")
+    if (
+        logits.shape[0] != targets.shape[0]
+        or logits.shape[0] != lse.shape[0]
+        or logits.shape[0] != grad_losses.shape[0]
+    ):
+        raise ValueError("softcapped_ce_backward fake impl expects row-aligned tensors")
+    return logits.new_empty(logits.shape)
+
+
+def _softcapped_ce_setup_context(
+    ctx: torch.autograd.function.FunctionCtx, inputs, output,
+) -> None:
+    logits, targets, softcap = inputs
+    _losses, lse = output
+    ctx.save_for_backward(logits, targets, lse)
+    ctx.softcap = float(softcap)
+
+
+def _softcapped_ce_backward(
+    ctx: torch.autograd.function.FunctionCtx, grad_losses: Tensor, grad_lse: "Tensor | None",
+):
+    del grad_lse
+    logits, targets, lse = ctx.saved_tensors
+    grad_logits = torch.ops.pg035dfusedce.softcapped_ce_backward(
+        logits, targets, lse, grad_losses, ctx.softcap
+    )
+    return grad_logits, None, None
+
+
+softcapped_ce_op.register_autograd(
+    _softcapped_ce_backward, setup_context=_softcapped_ce_setup_context,
+)
+
+
+def softcapped_cross_entropy(
+    logits: Tensor, targets: Tensor, softcap: float, reduction: str = "mean",
+) -> Tensor:
+    losses, _lse = torch.ops.pg035dfusedce.softcapped_ce(
+        logits, targets, float(softcap)
+    )
+    if reduction == "none":
+        return losses
+    if reduction == "sum":
+        return losses.sum()
+    if reduction == "mean":
+        return losses.mean()
+    raise ValueError(f"Unsupported reduction={reduction!r}")
+
+
 class Hyperparameters:
     data_dir = os.environ.get("DATA_DIR", "./data/")
     seed = int(os.environ.get("SEED", 1337))
@@ -20,6 +225,7 @@ class Hyperparameters:
     warmdown_frac = float(os.environ.get("WARMDOWN_FRAC", 0.75))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 786432))
+    fused_ce_enabled = bool(int(os.environ.get("FUSED_CE_ENABLED", "1")))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 500))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 6e2))
@@ -941,6 +1147,7 @@ class GPT(nn.Module):
         self.tie_embeddings = h.tie_embeddings
         self.tied_embed_init_std = h.tied_embed_init_std
         self.logit_softcap = h.logit_softcap
+        self.fused_ce_enabled = bool(h.fused_ce_enabled)
         self.tok_emb = nn.Embedding(h.vocab_size, h.model_dim)
         self.num_layers = h.num_layers
         head_dim = h.model_dim // h.num_heads
@@ -1358,12 +1565,20 @@ class GPT(nn.Module):
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
 
     def forward(self, input_ids, target_ids, cu_seqlens=None, max_seqlen=0):
-        logits = self.forward_logits(
-            input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
-        )
+        hidden = self._forward_hidden(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        logits_proj = self._project_logits(hidden)
+        flat_targets = target_ids.reshape(-1)
+        if self.fused_ce_enabled:
+            return softcapped_cross_entropy(
+                logits_proj.reshape(-1, logits_proj.size(-1)),
+                flat_targets,
+                self.logit_softcap,
+                reduction="mean",
+            )
+        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
         return F.cross_entropy(
             logits.reshape(-1, logits.size(-1)).float(),
-            target_ids.reshape(-1),
+            flat_targets,
             reduction="mean",
         )
 
