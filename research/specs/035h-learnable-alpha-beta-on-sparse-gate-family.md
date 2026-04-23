@@ -4,7 +4,7 @@
 **Created:** 2026-04-24
 **Status:** READY
 **Branch:** `exp/035h-learnable-alpha-beta-on-sparse-gate-family`
-**Commit:** `98d6c2c`
+**Commit:** `6d0c37c`
 **Links to:** `research/specs/035e-sparse-gate-on-1779-family.md`, `research/specs/035f-learnable-alpha-beta-on-1779-family.md`
 
 ## Hypothesis
@@ -84,7 +84,7 @@ python -c "import brotli"
 
 cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
 git fetch fork
-git checkout 98d6c2c
+git checkout 6d0c37c
 
 if [ -f /workspace/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model ]; then
   export DATA_DIR=/workspace
