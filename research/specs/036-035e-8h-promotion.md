@@ -4,7 +4,7 @@
 **Created:** 2026-04-24
 **Status:** FROZEN SHELL
 **Branch:** `exp/036-035e-8h-promotion`
-**Commit:** `TBD after shell freeze commit`
+**Commit:** `90e7b50`
 **Links to:** `research/specs/035e-sparse-gate-on-1779-family.md`, `research/specs/030-025b-seed314-new-ttt.md`, `runs/035-series-report.md`
 
 ## Hypothesis
