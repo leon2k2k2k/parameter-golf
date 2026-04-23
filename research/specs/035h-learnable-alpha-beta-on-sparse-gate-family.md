@@ -45,8 +45,9 @@ Relative to the successful `035eA` stack:
 - preserve `GPTQ_RESERVE_SECONDS=0.5`
 - preserve `VAL_LOSS_EVERY=0`
 - new diff: `RECUR_ALPHA_BETA_LEARNABLE=1`
-
-Initial recurrent values remain the baked `025b` constants.
+- neutral recurrent init:
+  - `recur_beta = [1.0, 1.0, 1.0]`
+  - `recur_alpha = 0`
 
 ## Regime
 
@@ -71,7 +72,9 @@ Execution rule:
 - launch from `exp/035h-learnable-alpha-beta-on-sparse-gate-family`
 - use the pinned runnable commit from this branch
 - match the successful `035eA` stack exactly
-- only add `RECUR_ALPHA_BETA_LEARNABLE=1`
+- only add:
+  - `RECUR_ALPHA_BETA_LEARNABLE=1`
+  - neutral recurrent init in code lineage
 - if the produced `config.json` differs on anything else, the rung is invalid
 
 Pinned command:

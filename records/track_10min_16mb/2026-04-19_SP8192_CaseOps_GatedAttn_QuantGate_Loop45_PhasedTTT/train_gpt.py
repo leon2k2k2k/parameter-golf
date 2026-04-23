@@ -1305,18 +1305,11 @@ class GPT(nn.Module):
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
             self.num_looped = num_looped
-            recur_beta_init = torch.tensor(
-                [1.5973426, 1.8826205, 1.9906198], dtype=torch.float32
-            )
-            recur_alpha_init = torch.tensor(
-                [[0.251953125, -0.02099609375, -0.01239013671875],
-                 [0.06689453125, -0.34765625, 0.0031280517578125],
-                 [0.138671875, 0.2412109375, 0.0272216796875]],
-                dtype=torch.float32,
-            )
-            # Spec 025b: cross-layer carry blend, frozen at 024b converged values.
-            # beta[i] scales x_new; alpha[i,j] scales detached pass-1 output of layer j.
-            # Values hardcoded from 024b seed_42 final log (shared across passes).
+            recur_beta_init = torch.ones(num_looped, dtype=torch.float32)
+            recur_alpha_init = torch.zeros(num_looped, num_looped, dtype=torch.float32)
+            # Spec 035h: neutral learnable recurrent carry init on top of the
+            # successful sparse-gate 035e stack. beta starts at identity weight
+            # on x_new; alpha starts with no cross-layer carry coupling.
             if self.recur_alpha_beta_learnable:
                 self.recur_beta = nn.Parameter(recur_beta_init.clone())
                 self.recur_alpha = nn.Parameter(recur_alpha_init.clone())
