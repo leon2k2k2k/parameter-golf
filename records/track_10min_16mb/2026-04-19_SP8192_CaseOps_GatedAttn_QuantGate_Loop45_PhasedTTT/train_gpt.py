@@ -1686,9 +1686,21 @@ class BatchedTTTLoRA(nn.Module):
                         lora.reset()
 
 
+# Polar Express per-iteration minimax Newton-Schulz coefficients (PR #1344,
+# later reused by PR #1787). This replaces stock Muon's repeated fixed
+# `(3.4445, -4.775, 2.0315)` tuple with 5 optimized per-step tuples while
+# keeping `MUON_BACKEND_STEPS=5`.
+_PE_COEFFS = (
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+)
+
+
 @torch.compile
 def zeropower_via_newtonschulz5(G, steps=10, eps=1e-07):
-    a, b, c = 3.4445, -4.775, 2.0315
     was_2d = G.ndim == 2
     if was_2d:
         G = G.unsqueeze(0)
@@ -1697,7 +1709,8 @@ def zeropower_via_newtonschulz5(G, steps=10, eps=1e-07):
     if transposed:
         X = X.mT
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
-    for _ in range(steps):
+    coeffs = _PE_COEFFS[:steps] if steps <= len(_PE_COEFFS) else _PE_COEFFS
+    for a, b, c in coeffs:
         A = X @ X.mT
         B = b * A + c * (A @ A)
         X = a * X + B @ X
