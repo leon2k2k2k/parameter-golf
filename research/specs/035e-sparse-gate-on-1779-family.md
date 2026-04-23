@@ -151,7 +151,15 @@ torchrun --standalone --nproc_per_node=4 train_gpt.py \
 ## Sanity gate
 
 Before accepting the result, execution must verify from `config.json` that the
-only intentional diffs from the intended `035d` base stack are:
+full `035d` bundle is still present:
+
+- Polar NS code lineage
+- `MIN_LR=0.10`
+- `FUSED_CE_ENABLED=1`
+- `GPTQ_RESERVE_SECONDS=0.5`
+- `VAL_LOSS_EVERY=0`
+
+and that the only additional diffs beyond `035d` are:
 
 - sparse-gate code lineage
 - `GATED_ATTN_ENABLED=0`
