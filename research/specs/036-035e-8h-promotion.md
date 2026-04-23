@@ -1,6 +1,6 @@
-# Spec 036 — `035e` `8×H` promotion with standard `#1779` TTT
+# Spec 036 — sparse-gate `8×H` promotion with updated rounded `alpha/beta`
 
-**Slug:** `035e-8h-promotion`
+**Slug:** `sparse-updated-alpha-beta-8h-promotion`
 **Created:** 2026-04-24
 **Status:** READY
 **Branch:** `exp/036-035e-8h-promotion`
@@ -9,21 +9,20 @@
 
 ## Hypothesis
 
-`035eA` was the strongest completed `4×H` screen in the current `035` family:
-
-- `035eA` pre-quant `val_bpb = 1.06617649`
-- better than `035A` by `-0.00061403`
-- better than `035dA` by `-0.00112713`
-
-So the next practical question is no longer whether sparse gate helps on the
-screen rung. It is whether the `035e` training stack survives promotion to the
-real `8×H` full pipeline with the normal `#1779` / `030` phased LoRA-TTT path.
+`035eA` was the strongest completed `4×H` screen in the current `035` family.
+`035gA` then showed that the updated learned recurrent carry from the
+learnable-alpha/beta line remained competitive as a frozen artifact. The next
+promotion question is therefore not plain `035e` anymore, but whether the
+best sparse-gate stack survives `8×H` when we replace the old baked `025b`
+carry with the coarse rounded updated carry learned from the later run.
 
 ## Baseline
 
-Primary promotion baseline:
+Primary promotion baselines:
 
 - `030` family `8×H` line with standard phased LoRA-TTT
+- `035eA` `4×H` sparse-gate screen at `1.06617649`
+- `035gA` `4×H` updated-carry freeze at `1.06711750`
 
 Reference points:
 
@@ -37,9 +36,10 @@ Reference points:
   - pre-quant `1.06798687`
   - post-TTT `1.06428960`
 
-Promotion source:
+Updated rounded recurrent carry to promote:
 
-- `035eA` `4×H` pre-quant: `1.06617649`
+- `beta = [1.7, 2.0, 2.2]`
+- `alpha = [[0.28, -0.026, 0.046], [0.068, -0.42, -0.0033], [0.11, 0.25, -0.0048]]`
 
 ## Config diff
 
@@ -47,7 +47,9 @@ Relative to the successful `035eA` `4×H` screen stack:
 
 - promote to `8×H100`
 - enable the normal `030` / `#1779` phased LoRA-TTT path
-- preserve the successful `035e` sparse-gate training stack exactly
+- preserve the successful `035e` sparse-gate training stack
+- replace the old baked `025b` recurrent carry with the updated rounded frozen
+  carry from the later learnable-alpha/beta line
 - keep `VAL_LOSS_EVERY=0` on the `8×H` promotion run
 
 Inherited successful `035e` training-side stack:
@@ -58,6 +60,7 @@ Inherited successful `035e` training-side stack:
 - `GPTQ_RESERVE_SECONDS=0.5`
 - `VAL_LOSS_EVERY=0`
 - sparse gate on, dense gated-attn off
+- recurrent carry still frozen, but now using the updated rounded values above
 
 Pinned TTT-side intent:
 
@@ -68,8 +71,8 @@ Pinned TTT-side intent:
 
 Pinned runnable code source:
 
-- branch: `exp/035e-sparse-gate-on-1779-family`
-- runnable code commit: `0e13ad0`
+- branch: `exp/036-sparse-updated-alpha-beta`
+- runnable code commit: `38e44e4`
 
 ## Regime
 
@@ -78,7 +81,8 @@ This is a full `8×H100` promotion run.
 Pinned intent:
 
 - same model/training stack as the successful `035eA`
-- same frozen recurrent `alpha/beta`
+- sparse gate path from `035e`
+- updated rounded frozen recurrent `alpha/beta`
 - same sparse gate path
 - full quantized eval + phased LoRA-TTT
 
@@ -122,14 +126,16 @@ First promotion rung:
 - `036A`
 - `8×H100`
 - full quantized eval + phased LoRA-TTT
-- preserve the successful `035e` training stack
+- preserve the successful `035e` sparse-gate stack
+- use the updated rounded frozen recurrent carry baked into the `036` code line
 - seed chosen at launch from the approved shortlist
 
 Execution rule:
 
-- launch from `exp/035e-sparse-gate-on-1779-family`
-- use the actually successful runnable code commit `0e13ad0`
-- match the successful `035eA` training stack exactly
+- launch from `exp/036-sparse-updated-alpha-beta`
+- use runnable code commit `38e44e4`
+- match the successful `035eA` training stack except for the intentionally
+  updated rounded frozen recurrent carry
 - only add the standard `030` / `#1779` full-pipeline / TTT settings
 - allow execution to choose `SEED` from:
   - `1`
@@ -144,7 +150,7 @@ python -c "import brotli"
 
 cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
 git fetch fork
-git checkout 0e13ad0
+git checkout 38e44e4
 
 if [ -f /workspace/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model ]; then
   export DATA_DIR=/workspace
@@ -196,7 +202,7 @@ python -c "import brotli"
 
 cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT
 git fetch fork
-git checkout 0e13ad0
+git checkout 38e44e4
 
 if [ -f /workspace/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model ]; then
   export DATA_DIR=/workspace
