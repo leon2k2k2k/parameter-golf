@@ -1782,6 +1782,15 @@ class GPT(nn.Module):
             n_c = n.contiguous()
             g = torch.sigmoid(F.linear(n_c, attn.attn_gate_w.to(n.dtype)))
             y = y * g[..., None]
+        # Sparse gate (TTT path). Match eval path semantics: gate uses the
+        # post-norm block input restricted to gate_window dims.
+        if attn.sparse_attn_gate:
+            gate_in = n[..., : attn.gate_window].contiguous()
+            g = torch.sigmoid(
+                attn.sparse_attn_gate_scale
+                * F.linear(gate_in, attn.attn_gate_w.to(n.dtype))
+            )
+            y = y * g[..., None]
         y = y.reshape(bsz, seqlen, dim)
         # SpinQuant V1 (TTT path): rotate attention output before out_proj.
         if CastedLinear._sq_active and hasattr(attn, "_sq_R_attn_proj_in"):
@@ -1842,6 +1851,14 @@ class GPT(nn.Module):
         if attn.gated_attn:
             n_c = n.contiguous()
             g = torch.sigmoid(F.linear(n_c, attn.attn_gate_w.to(n.dtype)))
+            y = y * g[..., None]
+        # Sparse gate (TTT parallel path). Match eval path semantics.
+        if attn.sparse_attn_gate:
+            gate_in = n[..., : attn.gate_window].contiguous()
+            g = torch.sigmoid(
+                attn.sparse_attn_gate_scale
+                * F.linear(gate_in, attn.attn_gate_w.to(n.dtype))
+            )
             y = y * g[..., None]
         y = y.reshape(bsz, seqlen, dim)
         # SpinQuant V1 (TTT parallel path): rotate attention output before out_proj.
