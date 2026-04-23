@@ -1303,19 +1303,19 @@ class GPT(nn.Module):
         if self.recur_alpha_enabled:
             num_looped = h.loop_end - h.loop_start + 1
             self.num_looped = num_looped
-            # Spec 025b: cross-layer carry blend, frozen at 024b converged values.
-            # beta[i] scales x_new; alpha[i,j] scales detached pass-1 output of layer j.
-            # Values hardcoded from 024b seed_42 final log (shared across passes).
+            # Spec 036: sparse-gate 8×H promotion using updated recurrent carry
+            # from the latest learnable-alpha/beta experiment, rounded to 2
+            # significant digits for a coarse but stable frozen carry prior.
             self.register_buffer(
                 "recur_beta",
-                torch.tensor([1.5973426, 1.8826205, 1.9906198], dtype=torch.float32),
+                torch.tensor([1.7, 2.0, 2.2], dtype=torch.float32),
             )
             self.register_buffer(
                 "recur_alpha",
                 torch.tensor(
-                    [[0.251953125, -0.02099609375, -0.01239013671875],
-                     [0.06689453125, -0.34765625, 0.0031280517578125],
-                     [0.138671875, 0.2412109375, 0.0272216796875]],
+                    [[0.28, -0.026, 0.046],
+                     [0.068, -0.42, -0.0033],
+                     [0.11, 0.25, -0.0048]],
                     dtype=torch.float32,
                 ),
             )
