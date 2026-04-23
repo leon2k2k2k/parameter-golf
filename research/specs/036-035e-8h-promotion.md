@@ -107,7 +107,7 @@ the chosen seed in `notes.md` and `config.json`.
 ## Hardware ladder
 
 0. optional smoke: `8×H100`, `600s`, no TTT, compile/preflight only
-1. `8×H100` full pipeline, first promotion seed from the approved shortlist
+1. `8×H100` full pipeline, `600s`, first promotion seed from the approved shortlist
 
 Optional later:
 
@@ -233,7 +233,7 @@ GPTQ_RESERVE_SECONDS=0.5 GPTQ_CALIBRATION_BATCHES=16 \
 VAL_LOSS_EVERY=0 \
 FUSED_CE_ENABLED=1 \
 MIN_LR=0.10 \
-MAX_WALLCLOCK_SECONDS=1200 \
+MAX_WALLCLOCK_SECONDS=600 \
 TRAIN_LOG_EVERY=100 \
 SEED=$SEED_CHOICE \
 torchrun --standalone --nproc_per_node=8 train_gpt.py \
