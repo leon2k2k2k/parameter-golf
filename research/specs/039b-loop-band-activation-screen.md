@@ -4,7 +4,7 @@
 **Created:** 2026-04-24
 **Status:** READY
 **Branch:** `exp/039b-loop-band-activation-screen`
-**Commit:** `f3853fd`
+**Commit:** `8f10d16`
 **Links to:** `research/ideas/039b-loop-band-activation-screen.md`, `research/specs/039-neg-slope-screen-on-1797-base.md`
 
 ## Hypothesis
@@ -49,7 +49,7 @@ Interpretation:
 Pinned runnable code source:
 
 - branch: `exp/039b-loop-band-activation-screen`
-- commit: `f3853fd`
+- commit: `8f10d16`
 - script:
   [train_gpt.py](/home/claude-user/ai-workspace/projects/parameter-golf/worktrees/039b-loop-band-activation/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py)
 
