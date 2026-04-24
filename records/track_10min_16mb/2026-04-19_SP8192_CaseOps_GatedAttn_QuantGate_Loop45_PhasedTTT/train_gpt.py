@@ -346,6 +346,15 @@ class Hyperparameters:
     sparse_attn_gate_enabled = bool(int(os.environ.get("SPARSE_ATTN_GATE_ENABLED", "0")))
     sparse_attn_gate_init_std = float(os.environ.get("SPARSE_ATTN_GATE_INIT_STD", 0.0))
     sparse_attn_gate_scale = float(os.environ.get("SPARSE_ATTN_GATE_SCALE", 1.0))
+    # LQER asymmetric rank-k correction on top-K quant-error tensors.
+    # Disabled by default so the file stays byte-identical to the 037 stack
+    # unless explicitly enabled by a future spec.
+    lqer_enabled = bool(int(os.environ.get("LQER_ENABLED", "0")))
+    lqer_rank = int(os.environ.get("LQER_RANK", 4))
+    lqer_top_k = int(os.environ.get("LQER_TOP_K", 3))
+    lqer_factor_bits = int(os.environ.get("LQER_FACTOR_BITS", 4))
+    lqer_asym_enabled = bool(int(os.environ.get("LQER_ASYM_ENABLED", "1")))
+    lqer_asym_group = int(os.environ.get("LQER_ASYM_GROUP", "64"))
     # Dedicated int8-per-row quantization for `attn_gate_w` tensors. These are
     # small ((num_heads, dim) = (8, 512) = 4096 params) and bypass GPTQ via the
     # numel<=65536 passthrough branch -> stored as fp16 (8 KB/layer, ~65 KB total
@@ -2448,10 +2457,33 @@ def _quantize_gate_int8_row(w):
     return q, s
 
 
+def _lqer_pack(A, B, bits):
+    rng = 2 ** (bits - 1) - 1
+    sA = (A.abs().amax(dim=1).clamp_min(1e-10) / rng).to(torch.float16)
+    sB = (B.abs().amax(dim=1).clamp_min(1e-10) / rng).to(torch.float16)
+    qA = torch.clamp(torch.round(A / sA.float().view(-1, 1)), -rng, rng).to(torch.int8)
+    qB = torch.clamp(torch.round(B / sB.float().view(-1, 1)), -rng, rng).to(torch.int8)
+    return qA, sA, qB, sB
+
+
+def _lqer_pack_asym(A, B, g=64):
+    sA = (A.abs().amax().clamp_min(1e-10) / 1.5).to(torch.float16)
+    qA = torch.clamp(torch.round(A / sA.float()), -2, 1).to(torch.int8)
+    Bf = B.reshape(-1, g)
+    Bmax = Bf.abs().amax(dim=-1, keepdim=True).clamp_min(1e-10)
+    sB = (Bmax / 7.5).to(torch.float16).reshape(-1)
+    qB = torch.clamp(torch.round(Bf / sB.float().reshape(-1, 1)), -8, 7).to(
+        torch.int8
+    ).reshape(B.shape)
+    return qA, sA, qB, sB
+
+
 def gptq_mixed_quantize(state_dict, hessians, h):
     result = {}
     meta = {}
     quant_gate = bool(getattr(h, "gated_attn_quant_gate", False))
+    lqer_on = bool(getattr(h, "lqer_enabled", False))
+    lqer_cands = {}
     for (name, tensor) in state_dict.items():
         t = tensor.detach().cpu().contiguous()
         # Dedicated int8-per-row path for attn_gate_w (bypasses both GPTQ and
@@ -2462,7 +2494,7 @@ def gptq_mixed_quantize(state_dict, hessians, h):
             and t.is_floating_point()
             and t.ndim == 2
             and name.endswith(".attn_gate_w")
-            and 1024 <= t.numel() <= 8192
+            and 32 <= t.numel() <= 8192
         ):
             gq, gs = _quantize_gate_int8_row(t)
             result[name + ".gq"] = gq
@@ -2490,6 +2522,33 @@ def gptq_mixed_quantize(state_dict, hessians, h):
         result[name + ".q"] = q
         result[name + ".scale"] = s
         meta[name] = f"gptq (int{bits})"
+        if lqer_on:
+            W_q = q.float() * s.float().view(-1, 1)
+            E = t.float() - W_q
+            lqer_cands[name] = (E, float(E.norm()))
+    if lqer_on and lqer_cands:
+        top = sorted(lqer_cands.items(), key=lambda kv: -kv[1][1])[: h.lqer_top_k]
+        asym_on = bool(getattr(h, "lqer_asym_enabled", False))
+        asym_g = int(getattr(h, "lqer_asym_group", 64))
+        for (name, (E, _)) in top:
+            U, S, Vh = torch.linalg.svd(E, full_matrices=False)
+            r = min(h.lqer_rank, S.numel())
+            A = (U[:, :r] * S[:r]).contiguous()
+            B = Vh[:r, :].contiguous()
+            if asym_on and B.numel() % asym_g == 0:
+                qA, sA, qB, sB = _lqer_pack_asym(A, B, asym_g)
+                result[name + ".lqA_a"] = qA
+                result[name + ".lqAs_a"] = sA
+                result[name + ".lqB_a"] = qB
+                result[name + ".lqBs_a"] = sB
+                meta[name] = meta[name] + "+lqer_asym"
+            else:
+                qA, sA, qB, sB = _lqer_pack(A, B, h.lqer_factor_bits)
+                result[name + ".lqA"] = qA
+                result[name + ".lqAs"] = sA
+                result[name + ".lqB"] = qB
+                result[name + ".lqBs"] = sB
+                meta[name] = meta[name] + "+lqer"
     categories = collections.defaultdict(set)
     for (name, cat) in meta.items():
         short = re.sub("\\.\\d+$", "", re.sub("blocks\\.\\d+", "blocks", name))
@@ -2522,11 +2581,25 @@ def dequantize_mixed(result, meta, template_sd):
             continue
         q, s = result[name + ".q"], result[name + ".scale"]
         if s.ndim > 0:
-            out[name] = (
-                q.float() * s.float().view(q.shape[0], *[1] * (q.ndim - 1))
-            ).to(orig_dtype)
+            W = q.float() * s.float().view(q.shape[0], *[1] * (q.ndim - 1))
         else:
-            out[name] = (q.float() * float(s.item())).to(orig_dtype)
+            W = q.float() * float(s.item())
+        if "lqer_asym" in info:
+            qA_t = result[name + ".lqA_a"]
+            sA_t = result[name + ".lqAs_a"]
+            qB_t = result[name + ".lqB_a"]
+            sB_t = result[name + ".lqBs_a"]
+            qA = qA_t.float() * float(sA_t)
+            g_sz = qB_t.numel() // sB_t.numel()
+            qB = (qB_t.reshape(-1, g_sz).float() * sB_t.float().view(-1, 1)).reshape(
+                qB_t.shape
+            )
+            W = W + qA @ qB
+        elif "lqer" in info:
+            qA = result[name + ".lqA"].float() * result[name + ".lqAs"].float().view(-1, 1)
+            qB = result[name + ".lqB"].float() * result[name + ".lqBs"].float().view(-1, 1)
+            W = W + qA @ qB
+        out[name] = W.to(orig_dtype)
     return out
 
 
