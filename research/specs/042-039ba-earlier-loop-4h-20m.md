@@ -31,6 +31,24 @@ Control arm:
 - middle layers `3,4,5` use `penalized_tanh`
 - `ENABLE_LOOPING_AT=0.35`
 
+Practical comparison context:
+
+- the short-run win we are trying to preserve is `039bA` on the `4×H100`,
+  `600s`, training-only rung
+- the failed promotion baseline is `041A`, which took the same loop-band
+  `penalized_tanh` idea to the `8×H100`, `600s`, full pipeline and looked
+  materially worse than `038A`
+- this spec exists because the `041A` promotion went badly enough that we want
+  to repair the schedule on a cheap `4H` rung before spending another `8H` run
+
+Intended role of `042`:
+
+- approximate a stronger promotion-oriented screen from the winning `039bA`
+  base
+- push the same activation idea to a longer effective runtime on `4H`
+- if it works, use that as the candidate path for the next real `8H`
+  promotion attempt
+
 ## Config diff
 
 Keep the winning `039bA` activation setup fixed:
