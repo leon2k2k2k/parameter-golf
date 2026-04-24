@@ -4,7 +4,7 @@
 **Created:** 2026-04-25
 **Status:** READY
 **Branch:** `exp/039bd-penalized-tanh-plus-040c`
-**Commit:** `TBD`
+**Commit:** `89aff8c`
 **Links to:** `research/ideas/039bd-penalized-tanh-plus-040c.md`, `research/specs/039b-loop-band-activation-screen.md`, `research/specs/040-loop-layer-mlp-reallocation-screen.md`
 
 ## Hypothesis
@@ -50,7 +50,7 @@ Keep the whole `038/039` family fixed and apply:
 Pinned runnable code source:
 
 - branch: `exp/039bd-penalized-tanh-plus-040c`
-- commit: `TBD`
+- commit: `89aff8c`
 - script:
   [train_gpt.py](/home/claude-user/ai-workspace/projects/parameter-golf/worktrees/039bd-composite-screen/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py)
 
