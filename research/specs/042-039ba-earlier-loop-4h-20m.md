@@ -126,10 +126,30 @@ Same seed, same env otherwise.
 
 Decision rule:
 
-- if `042B` improves pre-quant post-EMA `val_bpb` and/or maintains a better
-  late train-loss curve than `042A`, the `042` family stays alive
-- if `042B` is clearly worse, pause timing tweaks before broadening the
+- if `042A` improves pre-quant post-EMA `val_bpb` and/or maintains a better
+  late train-loss curve than the original `039bA` win, the `042` family stays
+  alive
+- if `042A` is clearly worse than the original `039bA` trajectory, pause timing
+  tweaks before broadening the
   activation change
+
+## Monitoring
+
+Priority arm:
+
+- run `042A` first
+
+Primary live comparison:
+
+- compare `042A` against the original `039bA` result
+- this is the real question: can earlier loop onset preserve the `039bA`
+  training signal on a longer `4H` rung?
+
+Secondary comparison:
+
+- `042B` exists as the same-rung control (`1200s`, `ENABLE_LOOPING_AT=0.35`)
+- use it if the `042A` read is ambiguous or if we need the cleaner same-rung
+  control after the first result
 
 ## Resolved base env block
 
