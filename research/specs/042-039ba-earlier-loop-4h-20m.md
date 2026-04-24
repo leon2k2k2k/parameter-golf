@@ -48,16 +48,16 @@ Change only:
 
 Two arms:
 
-### 042A — control
-
-- same as `039bA`
-- `ENABLE_LOOPING_AT=0.35`
-- `MAX_WALLCLOCK_SECONDS=1200`
-
-### 042B — earlier loop onset
+### 042A — earlier loop onset
 
 - same as `039bA`
 - `ENABLE_LOOPING_AT=0.175`
+- `MAX_WALLCLOCK_SECONDS=1200`
+
+### 042B — control
+
+- same as `039bA`
+- `ENABLE_LOOPING_AT=0.35`
 - `MAX_WALLCLOCK_SECONDS=1200`
 
 ## Regime
@@ -101,8 +101,8 @@ Use one seed only:
 
 Run two jobs:
 
-1. `042A` control (`ENABLE_LOOPING_AT=0.35`)
-2. `042B` earlier loop (`ENABLE_LOOPING_AT=0.175`)
+1. `042A` earlier loop (`ENABLE_LOOPING_AT=0.175`)
+2. `042B` control (`ENABLE_LOOPING_AT=0.35`)
 
 Same seed, same env otherwise.
 
@@ -219,9 +219,9 @@ TRAINING_ONLY_SCREEN=1
 ```bash
 for arm in 042A 042B; do
   if [ "$arm" = "042A" ]; then
-    LOOP_FRAC=0.35
-  else
     LOOP_FRAC=0.175
+  else
+    LOOP_FRAC=0.35
   fi
 
   env \
