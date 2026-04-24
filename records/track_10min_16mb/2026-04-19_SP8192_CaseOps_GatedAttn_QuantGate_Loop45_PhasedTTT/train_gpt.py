@@ -489,8 +489,17 @@ def _layer_mlp_mults(h):
     return mults
 
 
+def _aligned_hidden_dim(hidden_dim: int, multiple: int = 8) -> int:
+    if hidden_dim <= 0:
+        raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+    return ((hidden_dim + multiple - 1) // multiple) * multiple
+
+
 def _layer_hidden_dims(h):
-    return [int(round(mult * h.model_dim)) for mult in _layer_mlp_mults(h)]
+    dims = [int(round(mult * h.model_dim)) for mult in _layer_mlp_mults(h)]
+    if not h.mlp_schedule_enabled:
+        return dims
+    return [_aligned_hidden_dim(dim) for dim in dims]
 
 
 def _active_mlp_param_count(h):
