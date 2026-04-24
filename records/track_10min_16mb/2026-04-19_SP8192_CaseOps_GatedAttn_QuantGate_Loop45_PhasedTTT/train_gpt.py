@@ -239,6 +239,7 @@ class Hyperparameters:
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
+    negative_slope = float(os.environ.get("NEGATIVE_SLOPE", 0.5))
     skip_gates_enabled = bool(int(os.environ.get("SKIP_GATES_ENABLED", "1")))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 3e1))
@@ -806,6 +807,7 @@ def linear_leaky_relu_square_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     NUM_SMS: tl.constexpr,
     FORWARD: tl.constexpr,
+    NEGATIVE_SLOPE: tl.constexpr,
 ):
     dtype = tl.bfloat16
     start_pid = tl.program_id(axis=0)
@@ -836,18 +838,18 @@ def linear_leaky_relu_square_kernel(
         if not FORWARD:
             pre0 = aux_desc.load([offs_am_c, offs_bn_c])
             pre1 = aux_desc.load([offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2])
-            c0 = c0 * tl.where(pre0 > 0, 2.0 * pre0, 0.5 * pre0)
-            c1 = c1 * tl.where(pre1 > 0, 2.0 * pre1, 0.5 * pre1)
+            c0 = c0 * tl.where(pre0 > 0, 2.0 * pre0, 2.0 * NEGATIVE_SLOPE * pre0)
+            c1 = c1 * tl.where(pre1 > 0, 2.0 * pre1, 2.0 * NEGATIVE_SLOPE * pre1)
         c_desc.store([offs_am_c, offs_bn_c], c0)
         c_desc.store([offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2], c1)
         if FORWARD:
-            aux0 = tl.where(c0 > 0, c0, 0.5 * c0)
-            aux1 = tl.where(c1 > 0, c1, 0.5 * c1)
+            aux0 = tl.where(c0 > 0, c0, NEGATIVE_SLOPE * c0)
+            aux1 = tl.where(c1 > 0, c1, NEGATIVE_SLOPE * c1)
             aux_desc.store([offs_am_c, offs_bn_c], aux0 * aux0)
             aux_desc.store([offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2], aux1 * aux1)
 
 
-def linear_leaky_relu_square(a, b, aux=None):
+def linear_leaky_relu_square(a, b, negative_slope, aux=None):
     M, K = a.shape
     N, K2 = b.shape
     assert K == K2
@@ -878,6 +880,7 @@ def linear_leaky_relu_square(a, b, aux=None):
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         NUM_SMS=num_sms,
         FORWARD=forward,
+        NEGATIVE_SLOPE=negative_slope,
         num_stages=num_stages,
         num_warps=8,
     )
@@ -888,10 +891,11 @@ def linear_leaky_relu_square(a, b, aux=None):
 
 class FusedLinearLeakyReLUSquareFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, w1, w2):
+    def forward(ctx, x, w1, w2, negative_slope):
         x_flat = x.reshape(-1, x.shape[-1])
-        pre, post = linear_leaky_relu_square(x_flat, w1)
+        pre, post = linear_leaky_relu_square(x_flat, w1, negative_slope)
         out = F.linear(post, w2)
+        ctx.negative_slope = negative_slope
         ctx.save_for_backward(x, w1, w2, pre, post)
         return out.view(*x.shape[:-1], out.shape[-1])
 
@@ -901,10 +905,12 @@ class FusedLinearLeakyReLUSquareFunction(torch.autograd.Function):
         x_flat = x.reshape(-1, x.shape[-1])
         grad_output_flat = grad_output.reshape(-1, grad_output.shape[-1])
         dw2 = grad_output_flat.T @ post
-        dpre = linear_leaky_relu_square(grad_output_flat, w2.T.contiguous(), aux=pre)
+        dpre = linear_leaky_relu_square(
+            grad_output_flat, w2.T.contiguous(), ctx.negative_slope, aux=pre
+        )
         dw1 = dpre.T @ x_flat
         dx = dpre @ w1
-        return dx.view_as(x), dw1, dw2
+        return dx.view_as(x), dw1, dw2, None
 
 
 FusedLeakyReLUSquareMLP = FusedLinearLeakyReLUSquareFunction.apply
@@ -1100,9 +1106,10 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim, mlp_mult):
+    def __init__(self, dim, mlp_mult, negative_slope):
         super().__init__()
         self.use_fused = True
+        self.negative_slope = negative_slope
 
     def forward(self, x, up_w, down_w):
         # SpinQuant V1 forward rotations. Branches die at compile when _sq_active=False.
@@ -1113,8 +1120,12 @@ class MLP(nn.Module):
         # SQ is only active post-deserialize (eval/TTT) where fused is already typically
         # off; this guard covers the TTT-train case if it ever arises.
         if self.training and self.use_fused and not sq:
-            return FusedLeakyReLUSquareMLP(x, up_w.to(x.dtype), down_w.to(x.dtype))
-        hidden = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5).square()
+            return FusedLeakyReLUSquareMLP(
+                x, up_w.to(x.dtype), down_w.to(x.dtype), self.negative_slope
+            )
+        hidden = F.leaky_relu(
+            F.linear(x, up_w.to(x.dtype)), negative_slope=self.negative_slope
+        ).square()
         # Capture BEFORE the mlp_proj_in rotation so the Hessian stays on unrotated hidden.
         self._last_down_input = hidden.detach() if getattr(self, "_calib", False) else None
         if sq and hasattr(self, "_sq_R_mlp_proj_in"):
@@ -1134,6 +1145,7 @@ class Block(nn.Module):
         train_seq_len,
         layer_idx=0,
         ln_scale=False,
+        negative_slope=0.5,
         yarn=True,
         attn_out_gate=False,
         attn_out_gate_src="proj",
@@ -1155,7 +1167,7 @@ class Block(nn.Module):
             sparse_attn_gate_init_std=sparse_attn_gate_init_std,
             sparse_attn_gate_scale=sparse_attn_gate_scale,
         )
-        self.mlp = MLP(dim, mlp_mult)
+        self.mlp = MLP(dim, mlp_mult, negative_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(
@@ -1210,6 +1222,7 @@ class GPT(nn.Module):
                     h.train_seq_len,
                     layer_idx=i,
                     ln_scale=h.ln_scale,
+                    negative_slope=h.negative_slope,
                     yarn=h.rope_yarn,
                     attn_out_gate=h.attn_out_gate_enabled,
                     attn_out_gate_src=h.attn_out_gate_src,
