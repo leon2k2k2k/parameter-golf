@@ -4,7 +4,7 @@
 **Created:** 2026-04-25
 **Status:** READY
 **Branch:** `exp/041b-1797-penalized-tanh`
-**Commit:** `TBD`
+**Commit:** `26eb119`
 
 ## Hypothesis
 
@@ -22,7 +22,7 @@ carry by env.
 ## Runnable code source
 
 - branch: `exp/041b-1797-penalized-tanh`
-- commit: `TBD`
+- commit: `26eb119`
 - script:
   [train_gpt.py](/home/claude-user/ai-workspace/projects/parameter-golf/worktrees/041b-1797-penalized-tanh/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py)
 
