@@ -874,8 +874,16 @@ def linear_leaky_relu_square_kernel(
         if not FORWARD:
             pre0 = aux_desc.load([offs_am_c, offs_bn_c])
             pre1 = aux_desc.load([offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2])
-            c0 = c0 * tl.where(pre0 > 0, 2.0 * pre0, 2.0 * NEGATIVE_SLOPE * pre0)
-            c1 = c1 * tl.where(pre1 > 0, 2.0 * pre1, 2.0 * NEGATIVE_SLOPE * pre1)
+            c0 = c0 * tl.where(
+                pre0 > 0,
+                2.0 * pre0,
+                2.0 * NEGATIVE_SLOPE * NEGATIVE_SLOPE * pre0,
+            )
+            c1 = c1 * tl.where(
+                pre1 > 0,
+                2.0 * pre1,
+                2.0 * NEGATIVE_SLOPE * NEGATIVE_SLOPE * pre1,
+            )
         c_desc.store([offs_am_c, offs_bn_c], c0)
         c_desc.store([offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2], c1)
         if FORWARD:
