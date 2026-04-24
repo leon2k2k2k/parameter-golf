@@ -230,6 +230,7 @@ class Hyperparameters:
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 500))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 6e2))
+    checkpoint_at_minutes = float(os.environ.get("CHECKPOINT_AT_MINUTES", 0.0))
     val_batch_tokens = int(os.environ.get("VAL_BATCH_TOKENS", 524288))
     eval_seq_len = int(os.environ.get("EVAL_SEQ_LEN", 2048))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 4000))
@@ -3683,6 +3684,35 @@ def timed_eval(label, fn, *args, **kwargs):
     return val_loss, val_bpb
 
 
+def save_training_checkpoint(h, base_model, optimizers, ema_state, step, training_time_ms):
+    checkpoint_dir = (
+        Path(h.artifact_dir)
+        if h.artifact_dir
+        else Path(h.logfile).resolve().parent
+    )
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_dir / f"{h.run_id}_step{step}_ckpt.pt"
+    payload = {
+        "run_id": h.run_id,
+        "step": step,
+        "training_time_ms": float(training_time_ms),
+        "model_state_dict": {
+            name: tensor.detach().cpu()
+            for (name, tensor) in base_model.state_dict().items()
+        },
+        "optimizer_states": [copy.deepcopy(opt.state_dict()) for opt in optimizers],
+        "ema_state": {
+            name: tensor.detach().cpu()
+            for (name, tensor) in ema_state.items()
+        },
+    }
+    torch.save(payload, checkpoint_path)
+    log(
+        f"checkpoint:saved path:{checkpoint_path} step:{step} train_time:{training_time_ms/60000:.1f}m"
+    )
+    return checkpoint_path
+
+
 def train_model(h, device, val_data):
     base_model = GPT(h).to(device).bfloat16()
     restore_fp32_params(base_model)
@@ -3847,6 +3877,10 @@ def train_model(h, device, val_data):
     ema_decay = h.ema_decay
     training_time_ms = 0.0
     stop_after_step = None
+    checkpoint_saved = False
+    checkpoint_target_ms = (
+        h.checkpoint_at_minutes * 60 * 1e3 if h.checkpoint_at_minutes > 0 else None
+    )
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     step = 0
@@ -3940,6 +3974,15 @@ def train_model(h, device, val_data):
             reached_cap = bool(reached_cap_tensor.item())
         if stop_after_step is None and reached_cap:
             stop_after_step = step
+        if (
+            not checkpoint_saved
+            and checkpoint_target_ms is not None
+            and approx_training_time_ms >= checkpoint_target_ms
+        ):
+            save_training_checkpoint(
+                h, base_model, optimizers, ema_state, step, approx_training_time_ms
+            )
+            checkpoint_saved = True
     log(
         f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB"
     )
