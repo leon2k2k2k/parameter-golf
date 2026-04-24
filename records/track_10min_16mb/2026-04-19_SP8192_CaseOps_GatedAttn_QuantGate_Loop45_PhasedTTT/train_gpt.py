@@ -240,6 +240,13 @@ class Hyperparameters:
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
     negative_slope = float(os.environ.get("NEGATIVE_SLOPE", 0.5))
+    mlp_outer_activation = os.environ.get("MLP_OUTER_ACTIVATION", "leaky_relu_square")
+    mlp_middle_activation = os.environ.get("MLP_MIDDLE_ACTIVATION", "leaky_relu_square")
+    mlp_middle_negative_slope = float(
+        os.environ.get("MLP_MIDDLE_NEGATIVE_SLOPE", os.environ.get("NEGATIVE_SLOPE", 0.5))
+    )
+    mlp_middle_layers = os.environ.get("MLP_MIDDLE_LAYERS", "3,4,5")
+    training_only_screen = bool(int(os.environ.get("TRAINING_ONLY_SCREEN", "0")))
     skip_gates_enabled = bool(int(os.environ.get("SKIP_GATES_ENABLED", "1")))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 3e1))
@@ -442,6 +449,32 @@ class Hyperparameters:
         if artifact_dir
         else "final_model.int6.ptz"
     )
+
+
+def _parse_layer_list(raw: str) -> tuple[int, ...]:
+    vals = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        vals.append(int(part))
+    return tuple(vals)
+
+
+def _penalized_tanh(x, penalty=0.25):
+    tx = torch.tanh(x)
+    return torch.where(x >= 0, tx, penalty * tx)
+
+
+def _layer_mlp_activation_specs(h):
+    middle = set(_parse_layer_list(h.mlp_middle_layers))
+    specs = []
+    for i in range(h.num_layers):
+        if i in middle:
+            specs.append((h.mlp_middle_activation, h.mlp_middle_negative_slope))
+        else:
+            specs.append((h.mlp_outer_activation, h.negative_slope))
+    return tuple(specs)
 
 
 _logger_hparams = None
@@ -1106,10 +1139,24 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim, mlp_mult, negative_slope):
+    def __init__(
+        self, dim, mlp_mult, negative_slope, activation_name="leaky_relu_square"
+    ):
         super().__init__()
-        self.use_fused = True
+        self.use_fused = activation_name == "leaky_relu_square"
         self.negative_slope = negative_slope
+        self.activation_name = activation_name
+
+    def _activate(self, pre):
+        if self.activation_name == "leaky_relu_square":
+            return F.leaky_relu(pre, negative_slope=self.negative_slope).square()
+        if self.activation_name == "relu_square":
+            return F.relu(pre).square()
+        if self.activation_name == "tanh":
+            return torch.tanh(pre)
+        if self.activation_name == "penalized_tanh":
+            return _penalized_tanh(pre)
+        raise ValueError(f"Unknown MLP activation: {self.activation_name}")
 
     def forward(self, x, up_w, down_w):
         # SpinQuant V1 forward rotations. Branches die at compile when _sq_active=False.
@@ -1123,9 +1170,7 @@ class MLP(nn.Module):
             return FusedLeakyReLUSquareMLP(
                 x, up_w.to(x.dtype), down_w.to(x.dtype), self.negative_slope
             )
-        hidden = F.leaky_relu(
-            F.linear(x, up_w.to(x.dtype)), negative_slope=self.negative_slope
-        ).square()
+        hidden = self._activate(F.linear(x, up_w.to(x.dtype)))
         # Capture BEFORE the mlp_proj_in rotation so the Hessian stays on unrotated hidden.
         self._last_down_input = hidden.detach() if getattr(self, "_calib", False) else None
         if sq and hasattr(self, "_sq_R_mlp_proj_in"):
@@ -1146,6 +1191,7 @@ class Block(nn.Module):
         layer_idx=0,
         ln_scale=False,
         negative_slope=0.5,
+        activation_name="leaky_relu_square",
         yarn=True,
         attn_out_gate=False,
         attn_out_gate_src="proj",
@@ -1167,7 +1213,7 @@ class Block(nn.Module):
             sparse_attn_gate_init_std=sparse_attn_gate_init_std,
             sparse_attn_gate_scale=sparse_attn_gate_scale,
         )
-        self.mlp = MLP(dim, mlp_mult, negative_slope)
+        self.mlp = MLP(dim, mlp_mult, negative_slope, activation_name=activation_name)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(
@@ -1199,6 +1245,7 @@ class GPT(nn.Module):
         self.tied_embed_init_std = h.tied_embed_init_std
         self.logit_softcap = h.logit_softcap
         self.fused_ce_enabled = bool(h.fused_ce_enabled)
+        self.layer_mlp_activation_specs = _layer_mlp_activation_specs(h)
         self.tok_emb = nn.Embedding(h.vocab_size, h.model_dim)
         self.num_layers = h.num_layers
         head_dim = h.model_dim // h.num_heads
@@ -1222,7 +1269,8 @@ class GPT(nn.Module):
                     h.train_seq_len,
                     layer_idx=i,
                     ln_scale=h.ln_scale,
-                    negative_slope=h.negative_slope,
+                    negative_slope=self.layer_mlp_activation_specs[i][1],
+                    activation_name=self.layer_mlp_activation_specs[i][0],
                     yarn=h.rope_yarn,
                     attn_out_gate=h.attn_out_gate_enabled,
                     attn_out_gate_src=h.attn_out_gate_src,
@@ -3643,6 +3691,7 @@ def train_model(h, device, val_data):
     )
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
+    log(f"mlp_activation_specs:{base_model.layer_mlp_activation_specs}")
     log(
         f"recur_alpha: enabled={h.recur_alpha_enabled} "
         f"num_loops={h.num_loops} loop_start={h.loop_start} loop_end={h.loop_end} "
@@ -3923,6 +3972,9 @@ def train_and_eval(h, device):
         compiled_model,
         compiled_forward_logits,
     )
+    if h.training_only_screen:
+        log("training_only_screen:stopping_after_prequant_eval")
+        return
     serialize(h, base_model, Path(__file__).read_text(encoding="utf-8"))
     if h.distributed:
         dist.barrier()
