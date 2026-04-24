@@ -225,6 +225,7 @@ class Hyperparameters:
     warmdown_frac = float(os.environ.get("WARMDOWN_FRAC", 0.75))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     lr_schedule_mode = os.environ.get("LR_SCHEDULE_MODE", "default")
+    second_half_floor_lr = float(os.environ.get("SECOND_HALF_FLOOR_LR", 0.1))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 786432))
     fused_ce_enabled = bool(int(os.environ.get("FUSED_CE_ENABLED", "1")))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
@@ -3748,6 +3749,10 @@ def train_model(h, device, val_data):
         if h.lr_schedule_mode == "first_half_default_then_floor":
             if frac >= 0.5:
                 return h.min_lr
+            frac = frac / 0.5
+        if h.lr_schedule_mode == "first_half_default_then_second_half_floor":
+            if frac >= 0.5:
+                return h.second_half_floor_lr
             frac = frac / 0.5
         if h.warmdown_frac <= 0:
             return 1.0

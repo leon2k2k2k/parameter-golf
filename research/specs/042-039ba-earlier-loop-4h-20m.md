@@ -4,7 +4,7 @@
 **Created:** 2026-04-25
 **Status:** READY
 **Branch:** `exp/039b-loop-band-activation-screen`
-**Commit:** `5ac8da9`
+**Commit:** `cd09e29`
 **Links to:** `research/ideas/042-039ba-promotion-tuning.md`, `research/specs/039b-loop-band-activation-screen.md`
 
 ## Hypothesis
@@ -63,7 +63,8 @@ Change only:
 
 - `MAX_WALLCLOCK_SECONDS: 600 -> 1200`
 - `ENABLE_LOOPING_AT: 0.35 -> <0.35|0.175>`
-- `LR_SCHEDULE_MODE: default -> <default|first_half_default_then_floor>`
+- `LR_SCHEDULE_MODE: default -> <default|first_half_default_then_floor|first_half_default_then_second_half_floor>`
+- `SECOND_HALF_FLOOR_LR: <unused|0.05|0.15>`
 
 Two arms:
 
@@ -88,6 +89,28 @@ Two arms:
 - interpretation:
   - first `10 min`: mimic the default `039bA` LR shape
   - second `10 min`: hold LR flat at `MIN_LR`
+
+### 042D — earlier loop + first-half `039bA` LR then lower second-half floor
+
+- same as `042A`
+- `ENABLE_LOOPING_AT=0.175`
+- `MAX_WALLCLOCK_SECONDS=1200`
+- `LR_SCHEDULE_MODE=first_half_default_then_second_half_floor`
+- `SECOND_HALF_FLOOR_LR=0.05`
+- interpretation:
+  - first `10 min`: mimic the default `039bA` LR shape
+  - second `10 min`: hold LR flat at `0.05`
+
+### 042E — earlier loop + first-half `039bA` LR then higher second-half floor
+
+- same as `042A`
+- `ENABLE_LOOPING_AT=0.175`
+- `MAX_WALLCLOCK_SECONDS=1200`
+- `LR_SCHEDULE_MODE=first_half_default_then_second_half_floor`
+- `SECOND_HALF_FLOOR_LR=0.15`
+- interpretation:
+  - first `10 min`: mimic the default `039bA` LR shape
+  - second `10 min`: hold LR flat at `0.15`
 
 ## Regime
 
@@ -133,6 +156,8 @@ Run two jobs:
 1. `042A` earlier loop (`ENABLE_LOOPING_AT=0.175`)
 2. `042B` control (`ENABLE_LOOPING_AT=0.35`)
 3. `042C` earlier loop + modified LR schedule
+4. `042D` earlier loop + lower second-half floor (`0.05`)
+5. `042E` earlier loop + higher second-half floor (`0.15`)
 
 Same seed, same env otherwise.
 
@@ -144,8 +169,10 @@ Decision rule:
 - if `042A` is clearly worse than the original `039bA` trajectory, pause timing
   tweaks before broadening the
   activation change
-- `042C` is the next cheap rescue lever if `042A` still looks like the longer
+- `042C` is the first rescue lever if `042A` still looks like the longer
   wallclock LR schedule is part of the problem
+- `042D` asks whether the second half should refine more aggressively downward
+- `042E` asks whether the second half should stay more plastic than `042C`
 
 ## Monitoring
 
@@ -166,6 +193,10 @@ Secondary comparison:
   control after the first result
 - `042C` exists to test whether preserving the first-half `039bA` LR shape and
   then flattening to the LR floor helps the longer `4H` regime
+- `042D` is the next priority after `042C`
+- `042D` compares against `042C` by making the second half cooler (`0.05`)
+- `042E` is the sibling follow-up that makes the second half more active
+  (`0.15`)
 
 ## Resolved base env block
 
