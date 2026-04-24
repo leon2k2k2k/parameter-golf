@@ -4,7 +4,7 @@
 **Created:** 2026-04-25
 **Status:** READY
 **Branch:** `exp/039b-loop-band-activation-screen`
-**Commit:** `35e7bc9`
+**Commit:** `5ac8da9`
 **Links to:** `research/ideas/042-039ba-promotion-tuning.md`, `research/specs/039b-loop-band-activation-screen.md`
 
 ## Hypothesis
@@ -63,6 +63,7 @@ Change only:
 
 - `MAX_WALLCLOCK_SECONDS: 600 -> 1200`
 - `ENABLE_LOOPING_AT: 0.35 -> <0.35|0.175>`
+- `LR_SCHEDULE_MODE: default -> <default|first_half_default_then_floor>`
 
 Two arms:
 
@@ -77,6 +78,16 @@ Two arms:
 - same as `039bA`
 - `ENABLE_LOOPING_AT=0.35`
 - `MAX_WALLCLOCK_SECONDS=1200`
+
+### 042C — earlier loop + first-half `039bA` LR then floor
+
+- same as `042A`
+- `ENABLE_LOOPING_AT=0.175`
+- `MAX_WALLCLOCK_SECONDS=1200`
+- `LR_SCHEDULE_MODE=first_half_default_then_floor`
+- interpretation:
+  - first `10 min`: mimic the default `039bA` LR shape
+  - second `10 min`: hold LR flat at `MIN_LR`
 
 ## Regime
 
@@ -121,6 +132,7 @@ Run two jobs:
 
 1. `042A` earlier loop (`ENABLE_LOOPING_AT=0.175`)
 2. `042B` control (`ENABLE_LOOPING_AT=0.35`)
+3. `042C` earlier loop + modified LR schedule
 
 Same seed, same env otherwise.
 
@@ -132,6 +144,8 @@ Decision rule:
 - if `042A` is clearly worse than the original `039bA` trajectory, pause timing
   tweaks before broadening the
   activation change
+- `042C` is the next cheap rescue lever if `042A` still looks like the longer
+  wallclock LR schedule is part of the problem
 
 ## Monitoring
 
@@ -150,6 +164,8 @@ Secondary comparison:
 - `042B` exists as the same-rung control (`1200s`, `ENABLE_LOOPING_AT=0.35`)
 - use it if the `042A` read is ambiguous or if we need the cleaner same-rung
   control after the first result
+- `042C` exists to test whether preserving the first-half `039bA` LR shape and
+  then flattening to the LR floor helps the longer `4H` regime
 
 ## Resolved base env block
 
@@ -250,16 +266,22 @@ SEED=42
 MAX_WALLCLOCK_SECONDS=1200
 TTT_ENABLED=0
 TRAINING_ONLY_SCREEN=1
+LR_SCHEDULE_MODE=default
 ```
 
 ## Canonical launch block
 
 ```bash
-for arm in 042A 042B; do
+for arm in 042A 042B 042C; do
   if [ "$arm" = "042A" ]; then
     LOOP_FRAC=0.175
-  else
+    LR_MODE=default
+  elif [ "$arm" = "042B" ]; then
     LOOP_FRAC=0.35
+    LR_MODE=default
+  else
+    LOOP_FRAC=0.175
+    LR_MODE=first_half_default_then_floor
   fi
 
   env \
@@ -284,7 +306,7 @@ for arm in 042A 042B; do
     RECUR_ALPHA_ENABLED=1 RECUR_DIAG_P2P_COS=0 SMEAR_GATE_ENABLED=1 \
     LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64 \
     SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES=attn_in,attn_proj_in,mlp_in,mlp_proj_in \
-    SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=1 \
+    SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=1 LR_SCHEDULE_MODE="$LR_MODE" \
     RUN_ID="$arm-039ba-earlier-loop" \
     torchrun --standalone --nproc_per_node=4 records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py
 done
