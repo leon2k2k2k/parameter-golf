@@ -1,4 +1,4 @@
-# Frontier dependency map - snapshot 2026-04-24
+# Frontier dependency map - snapshot 2026-04-25
 
 Record-track PRs on `openai/parameter-golf`, clustered by code lineage rather
 than by date. Numbers are claimed 3-seed mean `val_bpb`.
@@ -10,7 +10,7 @@ than by date. Numbers are claimed 3-seed mean `val_bpb`.
 - Best **tokenizer-disputed / likely-legal** open PR: **#1797** @ **1.06157**.
 - Best **pre-quant-TTT-disputed** PR: **#1758** @ **1.02840**.
 - Best **byte-bug-suspect** PR: **#1791** @ **1.0339**.
-- Beyond official SOTA (**1.0810**) on the clean track: **#1756**, **#1775**, **#1776**, **#1780**, **#1784**, **#1790**, **#1792**, **#1802**.
+- Beyond official SOTA (**1.0810**) on the clean track: **#1756**, **#1775**, **#1776**, **#1780**, **#1784**, **#1790**, **#1792**, **#1802**, **#1809**, **#1812**.
 - The live public action is overwhelmingly on **Trunk A / CaseOps descendants**.
 - `#1795 @ 0.95165` is not part of our frontier. Treat it as a banned eval-cache / online-memory branch, not as a real target.
 
@@ -41,7 +41,9 @@ than by date. Numbers are claimed 3-seed mean `val_bpb`.
  │                       └─ #1797  open 1.06157  dexhunter   +SmearGate + LQER asym  [DISPUTED: tokenizer]
  │
  ├─ #1799  open 1.2073  jamesEmerson112   headwise gated attention on older SP8192 legal-TTT stack  (lineage unclear)
- └─ #1802  open 1.0771  aamodbhatt   +Polar Express NS + MIN_LR warmdown on global MP-TTT
+ ├─ #1802  open 1.0771  aamodbhatt   +Polar Express NS + MIN_LR warmdown on global MP-TTT
+ ├─ #1809  open 1.0800  PranavViswanath   Gram-NS + Polar Express + 3L recurrence + parallel residuals + QK5.25 + legal TTT  (lineage unclear)
+ └─ #1812  open 1.0729  EthanNing   SP8192 + 4-epoch score-first eval-time TTT  (lineage unclear)
 ```
 
 ### Trunk C - pre-quant-TTT family and descendants
@@ -49,7 +51,8 @@ than by date. Numbers are claimed 3-seed mean `val_bpb`.
 ```text
 #1735  open 1.0429  AjAnubolu   parallel pre-quant TTT  [DISPUTED: pre-quant TTT]
  ├─ #1738  open 1.03540  alertcat   +CaseOps Tokenizer V15  [DISPUTED: pre-quant TTT]
- │   └─ #1758  open 1.02840  kilojoules   LR retune + unfreeze-all  [DISPUTED: pre-quant TTT]
+ │   ├─ #1758  open 1.02840  kilojoules   LR retune + unfreeze-all  [DISPUTED: pre-quant TTT]
+ │   └─ #1807  open 1.07037  davie2009kh   +Huber WD Muon (L1/L2 hinge)  [DISPUTED: pre-quant TTT]
  └─ #1794  open 1.08488  Programmerryoki   per-layer clip + unfrozen score-first TTT + eval guard
 ```
 
@@ -65,11 +68,12 @@ than by date. Numbers are claimed 3-seed mean `val_bpb`.
 
 ```text
 #1796  open 1.08057  simon-marcus   Scylla tokenizer + legal score-first TTT  [DISPUTED: tokenizer]
+ └─ #1813  open 0.94166*  djeidy   +depth recurrence L3-5 + QK-gain 5.25  [DISPUTED: tokenizer]
 ```
 
-The `#1796` submission is record-track and likely legal by our current read, but
-its lineage is tokenizer-first and not clearly attached to the CaseOps or
-pre-quant trunks.
+*#1813 inherits buggy byte-accounting from PR #1184 (base_bytes=3 for 27 fallback tokens; should be 1). Corrected estimate ~1.120 bpb. Depth recurrence mechanism is architecturally real; BPB claim is not credible.
+
+The `#1796` / `#1813` cluster uses the Scylla tokenizer and is not clearly attached to the CaseOps or pre-quant trunks.
 
 ## Caveats
 

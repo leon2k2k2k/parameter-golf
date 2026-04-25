@@ -1,6 +1,5 @@
 {
-  "last_scan_utc": "2026-04-24T14:07:49Z",
-  "note": "Seeded from the 2026-04-22 worktree frontier snapshot plus repo-local frontier scan reports on 2026-04-23 and 2026-04-24. Root state/map were missing in this checkout, so this file reconstructs the active frontier anchors and recently classified PRs.",
+  "last_scan_utc": "2026-04-25T14:00:00Z",
   "prs": {
     "1736": {"verdict": "tokenizer-disputed", "claimed_bpb": 1.06549, "sha": "8e67c8d7ca0aabb776ec9f5857676e288b0f1390", "builds_on": "1626, 1729", "trunk": "A"},
     "1756": {"verdict": "clean", "claimed_bpb": 1.06505, "sha": "00f836b46d0a60891567120dfacf34434362fcd5", "builds_on": "1530, 1626, 1667, 1729, 1736", "trunk": "A"},
@@ -15,7 +14,7 @@
     "1780": {"verdict": "clean", "claimed_bpb": 1.08061, "sha": "6116f0645546cbbf68e95944abce14d6c16ceda4", "builds_on": "unknown", "trunk": "A"},
     "1783": {"verdict": "other", "claimed_bpb": 1.17159, "sha": "f31743e32726bb300e2f97ae63bae252ab73fbcb", "builds_on": "unknown", "trunk": "unknown"},
     "1784": {"verdict": "clean", "claimed_bpb": 1.07081, "sha": "447c5e290201faede5634e09463a49525fe8103b", "builds_on": "1767, 1736", "trunk": "A"},
-    "1785": {"verdict": "other", "claimed_bpb": 1.01925, "sha": "bcab5bdee192027227875c70eca53f69f72d1e0c", "builds_on": "1445", "trunk": "new"},
+    "1786": {"verdict": "other", "claimed_bpb": null, "sha": "9b31c85b079d51d4104ab43d1a4d02dccbf8bdff", "builds_on": "unknown", "trunk": "A"},
     "1787": {"verdict": "tokenizer-disputed", "claimed_bpb": 1.06335, "sha": "b667ea2576768b980dab16e1b75e9210f78a27c7", "builds_on": "1736, 1344, 1767", "trunk": "A"},
     "1788": {"verdict": "other", "claimed_bpb": 1.12000, "sha": "3cf449daed1fd36467676b202756509f8fd36449", "builds_on": "unknown", "trunk": "unknown"},
     "1790": {"verdict": "clean", "claimed_bpb": 1.06991, "sha": "32d1c28203430b34adb9dce6f76581d4524bc657", "builds_on": "1667, 1767, 1700, 1493", "trunk": "A"},
@@ -30,6 +29,17 @@
     "1802": {"verdict": "clean", "claimed_bpb": 1.07710, "sha": "be58d657a7efec08c343c1307ef8a981b325917d", "builds_on": "1493, 1344, 1787", "trunk": "A"},
     "1803": {"verdict": "other", "claimed_bpb": null, "sha": "91a652b85f71604473be928d57d152a9ef128463", "builds_on": "unknown", "trunk": "new"},
     "1804": {"verdict": "other", "claimed_bpb": null, "sha": "ba1784c24614d2656da8208e6ae4bcf5fab96be3", "builds_on": "unknown", "trunk": "unknown"},
-    "1805": {"verdict": "other", "claimed_bpb": 1.10314, "sha": "5810dae297dcf4198418108e87fc6862ce5cc0c0", "builds_on": "1493", "trunk": "A"}
+    "1805": {"verdict": "other", "claimed_bpb": 1.10314, "sha": "5810dae297dcf4198418108e87fc6862ce5cc0c0", "builds_on": "1493", "trunk": "A"},
+    "1706": {"verdict": "other", "claimed_bpb": 1.08149, "sha": "140e08f4b195f4f0bb6d56fc8cae770a1ad57b32", "builds_on": "unknown", "trunk": "unknown"},
+    "1707": {"verdict": "tokenizer-disputed", "claimed_bpb": 1.07068, "sha": "c93556bdbcc913ff22607b3e8a8213edec431415", "builds_on": "unknown", "trunk": "unknown"},
+    "1806": {"verdict": "other", "claimed_bpb": null, "sha": "f47b26c5714ebd06534c0682628769dde83a155c", "builds_on": "unknown", "trunk": "unknown"},
+    "1807": {"verdict": "prequant-ttt-disputed", "claimed_bpb": 1.07037, "sha": "7e16e60ca55d6ba5925c452429a04d9408f81c48", "builds_on": "1493, 1735, 1738, 1729", "trunk": "C"},
+    "1809": {"verdict": "clean", "claimed_bpb": 1.08000, "sha": "54084248c7ea221eadf0de7312c7cb522dc1a9b5", "builds_on": "1493, 1394, 1331, 1437, 1412, 1413", "trunk": "A"},
+    "1810": {"verdict": "other", "claimed_bpb": null, "sha": "a2093eda2e5fa74795e3605ab9e028ae41a2aedc", "builds_on": "unknown", "trunk": "unknown"},
+    "1811": {"verdict": "other", "claimed_bpb": 1.23500, "sha": "5a0d4eafc062fd02e68e53e6f47aa825bc2cda8f", "builds_on": "unknown", "trunk": "unknown"},
+    "1812": {"verdict": "clean", "claimed_bpb": 1.07290, "sha": "1350423f2b26d20b3c384f194e8f66d06a6428c2", "builds_on": "unknown", "trunk": "A"},
+    "1813": {"verdict": "tokenizer-disputed", "claimed_bpb": 0.94166, "sha": "2664284552852735b2be39dbbf6224f924ff33c2", "builds_on": "1184, 1796", "trunk": "new"},
+    "1814": {"verdict": "tokenizer-disputed", "claimed_bpb": 1.07419, "sha": "101679e6e1f46c5678439c88729fbdf1e25f8954", "builds_on": "1707", "trunk": "unknown"},
+    "1815": {"verdict": "other", "claimed_bpb": null, "sha": "b3b032d047b59215bd25a3ea00d8d542596f08ed", "builds_on": "unknown", "trunk": "unknown"}
   }
 }
