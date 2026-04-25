@@ -1,8 +1,14 @@
-# Spec 041C — shrunk loop (layers 4-5), NUM_LOOPS=1, frac=0.43
+# Spec 041Cb — shrunk loop (layers 4-5), NUM_LOOPS=1, frac=0.65
 
-**Slug:** `041C-shrunk-loop-1pass-late-activation-screen`
+**Slug:** `041Cb-shrunk-loop-1pass-late-activation-screen`
 **Created:** 2026-04-25
 **Status:** READY
+
+## Correction note
+
+Original 041C used frac=0.43, landing at ~5665 steps (not 6000). Actual loop
+throughput measured at 3277K tok/s across all 041 configs. Corrected frac=0.65:
+780s no-loop × 5.457 + 420s loop × 4.165 ≈ 6000 steps.
 **Branch:** `exp/039b-loop-band-activation-screen`
 **Commit:** `5bbf12f`
 **Links to:** `research/evaluations/040-no-loop-ablation.md`, `research/specs/041A-shrunk-loop-late-activation-screen.md`
@@ -60,7 +66,7 @@ export VAL_BYTES_FILES='/workspace/parameter-golf/data/datasets/fineweb10B_sp819
 export VOCAB_SIZE=8192 NUM_LAYERS=11 XSA_LAST_N=11 MODEL_DIM=512 NUM_KV_HEADS=4 NUM_HEADS=8
 export MLP_MULT=4 TIE_EMBEDDINGS=1 LOGIT_SOFTCAP=30 ROPE_BASE=10000 ROPE_DIMS=16
 export ROPE_TRAIN_SEQ_LEN=2048 ROPE_YARN=0 LN_SCALE=1 QK_GAIN_INIT=5.0
-export NUM_LOOPS=1 LOOP_START=4 LOOP_END=5 ENABLE_LOOPING_AT=0.43
+export NUM_LOOPS=1 LOOP_START=4 LOOP_END=5 ENABLE_LOOPING_AT=0.65
 export PARALLEL_START_LAYER=8 PARALLEL_FINAL_LANE=mean
 export MIN_LR=0.1 EMBED_LR=0.6 TIED_EMBED_LR=0.03 TIED_EMBED_INIT_STD=0.005
 export MATRIX_LR=0.026 SCALAR_LR=0.02 MUON_MOMENTUM=0.97 MUON_BACKEND_STEPS=5
@@ -81,13 +87,13 @@ export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENAB
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5
 export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=1
-export RUN_ID="041C-shrunk-loop-1pass-late-activation"
+export RUN_ID="041Cb-shrunk-loop-1pass-late-activation"
 
-mkdir -p /workspace/runs/041C-shrunk-loop-1pass-late-activation-screen
+mkdir -p /workspace/runs/041Cb-shrunk-loop-1pass-late-activation-screen
 
 torchrun --standalone --nproc_per_node=4 \
   /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py \
-  >> /workspace/runs/041C-shrunk-loop-1pass-late-activation-screen/train.log 2>&1
+  >> /workspace/runs/041Cb-shrunk-loop-1pass-late-activation-screen/train.log 2>&1
 ```
 
 ## What to watch
