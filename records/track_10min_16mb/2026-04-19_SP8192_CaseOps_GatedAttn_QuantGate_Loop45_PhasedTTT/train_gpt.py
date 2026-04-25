@@ -243,6 +243,7 @@ class Hyperparameters:
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
     negative_slope = float(os.environ.get("NEGATIVE_SLOPE", 0.5))
+    slope_warmdown = float(os.environ.get("SLOPE_WARMDOWN", 0.0))
     mlp_outer_activation = os.environ.get("MLP_OUTER_ACTIVATION", "leaky_relu_square")
     mlp_middle_activation = os.environ.get("MLP_MIDDLE_ACTIVATION", "leaky_relu_square")
     mlp_middle_negative_slope = float(
@@ -3890,6 +3891,7 @@ def train_model(h, device, val_data):
     ema_decay = h.ema_decay
     training_time_ms = 0.0
     stop_after_step = None
+    slope_switched = False
     checkpoint_saved = False
     checkpoint_target_ms = (
         h.checkpoint_at_minutes * 60 * 1e3 if h.checkpoint_at_minutes > 0 else None
@@ -3945,6 +3947,16 @@ def train_model(h, device, val_data):
             log(
                 f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
+        if (
+            h.slope_warmdown > 0
+            and not slope_switched
+            and frac >= 1.0 - h.warmdown_frac
+        ):
+            for module in base_model.modules():
+                if isinstance(module, MLP):
+                    module.negative_slope = h.slope_warmdown
+            slope_switched = True
+            log(f"slope_anneal: {h.negative_slope:.4f}→{h.slope_warmdown:.4f} step:{step} frac:{frac:.3f}")
         train_loss, alpha_grad_norm = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
