@@ -3845,6 +3845,15 @@ def train_model(h, device, val_data):
                 _run_cu_bucket_warmup()
                 base_model.looping_depth = h.num_loops - 1  # reset to curriculum start
             base_model.looping_active = False
+        if h.slope_warmdown >= 0.0 and h.slope_warmdown != h.negative_slope:
+            for module in base_model.modules():
+                if isinstance(module, MLP):
+                    module.negative_slope = h.slope_warmdown
+            _run_cu_bucket_warmup()
+            for module in base_model.modules():
+                if isinstance(module, MLP):
+                    module.negative_slope = h.negative_slope
+            log(f"slope_anneal: precompiled warmdown kernel slope={h.slope_warmdown:.4f}")
         for warmup_step in range(h.warmup_steps):
             step_fn(warmup_step, 1.0)
             if (
