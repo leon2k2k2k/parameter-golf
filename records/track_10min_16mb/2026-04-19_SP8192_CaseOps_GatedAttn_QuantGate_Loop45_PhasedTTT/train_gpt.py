@@ -3947,7 +3947,7 @@ def train_model(h, device, val_data):
                 f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
         if h.slope_warmdown >= 0.0 and frac >= 1.0 - h.warmdown_frac:
-            warmdown_progress = min(1.0, (frac - (1.0 - h.warmdown_frac)) / h.warmdown_frac)
+            warmdown_progress = min(1.0, (frac - (1.0 - h.warmdown_frac)) / (h.warmdown_frac * 0.5))
             current_slope = h.negative_slope + (h.slope_warmdown - h.negative_slope) * warmdown_progress
             for module in base_model.modules():
                 if isinstance(module, MLP):
