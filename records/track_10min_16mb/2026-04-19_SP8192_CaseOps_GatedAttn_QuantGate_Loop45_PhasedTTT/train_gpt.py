@@ -225,6 +225,7 @@ class Hyperparameters:
     warmdown_frac = float(os.environ.get("WARMDOWN_FRAC", 0.75))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     lr_schedule_mode = os.environ.get("LR_SCHEDULE_MODE", "default")
+    lr_rewarm_at = float(os.environ.get("LR_REWARM_AT", 0.35))
     second_half_floor_lr = float(os.environ.get("SECOND_HALF_FLOOR_LR", 0.1))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 786432))
     fused_ce_enabled = bool(int(os.environ.get("FUSED_CE_ENABLED", "1")))
@@ -3762,6 +3763,16 @@ def train_model(h, device, val_data):
             if frac >= 0.5:
                 return h.second_half_floor_lr
             frac = frac / 0.5
+        if h.lr_schedule_mode == "floor_then_wsd":
+            # first_half_floor until lr_rewarm_at, then standard WSD evaluated at frac
+            if frac < h.lr_rewarm_at:
+                if frac >= 0.5:
+                    return h.min_lr
+                rf = frac / 0.5
+                if rf >= 1.0 - h.warmdown_frac:
+                    return max((1.0 - rf) / h.warmdown_frac, h.min_lr)
+                return 1.0
+            # fall through to standard WSD at current frac
         if h.warmdown_frac <= 0:
             return 1.0
         if frac >= 1.0 - h.warmdown_frac:
