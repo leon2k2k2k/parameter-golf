@@ -1,8 +1,14 @@
-# Spec 041A — shrunk loop (layers 4-5), NUM_LOOPS=2, frac=0.46
+# Spec 041A — shrunk loop (layers 4-5), NUM_LOOPS=2, frac=0.63
 
 **Slug:** `041A-shrunk-loop-late-activation-screen`
 **Created:** 2026-04-25
 **Status:** READY
+
+## Correction note
+
+Original frac=0.46 gave only 5722 steps (val_bpb 1.06545, +0.00031 vs baseline).
+Actual loop throughput measured at 3277K tok/s (not predicted 3616K). Corrected frac=0.63
+targets ~6000 steps: 756s no-loop × 5.495 + 444s loop × 4.165 ≈ 6000.
 **Branch:** `exp/039b-loop-band-activation-screen`
 **Commit:** `5bbf12f`
 **Links to:** `research/evaluations/040-no-loop-ablation.md`, `research/specs/040-no-loop-ablation-screen.md`
@@ -70,7 +76,7 @@ export VAL_BYTES_FILES='/workspace/parameter-golf/data/datasets/fineweb10B_sp819
 export VOCAB_SIZE=8192 NUM_LAYERS=11 XSA_LAST_N=11 MODEL_DIM=512 NUM_KV_HEADS=4 NUM_HEADS=8
 export MLP_MULT=4 TIE_EMBEDDINGS=1 LOGIT_SOFTCAP=30 ROPE_BASE=10000 ROPE_DIMS=16
 export ROPE_TRAIN_SEQ_LEN=2048 ROPE_YARN=0 LN_SCALE=1 QK_GAIN_INIT=5.0
-export NUM_LOOPS=2 LOOP_START=4 LOOP_END=5 ENABLE_LOOPING_AT=0.46
+export NUM_LOOPS=2 LOOP_START=4 LOOP_END=5 ENABLE_LOOPING_AT=0.63
 export PARALLEL_START_LAYER=8 PARALLEL_FINAL_LANE=mean
 export MIN_LR=0.1 EMBED_LR=0.6 TIED_EMBED_LR=0.03 TIED_EMBED_INIT_STD=0.005
 export MATRIX_LR=0.026 SCALAR_LR=0.02 MUON_MOMENTUM=0.97 MUON_BACKEND_STEPS=5
@@ -91,13 +97,13 @@ export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENAB
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5
 export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=1
-export RUN_ID="041-shrunk-loop-late-activation"
+export RUN_ID="041A-shrunk-loop-late-activation"
 
-mkdir -p /workspace/runs/041-shrunk-loop-late-activation-screen
+mkdir -p /workspace/runs/041A-shrunk-loop-late-activation-screen
 
 torchrun --standalone --nproc_per_node=4 \
   /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py \
-  >> /workspace/runs/041-shrunk-loop-late-activation-screen/train.log 2>&1
+  >> /workspace/runs/041A-shrunk-loop-late-activation-screen/train.log 2>&1
 ```
 
 ## What to watch during the run
