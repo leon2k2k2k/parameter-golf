@@ -243,6 +243,10 @@ class Hyperparameters:
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
+    mlp_schedule_enabled = bool(int(os.environ.get("MLP_SCHEDULE_ENABLED", "0")))
+    mlp_early_mult = float(os.environ.get("MLP_EARLY_MULT", os.environ.get("MLP_MULT", 4.0)))
+    mlp_middle_mult = float(os.environ.get("MLP_MIDDLE_MULT", os.environ.get("MLP_MULT", 4.0)))
+    mlp_late_mult = float(os.environ.get("MLP_LATE_MULT", os.environ.get("MLP_MULT", 4.0)))
     negative_slope = float(os.environ.get("NEGATIVE_SLOPE", 0.5))
     mlp_outer_activation = os.environ.get("MLP_OUTER_ACTIVATION", "leaky_relu_square")
     mlp_middle_activation = os.environ.get("MLP_MIDDLE_ACTIVATION", "leaky_relu_square")
@@ -479,6 +483,28 @@ def _layer_mlp_activation_specs(h):
         else:
             specs.append((h.mlp_outer_activation, h.negative_slope))
     return tuple(specs)
+
+
+def _layer_mlp_mults(h):
+    if not h.mlp_schedule_enabled:
+        return [h.mlp_mult] * h.num_layers
+    middle_layers = sorted(set(_parse_layer_list(h.mlp_middle_layers)))
+    assert len(middle_layers) > 0, "MLP_SCHEDULE_ENABLED=1 requires MLP_MIDDLE_LAYERS"
+    assert all(0 <= l < h.num_layers for l in middle_layers), "MLP_MIDDLE_LAYERS out of range"
+    middle_set = set(middle_layers)
+    first_middle = middle_layers[0]
+    return [
+        h.mlp_middle_mult if i in middle_set else (h.mlp_early_mult if i < first_middle else h.mlp_late_mult)
+        for i in range(h.num_layers)
+    ]
+
+
+def _layer_hidden_dims(h):
+    return [int(round(mult * h.model_dim)) for mult in _layer_mlp_mults(h)]
+
+
+def _active_mlp_param_count(h):
+    return sum(2 * h.model_dim * hd for hd in _layer_hidden_dims(h))
 
 
 _logger_hparams = None
@@ -1258,11 +1284,12 @@ class GPT(nn.Module):
         self.logit_softcap = h.logit_softcap
         self.fused_ce_enabled = bool(h.fused_ce_enabled)
         self.layer_mlp_activation_specs = _layer_mlp_activation_specs(h)
+        self.layer_hidden_dims = _layer_hidden_dims(h)
         self.tok_emb = nn.Embedding(h.vocab_size, h.model_dim)
         self.num_layers = h.num_layers
         head_dim = h.model_dim // h.num_heads
         kv_dim = h.num_kv_heads * head_dim
-        hidden_dim = int(h.mlp_mult * h.model_dim)
+        hidden_dim = max(self.layer_hidden_dims)
         self.qo_bank = nn.Parameter(torch.empty(2 * h.num_layers, h.model_dim, h.model_dim))
         self.kv_bank = nn.Parameter(torch.empty(2 * h.num_layers, kv_dim, h.model_dim))
         self.mlp_up_bank = nn.Parameter(torch.empty(h.num_layers, hidden_dim, h.model_dim))
@@ -1480,9 +1507,10 @@ class GPT(nn.Module):
             nn.init.orthogonal_(self.kv_bank.data[i], gain=1.0)
             nn.init.orthogonal_(self.kv_bank.data[n + i], gain=1.0)
         for i in range(n):
-            nn.init.orthogonal_(self.mlp_up_bank.data[i], gain=1.0)
-            nn.init.zeros_(self.mlp_down_bank.data[i])
-            self.mlp_down_bank.data[i].mul_(proj_scale)
+            hd = self.layer_hidden_dims[i]
+            nn.init.orthogonal_(self.mlp_up_bank.data[i, :hd], gain=1.0)
+            nn.init.zeros_(self.mlp_down_bank.data[i, :, :hd])
+            self.mlp_down_bank.data[i, :, :hd].mul_(proj_scale)
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 if getattr(module, "_zero_init", False):
@@ -1496,13 +1524,14 @@ class GPT(nn.Module):
 
     def _bank_weights(self, i):
         n = self.num_layers
+        hd = self.layer_hidden_dims[i]
         return (
             self.qo_bank[i],
             self.kv_bank[i],
             self.kv_bank[n + i],
             self.qo_bank[n + i],
-            self.mlp_up_bank[i],
-            self.mlp_down_bank[i],
+            self.mlp_up_bank[i, :hd],
+            self.mlp_down_bank[i, :, :hd],
         )
 
     def _parallel_block(
