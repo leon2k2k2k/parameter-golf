@@ -3844,6 +3844,14 @@ def train_model(h, device, val_data):
                 base_model.looping_depth = h.num_loops  # pre-warm full-depth state
                 _run_cu_bucket_warmup()
                 base_model.looping_depth = h.num_loops - 1  # reset to curriculum start
+            # Pre-warm with real packed sequences so flash-attn Triton kernels compile
+            # now instead of causing a multi-minute pause at frac=enable_looping_at.
+            for _ in range(3):
+                step_fn(0, 1.0)
+            base_model.load_state_dict(initial_model_state, strict=True)
+            for (opt, state) in zip(optimizers, initial_optimizer_states, strict=True):
+                opt.load_state_dict(state)
+            optimizers.zero_grad_all()
             base_model.looping_active = False
         for warmup_step in range(h.warmup_steps):
             step_fn(warmup_step, 1.0)
