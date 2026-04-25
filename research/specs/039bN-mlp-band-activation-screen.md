@@ -1,4 +1,4 @@
-# Spec 039bN — non-uniform MLP width banding (middle layers 3,4,5 wider)
+# Spec 039bN — non-uniform MLP width banding 040C (keep early, widen middle, shrink late)
 
 **Slug:** `mlp-band-activation-screen`
 **Created:** 2026-04-25
@@ -11,28 +11,31 @@
 
 All LR schedule variants (039bG–039bM) converged to baseline at the end. This
 spec attacks a different axis: **non-uniform MLP depth**. Loop layers 3–5
-(the recurrent core, LOOP_START=3 LOOP_END=5) do more work per token — they see
-the activation twice per loop iteration. Giving them wider FFN hidden dims costs
-nothing in total parameter budget if we narrow the other 8 layers.
+do more work per token — they see the activation twice per loop iteration.
+
+A prior 2×H100 quick screen across three banding patterns (040A/B/C) found:
+- 040A (shrink both sides ×3.625/5.0/3.625): throughput hit + underperformed
+- 040B (shrink early, keep late ×3.0/5.0/4.0): mild learning regression
+- **040C (keep early, shrink late ×4.0/5.0/3.4): stayed on baseline pace — best survivor**
+
+This spec runs 040C on the corrected codebase (leaky backward fixed) stacked on 039bL.
 
 ## Hypothesis
 
-Loop layers 3–5 are the compute bottleneck for recurrence quality. Widening their
-MLP from hidden=2048 (×4.0) to hidden=2560 (×5.0), while narrowing the other 8
-layers from 2048 to 1856 (×3.625), keeps total active MLP params exactly equal
-to uniform ×4.0. The loop layers get more expressive FFN, the rest trade
-marginally — net improvement should show in the convergence phase.
+Early layers (0-2) do feature extraction and need their full width. Late layers
+(6-10) close to readout can spare capacity. Widen the recurrent loop core (3-5)
+at the expense of late layers only.
 
 ## Budget math
 
 | Group | Layers | mult | hidden | 2×dim×h/layer | subtotal |
 |---|---|---|---|---|---|
-| early | 0,1,2 | 3.625 | 1856 | 1,900,544 | 5,701,632 |
+| early | 0,1,2 | 4.0 | 2048 | 2,097,152 | 6,291,456 |
 | middle | 3,4,5 | 5.0 | 2560 | 2,621,440 | 7,864,320 |
-| late | 6–10 | 3.625 | 1856 | 1,900,544 | 9,502,720 |
-| **total** | | | | | **23,068,672** |
+| late | 6–10 | 3.4 | 1741 | 1,784,832 | 8,924,160 |
+| **total** | | | | | **~23,069,696** |
 
-Uniform ×4.0: `2 × 512 × 2048 × 11 = 23,068,672` — **exactly equal**.
+Width-units: `3×4.0 + 3×5.0 + 5×3.4 = 44.0` — budget-neutral (3.4×512=1740.8 rounds to 1741, +1024 params vs uniform, negligible).
 
 ## Config diff
 
@@ -43,9 +46,9 @@ LR_SCHEDULE_MODE=floor_then_linear   # from 039bL
 LR_REWARM_AT=0.35                    # from 039bL
 RECUR_ALPHA_ENABLED=0                # from 039bL
 MLP_SCHEDULE_ENABLED=1               # new — enable per-layer width
-MLP_MIDDLE_MULT=5.0                  # new — middle layers 3,4,5
-MLP_EARLY_MULT=3.625                 # new — layers 0,1,2
-MLP_LATE_MULT=3.625                  # new — layers 6–10
+MLP_EARLY_MULT=4.0                   # new — keep early at baseline
+MLP_MIDDLE_MULT=5.0                  # new — widen loop core (layers 3,4,5)
+MLP_LATE_MULT=3.4                    # new — shrink late layers 6-10
 ```
 
 `MLP_MIDDLE_LAYERS=3,4,5` is the existing default — no change needed.
@@ -97,7 +100,7 @@ export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENAB
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5
 export LR_SCHEDULE_MODE=floor_then_linear LR_REWARM_AT=0.35
-export MLP_SCHEDULE_ENABLED=1 MLP_MIDDLE_MULT=5.0 MLP_EARLY_MULT=3.625 MLP_LATE_MULT=3.625
+export MLP_SCHEDULE_ENABLED=1 MLP_EARLY_MULT=4.0 MLP_MIDDLE_MULT=5.0 MLP_LATE_MULT=3.4
 export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0
 export RUN_ID="039bN-mlp-band-activation"
 
