@@ -72,7 +72,8 @@ export RECUR_DIAG_P2P_COS=0 SMEAR_GATE_ENABLED=1
 export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.7071 SLOPE_WARMDOWN=0.5
-export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=1 VAL_LOSS_EVERY=1000
+export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=0 VAL_LOSS_EVERY=1000
+export GPTQ_RESERVE_SECONDS=60
 export RUN_ID="042A-slope-anneal-0707-to-05"
 
 mkdir -p /workspace/runs/042A-slope-anneal-0707-to-05-screen
@@ -96,6 +97,8 @@ Baseline (039b): pre-quant EMA val_bpb **1.06514**
 - **Win**: pre-quant EMA val_bpb < **1.0641**
 - **Noise zone**: 1.0641–1.0670 — run second seed
 - **Kill**: pre-quant EMA val_bpb ≥ **1.0670**
+
+Post-quant val_bpb also recorded (no TTT). Watch quant damage vs baseline.
 
 ## Prediction
 
