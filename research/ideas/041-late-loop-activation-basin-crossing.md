@@ -91,9 +91,31 @@ frac = (T/1200 - steps_per_s(N)) / (steps_per_s(11) - steps_per_s(N))
 - val_bpb: **1.06842** (+0.00328 vs baseline)
 - Result: shallow recurrence (1 extra pass) is significantly worse than 2 passes
 
-### 041Ab — layers 4-5, NUM_LOOPS=2, frac=0.63 (RUNNING)
-- Target: ~6000 steps
-- This is the corrected rerun of 041A at the right frac
+### 041Ab — layers 4-5, NUM_LOOPS=2, frac=0.63 (DONE)
+- Steps: 5982, loop activated step 4148, loop steps: ~1834
+- val_bpb: **1.06736** (+0.00222 vs baseline)
+- Result: worse than 041A despite more total steps — fewer loop steps is the cause
+
+## Loop steps vs val_bpb
+
+Empirical relationship across all 041 runs (NUM_LOOPS=2):
+
+| Spec | Loop steps | val_bpb |
+|------|-----------|---------|
+| 040 (no loop) | 0 | 1.07223 |
+| 041Ab (frac=0.63) | 1834 | 1.06736 |
+| 041A (frac=0.46) | 2692 | 1.06545 |
+| Baseline (frac=0.35) | 2867 | 1.06514 |
+
+Rate: **~2.2e-6 val_bpb per loop step** in this range.
+Check: 1.06736 - (2867-1834) × 2.2e-6 = 1.06509 ≈ baseline 1.06514 ✓
+
+Loop steps are worth ~2× a no-loop step. Delaying frac to get more total steps
+is always a losing trade: sacrificing 850 loop steps gains only 260 total steps
+at 3:1 conversion ratio — net negative every time.
+
+**Implication:** frac=0.46 is near-optimal. The lever for more loop steps is
+reducing N (fewer layer passes per step), not pushing frac later.
 
 ### 041Bc — layers 3-5, NUM_LOOPS=1, frac=0.61 (RUNNING)
 - Target: ~6100 steps
