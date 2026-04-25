@@ -3771,6 +3771,16 @@ def train_model(h, device, val_data):
                     return max((1.0 - rf) / h.warmdown_frac, h.min_lr)
                 return 1.0
             # fall through to standard WSD at current frac
+        if h.lr_schedule_mode == "floor_then_linear":
+            # first_half_floor until lr_rewarm_at, then linear from that value to min_lr at end
+            rf = frac / 0.5
+            if frac < h.lr_rewarm_at:
+                if rf >= 1.0 - h.warmdown_frac:
+                    return max((1.0 - rf) / h.warmdown_frac, h.min_lr)
+                return 1.0
+            lr_at_switch = max((1.0 - h.lr_rewarm_at / 0.5) / h.warmdown_frac, h.min_lr)
+            t = (frac - h.lr_rewarm_at) / (1.0 - h.lr_rewarm_at)
+            return max(lr_at_switch + (h.min_lr - lr_at_switch) * t, h.min_lr)
         if h.warmdown_frac <= 0:
             return 1.0
         if frac >= 1.0 - h.warmdown_frac:
