@@ -1,6 +1,6 @@
-# Spec 041Bb — original loop (layers 3-5), NUM_LOOPS=1, frac=0.61
+# Spec 041Bc — original loop (layers 3-5), NUM_LOOPS=1, frac=0.61
 
-**Slug:** `041Bb-original-loop-1pass-late-activation-screen`
+**Slug:** `041Bc-original-loop-1pass-late-activation-screen`
 **Created:** 2026-04-25
 **Status:** READY
 
@@ -85,13 +85,13 @@ export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENAB
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5
 export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=1
-export RUN_ID="041Bb-original-loop-1pass-late-activation"
+export RUN_ID="041Bc-original-loop-1pass-late-activation"
 
-mkdir -p /workspace/runs/041Bb-original-loop-1pass-late-activation-screen
+mkdir -p /workspace/runs/041Bc-original-loop-1pass-late-activation-screen
 
 torchrun --standalone --nproc_per_node=4 \
   /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py \
-  >> /workspace/runs/041Bb-original-loop-1pass-late-activation-screen/train.log 2>&1
+  >> /workspace/runs/041Bc-original-loop-1pass-late-activation-screen/train.log 2>&1
 ```
 
 ## What to watch
