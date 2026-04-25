@@ -243,7 +243,7 @@ class Hyperparameters:
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
     negative_slope = float(os.environ.get("NEGATIVE_SLOPE", 0.5))
-    slope_warmdown = float(os.environ.get("SLOPE_WARMDOWN", 0.0))
+    slope_warmdown = float(os.environ.get("SLOPE_WARMDOWN", -1.0))
     mlp_outer_activation = os.environ.get("MLP_OUTER_ACTIVATION", "leaky_relu_square")
     mlp_middle_activation = os.environ.get("MLP_MIDDLE_ACTIVATION", "leaky_relu_square")
     mlp_middle_negative_slope = float(
@@ -3948,7 +3948,7 @@ def train_model(h, device, val_data):
                 f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
         if (
-            h.slope_warmdown > 0
+            h.slope_warmdown >= 0.0
             and not slope_switched
             and frac >= 1.0 - h.warmdown_frac
         ):
