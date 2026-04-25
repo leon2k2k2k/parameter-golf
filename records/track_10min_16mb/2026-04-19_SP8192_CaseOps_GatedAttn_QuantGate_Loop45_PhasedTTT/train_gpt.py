@@ -844,7 +844,7 @@ def linear_leaky_relu_square_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     NUM_SMS: tl.constexpr,
     FORWARD: tl.constexpr,
-    NEGATIVE_SLOPE: tl.constexpr,
+    negative_slope,
 ):
     dtype = tl.bfloat16
     start_pid = tl.program_id(axis=0)
@@ -878,18 +878,18 @@ def linear_leaky_relu_square_kernel(
             c0 = c0 * tl.where(
                 pre0 > 0,
                 2.0 * pre0,
-                2.0 * NEGATIVE_SLOPE * NEGATIVE_SLOPE * pre0,
+                2.0 * negative_slope * negative_slope * pre0,
             )
             c1 = c1 * tl.where(
                 pre1 > 0,
                 2.0 * pre1,
-                2.0 * NEGATIVE_SLOPE * NEGATIVE_SLOPE * pre1,
+                2.0 * negative_slope * negative_slope * pre1,
             )
         c_desc.store([offs_am_c, offs_bn_c], c0)
         c_desc.store([offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2], c1)
         if FORWARD:
-            aux0 = tl.where(c0 > 0, c0, NEGATIVE_SLOPE * c0)
-            aux1 = tl.where(c1 > 0, c1, NEGATIVE_SLOPE * c1)
+            aux0 = tl.where(c0 > 0, c0, negative_slope * c0)
+            aux1 = tl.where(c1 > 0, c1, negative_slope * c1)
             aux_desc.store([offs_am_c, offs_bn_c], aux0 * aux0)
             aux_desc.store([offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2], aux1 * aux1)
 
@@ -925,7 +925,7 @@ def linear_leaky_relu_square(a, b, negative_slope, aux=None):
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         NUM_SMS=num_sms,
         FORWARD=forward,
-        NEGATIVE_SLOPE=negative_slope,
+        negative_slope=negative_slope,
         num_stages=num_stages,
         num_warps=8,
     )
@@ -3845,15 +3845,6 @@ def train_model(h, device, val_data):
                 _run_cu_bucket_warmup()
                 base_model.looping_depth = h.num_loops - 1  # reset to curriculum start
             base_model.looping_active = False
-        if h.slope_warmdown >= 0.0 and h.slope_warmdown != h.negative_slope:
-            for module in base_model.modules():
-                if isinstance(module, MLP):
-                    module.negative_slope = h.slope_warmdown
-            _run_cu_bucket_warmup()
-            for module in base_model.modules():
-                if isinstance(module, MLP):
-                    module.negative_slope = h.negative_slope
-            log(f"slope_anneal: precompiled warmdown kernel slope={h.slope_warmdown:.4f}")
         for warmup_step in range(h.warmup_steps):
             step_fn(warmup_step, 1.0)
             if (
@@ -3900,7 +3891,6 @@ def train_model(h, device, val_data):
     ema_decay = h.ema_decay
     training_time_ms = 0.0
     stop_after_step = None
-    slope_switched = False
     checkpoint_saved = False
     checkpoint_target_ms = (
         h.checkpoint_at_minutes * 60 * 1e3 if h.checkpoint_at_minutes > 0 else None
@@ -3956,16 +3946,14 @@ def train_model(h, device, val_data):
             log(
                 f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
-        if (
-            h.slope_warmdown >= 0.0
-            and not slope_switched
-            and frac >= 1.0 - h.warmdown_frac
-        ):
+        if h.slope_warmdown >= 0.0 and frac >= 1.0 - h.warmdown_frac:
+            warmdown_progress = min(1.0, (frac - (1.0 - h.warmdown_frac)) / h.warmdown_frac)
+            current_slope = h.negative_slope + (h.slope_warmdown - h.negative_slope) * warmdown_progress
             for module in base_model.modules():
                 if isinstance(module, MLP):
-                    module.negative_slope = h.slope_warmdown
-            slope_switched = True
-            log(f"slope_anneal: {h.negative_slope:.4f}→{h.slope_warmdown:.4f} step:{step} frac:{frac:.3f}")
+                    module.negative_slope = current_slope
+            if step % h.train_log_every == 0:
+                log(f"slope_anneal: {current_slope:.4f} step:{step} frac:{frac:.3f} warmdown_progress:{warmdown_progress:.3f}")
         train_loss, alpha_grad_norm = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
