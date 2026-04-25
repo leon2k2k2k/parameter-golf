@@ -3766,8 +3766,6 @@ def train_model(h, device, val_data):
         if h.lr_schedule_mode == "floor_then_wsd":
             # first_half_floor until lr_rewarm_at, then standard WSD evaluated at frac
             if frac < h.lr_rewarm_at:
-                if frac >= 0.5:
-                    return h.min_lr
                 rf = frac / 0.5
                 if rf >= 1.0 - h.warmdown_frac:
                     return max((1.0 - rf) / h.warmdown_frac, h.min_lr)
