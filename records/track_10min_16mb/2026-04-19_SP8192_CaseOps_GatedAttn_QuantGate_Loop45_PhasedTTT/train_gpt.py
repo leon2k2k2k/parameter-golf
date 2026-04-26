@@ -4219,6 +4219,15 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} depth:{base_model.looping_depth + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
+            # Spec 045H fix: seed loop_resid_mixes from the already-trained block.resid_mix
+            # values so per-pass blends start from what the model learned, not [1,0].
+            if base_model.loop_resid_mixes is not None:
+                with torch.no_grad():
+                    for _li in range(h.loop_start, h.loop_end + 1):
+                        _src = base_model.blocks[_li].resid_mix.data  # [2, dim]
+                        for _pi in range(h.num_loops + 1):
+                            base_model.loop_resid_mixes.data[_pi, _li - h.loop_start].copy_(_src)
+                log("loop_resid_mixes: seeded from block.resid_mix at loop activation")
         if (
             h.loop_depth_upgrade_at > 0
             and base_model.looping_active
