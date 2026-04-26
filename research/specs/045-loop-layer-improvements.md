@@ -66,9 +66,13 @@ LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
 MLP_ONLY_FROM_PASS=1  LOOP_SCALE_INIT=recip
 ```
 
-**Arm D added post-screen** (2026-04-26): C alone, based on AC result showing Lever C does the work.
-Prediction: D ≈ 1.0641 (additivity estimate: AC − A = baseline − 0.00042 − (+0.00062) → C ≈ −0.00104).
-Could land right at or below win threshold.
+**Arm D (added 2026-04-26, post A/AC results):**
+```
+LOOP_SCALE_INIT=recip
+```
+C alone — no iter embeds. Training loss comparison showed Lever C is systematic throughout
+training; Lever A is noise. Additivity estimate: C ≈ −0.00104 → D may land at or below win threshold.
+Same branch/commit, hardware, seed, and accept criteria as other arms.
 
 ## Code changes
 
