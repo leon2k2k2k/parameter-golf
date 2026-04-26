@@ -205,6 +205,20 @@ These would take 2-7 days of engineering with uncertain payoff:
 4. **Block reconstruction (BRECQ)** — likely overlaps LQER.
 5. **Per-tensor Hessian-derived clip** (#1689) — Hessian sensitivity per-tensor instead of per-category.
 
+## Fundamentally new ideas (separate file)
+
+When we exhausted variants of existing techniques, brainstormed five new
+paradigms in `research/ideas/quant-repair-fundamentally-new.md`:
+
+- **A. Deploy-time quant repair using eval headroom** (HIGHEST EV) — uses
+  PR #1797's unused 100-180s of leaderboard compute; bypasses 16MB cap entirely
+- **B. NF4-style non-uniform quantization** — distribution-fit levels at same bytes
+- **C. Vector quantization with shared codebook** — different storage paradigm
+- **D. Self-distillation during quantization** — multi-layer KL vs per-layer MSE
+- **E. Tensor-train decomposition for embedding** — could free 1-2 MB if it works
+
+All un-tested. See dedicated file for detailed analysis and ranking.
+
 ## Final practical state
 
 **Best legal config**: armD baseline = 1.07467 quantized. Same as #1797's pre-TTT (1.07443 ± 0.00065).
