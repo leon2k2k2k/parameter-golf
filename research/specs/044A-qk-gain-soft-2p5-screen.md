@@ -100,12 +100,27 @@ torchrun --standalone --nproc_per_node=4 \
 
 ## Acceptance
 
-Baseline: pre-quant EMA val_bpb **1.06514**
+Both **pre-quant EMA val_bpb** and **quantized val_bpb** are tracked.
 
-- **Strong win**: < **1.0635** (clear direction win, consistent with mikeapedia's claim)
-- **Win**: < **1.0641** (acceptance threshold)
-- **Noise zone**: 1.0641–1.0670 (signal exists but small; second seed needed)
-- **Kill**: ≥ **1.0670** (direction wrong on our stack, or stack-specific reason 5.0 is right)
+Baseline (canonical 039b):
+- pre-quant EMA: **1.06514**
+- quantized: **1.07410**
+- quant cost: +0.00896
+
+Pre-quant thresholds:
+- **Strong win**: < **1.0635**
+- **Win**: < **1.0641**
+- **Noise zone**: 1.0641–1.0670
+- **Kill**: ≥ **1.0670**
+
+Quantized thresholds (must also pass — submission depends on this):
+- **Strong win**: < **1.0731**
+- **Win**: < **1.0737**
+- **Noise zone**: 1.0737–1.0766
+- **Kill**: ≥ **1.0766**
+
+Quant cost regression flag: if `quantized − pre_quant > 0.012` (vs baseline's
++0.009), the quant pipeline degraded — investigate before promoting.
 
 ## Predicted outcome
 
