@@ -1,5 +1,21 @@
 # Loop Layer Improvements
 
+**⚠️ OPTIMIZER BUG — results invalidated (2026-04-26)**
+
+`loop_iter_embeds` was never in any optimizer group. `Optimizers.__init__` only sweeps
+`base_model.blocks.named_parameters()` — GPT-root parameters are invisible to it. The embeds
+stayed at zero-init throughout all runs. **Arms A, AC, E, F tested Lever C alone, not A+C.**
+
+Fix: commit `fc54262` adds `loop_iter_embeds` to `scalar_params` explicitly.
+First real Lever A tests: Arms A2, G, H, GH (all on `fc54262`).
+
+Corrected results:
+- Arm A (1.06576): = baseline noise (embeds = zero no-op)
+- Arm AC (1.06472): = Lever C alone (same as Arm D)
+- Only validated result: **Lever C (1/L init) ≈ −0.001 to −0.004**
+
+---
+
 **Status:** candidate — three related ideas, screen together
 **Expected Δ:** +0.001 to +0.005 bpb combined; each lever is independent and stackable
 **Sources:**

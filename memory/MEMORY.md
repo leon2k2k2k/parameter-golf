@@ -1,0 +1,40 @@
+- [Timezone — user vs system](user_timezone.md) — user in US Central, system Asia/Shanghai, ~13h offset; convert before any scheduling
+- [Proposal-first collab style](feedback_collab_style.md) — survey → rated proposal → user picks → then write idea/spec files
+- [Spec 000 is the old project baseline](project_baseline_spec_000.md) — legacy; Δ vs spec-000 only for backward-compat sanity reruns
+- [Last submission is PR #1797](project_last_submission_1779.md) — EMA val_bpb ~1.06514, same as 039b baseline; beating baseline = advancing frontier
+- [Baseline switched to #1736 on 2026-04-20](project_baseline_1736.md) — rebased to #1736 (CaseOps + gates + phased TTT, ~1.0655); new specs 008+ stack on this
+- [Pod stop vs terminate policy](feedback_pod_stop_vs_terminate.md) — stop between sessions same-day, terminate at end of day
+- [Step-matched comparison, not wallclock](feedback_step_matched_comparison.md) — research Δ measured at matched steps; wallclock only for leaderboard attempts
+- [Screen via training-endpoint val_bpb](feedback_screen_via_training_endpoint_val.md) — compare at final-step val_bpb, kill on stopping_early, skip EMA/quant/sliding/TTT; saves ~$3-4/run
+- [SSH immediately — no waiting loops](feedback_ssh_directly.md) — after pod create, call `runpodctl ssh info <id>` and SSH immediately; no sleep, no polling, no waiting; retry once on failure max
+- [Stop pods by default](feedback_stop_pod_by_default.md) — end of any pod task → stop immediately, don't ask; only keep alive with a stated reason
+- [Kill detached scripts properly](feedback_kill_detached_scripts.md) — setsid/disown'd scripts survive parent kill; use `pkill -9 -f` and verify with pgrep
+- [Never delete checkpoints on rerun](feedback_never_delete_checkpoints.md) — on crash-rerun, only rename logs; NEVER `rm` `.pt`/`.ptz`/`.ckpt` from a prior attempt
+- [Preflight: deps + GPU clean](feedback_preflight_deps_and_gpu_clean.md) — grep ALL non-stdlib imports and pip-install before Phase 3; on crash verify 0 MiB GPU before relaunch (pod stop+start if needed)
+- [Always ask failure-case alongside happy-path](feedback_ask_failure_cases.md) — every AskUserQuestion before a consequential action must also ask "if X fails, do I halt/retry/fallback/escalate?"
+- [Use Parameter Golf pod template](feedback_pod_image_torch_version.md) — `--template-id y5cejece4j` (`runpod/parameter-golf:latest`); default pytorch 2.4 image breaks flash_attn_3 ABI
+- [Frontier-advancement pattern](project_frontier_advancement_pattern.md) — frontier PRs win via tokenizer + careful stacking, not incremental tuning; weight up Tap-In / composition / tokenizer, down single-author optimizer ports
+- [30s polling cadence during pod runs](feedback_polling_30s.md) — always poll train.log every 30s during live runs; never drift longer
+- [Interview user about monitoring per run](feedback_monitoring_interview.md) — always ask "what do you want me to monitor?" in the spec interview; don't infer silently
+- [JP and NE-1 volume layout](reference_jp_volume_mount.md) — both regions use identical /workspace/parameter-golf/... layout; no path adaptation or symlinks needed
+- [NE-1 volume layout](reference_ne1_missing_caseops.md) — same as JP; /workspace/parameter-golf/... paths work verbatim on both regions; old /runpod symlink workaround is obsolete
+- [Use small proxy models for throughput tests](feedback_small_model_for_throughput.md) — throughput/fusion diagnostics run on 6L/256d at 2×H100 (signal amplified ~6×, cost ~10× cheaper); reserve 8×H100 full model for val_bpb/TTT measurements
+- [JP and NE-1 only for pods](feedback_jp_ne1_only.md) — storage volumes only in JP and NE-1; never provision IN/EU/CA/US/SEA without explicit approval
+- [Prefer JP region for pods](feedback_prefer_jp_region.md) — always provision JP; don't propose NA as diagnostic vehicle; answer pod variance with multiple JP draws instead
+- [Don't substitute expensive hardware](feedback_dont_substitute_expensive_hardware.md) — if spec's target hardware unavailable, STOP and ask; never silently upgrade (e.g. 2×H100 $3/hr → 8×H100 $24/hr burned ~$20 for nothing)
+- [Throughput is step function not drift](project_throughput_step_function.md) — full-scale tok/s has 2 flat plateaus (pre/post loop activation); apparent drift is cumulative-average artifact; use interval rate formula; α tax only ~1.5%, loop activation is the 33% lever
+- [Pod probe cleanup bug](feedback_probe_cleanup_bug.md) — NEVER `runpodctl pod stop/remove ... > /dev/null 2>&1` in probe scan loops; capture output and verify with `pod list` after, else silent leaks burn $$$
+- [Always list pods](feedback_always_list_pods.md) — every pod operation/monitor poll must include `runpodctl pod list` with cost/hr; user can catch leaks within one cycle instead of after 25 min
+- [Preflight memory scaling](feedback_preflight_memory_scaling.md) — before running an N-GPU spec on K<N GPUs, multiply peak VRAM by N/K; if > 80 GiB on H100, OOM certain — reduce batch or wait
+- [Inductor cache must be on /tmp](feedback_inductor_cache_on_tmp.md) — never set TORCHINDUCTOR_CACHE_DIR to /workspace or /runpod (NFS FUSE) — triton compile workers race → Stale file handle, rank dies
+- [Smaller-H smoke before full trial](feedback_small_h_before_full_trial.md) — code-change variants: run on 2×H/4×H first against matched-H baseline before 8×H; spec 021 arc burned ~$20 skipping this
+- [Separate debug from submission](feedback_separate_debug_from_submission.md) — 3-rung hierarchy (proxy / full-model-small-H / full-model-full-H); proxy doesn't catch training dynamics; cache small-H baselines; run debug + submission in parallel on separate pods; pivot after 2 failed 8×H debug trials
+- [Verify commit before rerun](feedback_verify_commit_before_rerun.md) — before any baseline rerun, `git diff <original_commit>..<rerun_commit>`; the "019b" label referred to two different commits (e93d77d vs 9517a3b) that differ in blend algebra, cost us a false pod-variance finding
+- [Always push spec's pinned commit](feedback_always_push_spec_commit.md) — before pod preflight, `git ls-remote fork <branch>`; if stale, push without asking — pod is burning while you wait
+- [PHASED_TTT_ENABLED=3 always](feedback_phased_ttt_enabled.md) — =0 means slow TTT (not disabled); always use =3 with PHASED_TTT_NUM_PHASES=3
+- [1-min polling with comparison table](feedback_monitoring_style.md) — set up 1-min cron immediately on launch; show multi-arm loss table each tick; auto-stop + report final EMA on completion
+- [Always send plots to Discord](feedback_always_send_plots_discord.md) — every generated plot must be sent to Discord immediately after saving, without being asked
+- [Loop steps vs val_bpb](project_loop_steps_vs_valbpb.md) — ~2.2e-6 val_bpb/loop step; loop steps worth ~2× no-loop; delaying frac is always a losing trade at this scale
+- [VAL_LOSS_EVERY=1000 for 4H screens](feedback_val_loss_every.md) — always set in 4×H100 screen specs; mid-run raw val_bpb trajectory; ~7% step cost, acceptable
+- [GPT-root params must be added to optimizer explicitly](feedback_gpt_root_params_optimizer.md) — blocks.named_parameters() misses GPT-root nn.Parameters; add by hand in Optimizers.__init__ or they never train
+- [Spec 045 arm invalidation — Lever A never trained](project_spec045_arm_invalidation.md) — Arms A/AC/E/F had LOOP_ITER_EMBEDS=1 as no-op; only Lever C validated; fix in fc54262; rerun as A2/G/H/GH
