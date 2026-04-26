@@ -1939,8 +1939,18 @@ class GPT(nn.Module):
         slot = 0
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            if self.loop_iter_embeds is not None and self.looping_active:
+                _einfo = self._enc_iter_embed_info[step_idx]
+                if _einfo is not None:
+                    x = x + self.loop_iter_embeds[_einfo].to(dtype=x.dtype)
+            _rmix_enc = None
+            if self.loop_resid_mixes is not None and self.looping_active:
+                _rmix_enc_info = self._enc_resid_mix_info[step_idx]
+                if _rmix_enc_info is not None:
+                    _rp_i, _rl_i = _rmix_enc_info
+                    _rmix_enc = self.loop_resid_mixes[_rp_i, _rl_i]
             x_before = x
-            x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w, resid_mix_override=_rmix_enc)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -1990,8 +2000,18 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
+                if self.loop_iter_embeds is not None and self.looping_active:
+                    _einfo = self._dec_iter_embed_info[skip_idx]
+                    if _einfo is not None:
+                        x = x + self.loop_iter_embeds[_einfo].to(dtype=x.dtype)
+                _rmix_dec = None
+                if self.loop_resid_mixes is not None and self.looping_active:
+                    _rmix_dec_info = self._dec_resid_mix_info[skip_idx]
+                    if _rmix_dec_info is not None:
+                        _rp_i_d, _rl_i_d = _rmix_dec_info
+                        _rmix_dec = self.loop_resid_mixes[_rp_i_d, _rl_i_d]
                 x_before = x
-                x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w, resid_mix_override=_rmix_dec)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -2017,8 +2037,8 @@ class GPT(nn.Module):
             logits.float().reshape(-1, V), target_ids.reshape(-1), reduction="none"
         ).reshape(bsz, sl)
 
-    def _block_with_lora(self, block, x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w):
-        mix = block.resid_mix.to(dtype=x.dtype)
+    def _block_with_lora(self, block, x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w, resid_mix_override=None):
+        mix = (resid_mix_override if resid_mix_override is not None else block.resid_mix).to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         n = block.attn_norm(x_in) * block.ln_scale_factor
         attn = block.attn
