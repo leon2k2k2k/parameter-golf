@@ -14,14 +14,27 @@
 > step-matched comparison vs *canonical* baseline shows 042A is slightly
 > *behind* through most of training and ends ~tied. Updated tables below.
 
-## Result — noise zone (pre-quant), GPTQ catastrophically broken
+## Result — noise zone (pre-quant), GPTQ recovered after fix
 
 | metric | 039b baseline | 042A | Δ |
 |---|---|---|---|
 | pre-quant EMA val_bpb | 1.06514 | **1.06661** | +0.00147 |
-| quantized val_bpb | 1.07410 | **2.05028** | +0.97618 |
+| quantized val_bpb (original, broken) | 1.07410 | ~~2.05028~~ | ~~+0.97618~~ |
+| **quantized val_bpb (042D-recovered, fixed)** | **1.07410** | **1.07579** | **+0.00169** |
+| quant cost (Δ pre→post) | +0.00896 | +0.00918 | +0.00022 (clean) |
 | final step (wallclock-limited) | 5156 | 5098 | −58 |
 | step 5000 raw val_bpb | 1.0763 | 1.0778 | +0.0015 |
+
+The original quantized val_bpb (2.05) was a deserialize bug, not a quant
+quality issue. After the fix in commit `72c7328` and verification via
+spec 042D (EVAL_ONLY=1, ~$0.25), the same quantized blob produces
+**1.07579** — quant cost matches baseline almost exactly (+0.00918 vs
+baseline's +0.00896, delta of +0.00022). The quant pipeline is healthy.
+
+**Submission viability:** the existing 042A artifacts are now a valid
+submission candidate (no retrain needed). Final number to compare for a
+submission would be the post-quant 1.07579 vs baseline's 1.07410 → still
++0.00169 worse than baseline, still in noise zone.
 
 Pre-quant EMA lands in the **noise zone** (acceptance: win <1.0641, noise 1.0641–1.0670, kill ≥1.0670). Quantized result is **catastrophically broken** — from 1.074 to 2.050, a +0.976 regression. The submission file would be unusable.
 
