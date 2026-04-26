@@ -10,6 +10,9 @@ Recompile during training is NEVER allowed. On multi-GPU runs it doesn't just bi
 
 **Root cause:** The training code has a built-in precompile bracket (`slope_anneal: precompiled (forward+forward_logits, both looping states)`) during warmup that explicitly compiles BOTH the pre-loop and loop-active graphs. When cache is warm (prior run on same commit), this completes instantly → 0 mid-training recompiles. When cache is cold (new commit, new pod), it takes ~15 min without tweaks, ~8 min with tweaks — if it spills into training time, you get mid-training recompiles.
 
+**During every run — actively monitor for mid-training recompiles:**
+Watch the train.log for `Recompiling` or `guard failed` lines AFTER the precompile bracket finishes (`slope_anneal: precompiled`). Any recompile after that line is wrong and the run must be killed immediately — do not let it continue. On 4×H100, mid-training recompile will cause NCCL collective desync and a full hang within minutes.
+
 **How to apply:** For any arm on a new commit, ALWAYS set:
 ```
 TORCHINDUCTOR_COMPILE_THREADS=8
