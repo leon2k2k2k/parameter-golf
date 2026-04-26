@@ -3724,6 +3724,10 @@ def save_training_checkpoint(h, base_model, optimizers, ema_state, step, trainin
 
 
 def train_model(h, device, val_data):
+    # Dynamo cache must hold (cu_seqlens ∈ {64,128,192,256}) × (looping_active ∈ {F,T})
+    # = 8+ unique graphs from pre-warm. Default limit=8 LRU-evicts mid-training,
+    # causing 7-8 min recompile when looping_active flips. 32 covers with headroom.
+    torch._dynamo.config.cache_size_limit = 32
     base_model = GPT(h).to(device).bfloat16()
     restore_fp32_params(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
