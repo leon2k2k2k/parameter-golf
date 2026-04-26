@@ -370,6 +370,14 @@ class Hyperparameters:
     # C. Residual 1/L init: initialize attn_scale and mlp_scale for looped layers
     #    to 1/num_passes instead of 1.0. "ones" = baseline; "recip" = 1/L.
     loop_scale_init = os.environ.get("LOOP_SCALE_INIT", "ones")
+    # G. Gradient-side 1/L: scale gradients for looped params by 1/num_passes via
+    #    register_hook, compensating for L× gradient accumulation due to weight-tying.
+    #    "off" = disabled (baseline); "recip" = 1/num_passes scaling.
+    loop_lr_scale = os.environ.get("LOOP_LR_SCALE", "off")
+    # H. Per-pass resid_mix: give looped layers independent [2, dim] blend params per
+    #    pass (vs sharing block.resid_mix across all passes). Init to [1, 0] = byte-
+    #    identical to baseline at step 0. Disabled by default.
+    loop_per_pass_resid_mix = bool(int(os.environ.get("LOOP_PER_PASS_RESID_MIX", "0")))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -1257,8 +1265,8 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False):
-        mix = self.resid_mix.to(dtype=x.dtype)
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False, resid_mix_override=None):
+        mix = (resid_mix_override if resid_mix_override is not None else self.resid_mix).to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         if not skip_attn:
             attn_out = self.attn(
@@ -1550,8 +1558,43 @@ class GPT(nn.Module):
             self._enc_skip_attn = None
             self._dec_skip_attn = None
 
+        # Spec 045H — Per-pass resid_mix. Each looped layer gets [num_passes, 2, model_dim]
+        # blend params. Passes independently learn how much to weight x vs x0 per depth.
+        # Init to [1, 0] → byte-identical to baseline at step 0.
+        self.loop_per_pass_resid_mix_enabled = h.loop_per_pass_resid_mix and h.num_loops > 0
+        if self.loop_per_pass_resid_mix_enabled:
+            num_passes_h = h.num_loops + 1
+            num_looped_h = h.loop_end - h.loop_start + 1
+            _init_row_h = torch.stack((torch.ones(h.model_dim), torch.zeros(h.model_dim))).float()
+            self.loop_resid_mixes = nn.Parameter(
+                _init_row_h[None, None].expand(num_passes_h, num_looped_h, 2, h.model_dim).clone()
+            )
+            _pct_h: dict = {}
+            self._enc_resid_mix_info = []
+            for idx in self.encoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pct_h.get(idx, 0)
+                    _pct_h[idx] = pi + 1
+                    self._enc_resid_mix_info.append((pi, idx - h.loop_start))
+                else:
+                    self._enc_resid_mix_info.append(None)
+            self._dec_resid_mix_info = []
+            for idx in self.decoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pct_h.get(idx, 0)
+                    _pct_h[idx] = pi + 1
+                    self._dec_resid_mix_info.append((pi, idx - h.loop_start))
+                else:
+                    self._dec_resid_mix_info.append(None)
+        else:
+            self.loop_resid_mixes = None
+            self._enc_resid_mix_info = None
+            self._dec_resid_mix_info = None
+
         # Spec 045C — Residual 1/L init for looped layers. Applied after _init_weights.
         self._loop_scale_init = h.loop_scale_init
+        # Spec 045G — Gradient-side 1/L: store for use in _init_weights hook registration.
+        self._loop_lr_scale = h.loop_lr_scale
 
         self._init_weights()
 
@@ -1588,6 +1631,32 @@ class GPT(nn.Module):
                 with torch.no_grad():
                     self.blocks[li].attn_scale.fill_(scale)
                     self.blocks[li].mlp_scale.fill_(scale)
+        # Spec 045G — Gradient-side 1/L. Looped params (weight-tied, run num_passes times)
+        # accumulate L× gradients per step. Scale them back to single-pass equivalent via
+        # register_hook. Covers bank rows for looped layers + block-level scalar params.
+        # Note: loop_iter_embeds and loop_resid_mixes are per-pass (not shared), so
+        # they receive 1× gradients and are intentionally excluded.
+        if self._loop_lr_scale == "recip" and self._num_loops > 0:
+            _gs = 1.0 / (self._num_loops + 1)
+            n = self.num_layers
+            loop_rows = list(range(self.loop_start, self.loop_end + 1))
+            loop_rows_n = [n + r for r in loop_rows]
+
+            def _make_bank_hook(rows, scale):
+                def _h(grad):
+                    g = grad.clone()
+                    for r in rows:
+                        g[r] = g[r] * scale
+                    return g
+                return _h
+
+            self.qo_bank.register_hook(_make_bank_hook(loop_rows + loop_rows_n, _gs))
+            self.kv_bank.register_hook(_make_bank_hook(loop_rows + loop_rows_n, _gs))
+            self.mlp_up_bank.register_hook(_make_bank_hook(loop_rows, _gs))
+            self.mlp_down_bank.register_hook(_make_bank_hook(loop_rows, _gs))
+            for li in range(self.loop_start, self.loop_end + 1):
+                for p in self.blocks[li].parameters():
+                    p.register_hook(lambda g, s=_gs: g * s)
 
     def _bank_weights(self, i):
         n = self.num_layers
@@ -1683,7 +1752,14 @@ class GPT(nn.Module):
             x_before = x
             # Spec 045B: skip attention on MLP-only passes.
             _skip_attn = bool(self._enc_skip_attn is not None and self.looping_active and self._enc_skip_attn[step_idx])
-            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn)
+            # Spec 045H: per-pass resid_mix override for looped layers.
+            _rmix_enc = None
+            if self.loop_resid_mixes is not None and self.looping_active:
+                _rmix_enc_info = self._enc_resid_mix_info[step_idx]
+                if _rmix_enc_info is not None:
+                    _rp_i, _rl_i = _rmix_enc_info
+                    _rmix_enc = self.loop_resid_mixes[_rp_i, _rl_i]
+            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_enc)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -1757,7 +1833,14 @@ class GPT(nn.Module):
                 x_before = x
                 # Spec 045B: skip attention on MLP-only passes.
                 _skip_attn = bool(self._dec_skip_attn is not None and self.looping_active and self._dec_skip_attn[skip_idx])
-                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn)
+                # Spec 045H: per-pass resid_mix override for looped layers.
+                _rmix_dec = None
+                if self.loop_resid_mixes is not None and self.looping_active:
+                    _rmix_dec_info = self._dec_resid_mix_info[skip_idx]
+                    if _rmix_dec_info is not None:
+                        _rp_i_d, _rl_i_d = _rmix_dec_info
+                        _rmix_dec = self.loop_resid_mixes[_rp_i_d, _rl_i_d]
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_dec)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -2374,6 +2457,13 @@ class Optimizers:
                 scalar_params.append(base_model.recur_alpha)
             if getattr(base_model, "recur_beta", None) is not None and base_model.recur_beta.requires_grad:
                 scalar_params.append(base_model.recur_beta)
+        # Spec 045A fix: loop_iter_embeds is a GPT-root Parameter (not in .blocks),
+        # must add explicitly so it actually gets optimizer updates.
+        if getattr(base_model, "loop_iter_embeds", None) is not None and base_model.loop_iter_embeds.requires_grad:
+            scalar_params.append(base_model.loop_iter_embeds)
+        # Spec 045H: loop_resid_mixes is also a GPT-root Parameter.
+        if getattr(base_model, "loop_resid_mixes", None) is not None and base_model.loop_resid_mixes.requires_grad:
+            scalar_params.append(base_model.loop_resid_mixes)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
