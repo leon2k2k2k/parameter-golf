@@ -1,28 +1,15 @@
 #!/bin/bash
-# Spec 045 — Arm I: LOOP_REVERSE_LAST_PASS=1 LOOP_SCALE_INIT=recip
-# Palindrome loop: layers [3,4,5] forward on passes 0+1, then [5,4,3] on last pass.
-# U-Net-style: coarse routing forward, correction flows back up same weights.
-# Compare to AC-fix rerun (pre-quant 1.06479) to isolate Lever I contribution.
-#
-# Self-contained: if cache for 7926027 not found, seeds from 7c6ac51 and
-# runs inline prewarm (~5-7 min) before the real training run.
+# Rescue: run armI main training directly, skipping the stash rsync.
+# Use when launch_045_armI.sh is stuck on the rsync.
+# Assumes: /tmp/inductor_cache already has the prewarm cache, worktree exists.
 set -euo pipefail
 
-SHA="7926027"
-ARM="armI"
 RUNDIR="/workspace/runs/045-loop-layer-improvements/armI"
+WORKTREE="/workspace/pg-armI-7926027"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py"
 
-# ── 1. Git setup (all git ops here — none after this block) ───────────────
-WORKTREE=$(bash /workspace/parameter-golf/tmp_exec/setup_worktree.sh "$SHA" "$ARM")
-
-# ── 2. Deps ───────────────────────────────────────────────────────────────
-pip install brotli python-minifier sentencepiece --break-system-packages -q
-
-# ── 3. Output dir ─────────────────────────────────────────────────────────
 mkdir -p "$RUNDIR"
 
-# ── 4. Config (must be exported before prewarm torchrun) ──────────────────
 export DATA_DIR=/workspace/parameter-golf/data
 export DATASETS_DIR='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved'
 export TOKENIZER_PATH='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model'
@@ -54,39 +41,12 @@ export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5 SLOPE_WARMDOWN=
 export SEED=42 PHASED_TTT_ENABLED=3 PHASED_TTT_NUM_PHASES=3
 export LOOP_SCALE_INIT=recip
 export LOOP_REVERSE_LAST_PASS=1
-
-# ── 5. Inductor cache — inline prewarm if stash missing ───────────────────
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
-mkdir -p /tmp/inductor_cache
-STASH="/workspace/.inductor_cache_${SHA}"
-
-if [ ! -d "$STASH" ]; then
-  echo "[launch] No stash for ${SHA} — running inline prewarm (~5-7 min)..."
-  if [ -d /workspace/.inductor_cache_7c6ac51 ]; then
-    rsync -a /workspace/.inductor_cache_7c6ac51/ /tmp/inductor_cache/
-    echo "[launch] seeded from 7c6ac51: $(du -sh /tmp/inductor_cache | cut -f1)"
-  else
-    echo "[launch] WARNING: 7c6ac51 cache not found — cold compile (~15 min)"
-  fi
-  PREWARM_LOG="${RUNDIR}/prewarm.log"
-  MAX_WALLCLOCK_SECONDS=300 TRAINING_ONLY_SCREEN=1 TTT_ENABLED=0 RUN_ID="045-armI-prewarm" \
-    torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
-    >> "$PREWARM_LOG" 2>&1
-  PREWARM_TOK=$(grep "^100/20000 train_loss" "$PREWARM_LOG" | tail -1 | grep -o 'tok/s: [0-9]*' | grep -o '[0-9]*')
-  echo "[launch] prewarm done. tok/s at step 100: ${PREWARM_TOK:-UNKNOWN}"
-  rsync -a /tmp/inductor_cache/ "$STASH/" &
-  echo "[launch] stashing cache in background (PID $!) — training starts now"
-else
-  rsync -a "${STASH}/" /tmp/inductor_cache/
-  echo "[launch] cache restored: $(du -sh /tmp/inductor_cache | cut -f1)"
-fi
-
-# ── 6. Train ──────────────────────────────────────────────────────────────
 export MAX_WALLCLOCK_SECONDS=1200 TRAINING_ONLY_SCREEN=0 TTT_ENABLED=0
 export RUN_ID="045-armI"
 
-echo "[launch] starting torchrun — worktree: ${WORKTREE}"
-echo "[launch] verify tok/s >= 4,300,000 at step 100"
+echo "[rescue] verify /tmp/inductor_cache exists: $(du -sh /tmp/inductor_cache | cut -f1)"
+echo "[rescue] starting torchrun — worktree: ${WORKTREE}"
 torchrun --standalone --nproc_per_node=4 \
   "${WORKTREE}/${TRAIN_SCRIPT}" \
   >> "${RUNDIR}/train.log" 2>&1

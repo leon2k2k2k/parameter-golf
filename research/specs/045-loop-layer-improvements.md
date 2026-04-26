@@ -4,7 +4,7 @@
 **Created:** 2026-04-26
 **Status:** READY
 **Branch:** `exp/045-loop-layer-improvements`
-**Commit:** `fc54262` (latest; `1c6cd7c` for arms A–F)
+**Commit:** `e021255` (latest; see arm log below)
 **Links to:** `research/ideas/loop-layer-improvements.md`
 
 ## Hypothesis
@@ -214,6 +214,27 @@ Pre-quant EMA checkpoint + quantized blob (standard). No optim state needed on m
 | Mini 4×H100 | 3 parallel arms (~20 min each) | ~$21 |
 | Official 8×H100 | 1 arm × 3 seeds | ~$18 |
 | Total (if one arm wins) | | ~$39 |
+
+## Arm commit log
+
+| Arm | SHA | Levers | Notes |
+|---|---|---|---|
+| A–F | `1c6cd7c` | various | initial arms |
+| G | `7c6ac51` | A+C+G (LR scale) | inert (1.06583) |
+| H | `7c6ac51` | A+C+H (per-pass resid_mix) | inert (1.06583); bug: resid_mixes not warm-seeded |
+| I | `7926027` | C+I (palindrome, missing A) | ran with NFS rsync bug; incomplete |
+| H2 | `e021255` | A+C+H (with warm-seed fix) | `launch_045_armH2.sh` |
+| I2 | `e021255` | A+C+I (palindrome on full AC) | `launch_045_armI2.sh`; needs inline prewarm |
+
+**e021255 fix**: at `looping_active` flip, copies `block.resid_mix.data` →
+`loop_resid_mixes.data[all_passes, layer]` for looped layers, so per-pass blends
+start from trained values not [1,0] init. No new compiled graph variants.
+
+**Executioner for armH2/armI2**: run `tmp_exec/launch_045_armH2.sh` then
+`tmp_exec/launch_045_armI2.sh` sequentially on same pod. H2 needs
+`/workspace/.inductor_cache_7c6ac51` present. I2 runs inline prewarm seeded from
+7c6ac51 (~15 min compile), then 20 min training. Report pre-quant val_bpb vs
+AC-fix baseline (1.06479).
 
 ## Open questions for interview
 
