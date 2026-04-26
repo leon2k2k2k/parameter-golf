@@ -4,7 +4,7 @@ description: Every new commit must have its inductor cache pre-warmed before any
 type: feedback
 ---
 
-Recompile during training is NEVER allowed. A cold inductor cache mid-run eats into the 20-min wallclock budget, causes step-count mismatch vs baseline, and makes val_bpb comparisons unfair.
+Recompile during training is NEVER allowed. On multi-GPU runs it doesn't just bias step counts — it **kills the run**. Mid-training recompile causes ranks to desynchronize NCCL collectives (different compile timing per rank → different op order/shape → collective hang → NCCL timeout → dead job). AC-fix arm died exactly this way: rank 3 had 4 outstanding NCCL ops that never completed.
 
 **Why:** AC-fix (fc54262) was the first pod ever on that commit — compiled from cold mid-training at loop activation, cache grew from 1.7GB→2.0GB during the run. Old arms (1c6cd7c) all had warm caches from prior runs so showed no pause. The comparison is biased.
 
