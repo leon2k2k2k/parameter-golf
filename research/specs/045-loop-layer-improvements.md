@@ -1,4 +1,4 @@
-# Spec 045 — Loop Layer Improvements (A/B/C screen)
+# Spec 045 — Loop Layer Improvements
 
 **Slug:** `045-loop-layer-improvements`
 **Created:** 2026-04-26
@@ -70,9 +70,24 @@ MLP_ONLY_FROM_PASS=1  LOOP_SCALE_INIT=recip
 ```
 LOOP_SCALE_INIT=recip
 ```
-C alone — no iter embeds. Training loss comparison showed Lever C is systematic throughout
-training; Lever A is noise. Additivity estimate: C ≈ −0.00104 → D may land at or below win threshold.
-Same branch/commit, hardware, seed, and accept criteria as other arms.
+C alone — no iter embeds. Lever C is systematic throughout training; Lever A is noise.
+Additivity estimate: C ≈ −0.00104 → may land at or below win threshold.
+
+**Arm E — Loop45 NL=3 + C (added 2026-04-26):**
+```
+NUM_LOOPS=3  LOOP_START=4  LOOP_END=5  LOOP_SCALE_INIT=recip
+```
+041K showed NL=3 is the sweet spot. C's benefit should be larger at NL=3 (1/4 init vs 1/3
+— residual imbalance is worse with more passes). 17 total layer-passes post-loop.
+
+**Arm F — Loop345 NL=2 + C (added 2026-04-26):**
+```
+NUM_LOOPS=2  LOOP_START=3  LOOP_END=5  LOOP_SCALE_INIT=recip
+```
+Expand loop window to layer 3 (never looped before). Same compute as Arm E (17 layer-passes).
+1/L init = 1/3. Higher risk, novel. Run after E confirms deeper recurrence still benefits from C.
+
+All D/E/F arms use the same branch/commit, hardware (4×H100, 20 min), and accept criteria.
 
 ## Code changes
 
