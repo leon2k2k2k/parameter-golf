@@ -1,44 +1,62 @@
-# Spec 042A — slope anneal 0.707→0.5 at warmdown
+# Spec 042A — recompile-cause smoke (3 min)
 
 **Slug:** `042A-slope-anneal-0707-to-05-screen`
 **Created:** 2026-04-26
-**Status:** READY
+**Status:** SMOKE / DIAGNOSTIC — 3-min run to identify the recompile cause
 **Branch:** `exp/042-slope-anneal-screen`
-**Commit:** `76a257b`
+**Commit:** `dd63a75`
 **Links to:** `research/ideas/slope-annealing-sqrt-to-half.md`
 
-## Hypothesis
+## Why this is a smoke
 
-The fused backward bug (commits before 5bbf12f) accidentally used effective slope
-√0.5≈0.707 on negative activations instead of 0.5. Contaminated runs showed dramatically
-better mid-training signal but vibrated at warmdown due to forward/backward inconsistency.
+First 042A run (commit `2593982`) had a **~7-8 minute compile pause** between
+step 1623 (slope switch) and step 1700, where the slope kernel switch
+(0.7071→0.5) and the loop activation (looping_active=False→True at step 1625)
+fired within 2 steps of each other. Training got cut to step 3034/20000 by the
+1196s wallclock cap. Pre-quant EMA val_bpb landed at **1.0886** at step 3034 —
+only ~0.024 worse than the fully-trained 039b baseline (1.06514) over 6× fewer
+steps. **The early-training signal is real.** We need to fix the recompile to
+realize it.
 
-This spec harvests that benefit intentionally: run with `NEGATIVE_SLOPE=0.7071` (≈√0.5)
-for the first 75% of training, then switch cleanly to `NEGATIVE_SLOPE=0.5` at warmdown
-start. The switch fires exactly once at `frac = 1 - WARMDOWN_FRAC = 0.25`.
+This smoke run answers: **what causes the 7-8 min pause?** Three suspects:
+1. **Dynamo retrace** — `torch.compile(dynamic=False, fullgraph=True)` +
+   flipping the Python attribute `looping_active` at step 1625 changes the
+   for-loop iteration count (11 → 17 layers); Dynamo throws away the cached
+   graph and re-traces.
+2. **Triton autotune** — bucket warmup may not have covered the cu_seqlens
+   shape that the first real loop-active batch encountered.
+3. **Cache eviction** — Dynamo `cache_size_limit=8` (default) may LRU-evict
+   the looping_active=True graphs during the 1600 pre-loop steps.
 
-- Phase 1 (frac 0–0.25): s=0.7071 — more gradient flow through negative activations,
-  especially beneficial when the recurrent loop activates at frac=0.35
-- Phase 2 (frac 0.25–1.0): s=0.5 — forward/backward consistent, clean convergence
+## What this run does
 
-The Triton kernel recompiles once at the transition (~2s pause at step ~1650). Logged as:
-`slope_anneal: 0.7071→0.5000 step:N frac:0.250`
+Compresses the run so the trigger events fire in the first ~60s:
 
-## Config diff
+| Knob | Original 042A | Smoke 042A | Why |
+|---|---|---|---|
+| `MAX_WALLCLOCK_SECONDS` | 1200 | **180** | 3-min total run |
+| `ENABLE_LOOPING_AT` | 0.35 | **0.30** | Loop fires at ~54s elapsed |
+| `WARMDOWN_FRAC` | 0.75 | **0.72** | Slope switch at frac=0.28 (~50s) |
+| `TRAIN_LOG_EVERY` | 100 | **20** | Granular step timing around the event |
+| `VAL_LOSS_EVERY` | 1000 | **999999** | Skip val — not measuring quality |
+| `TRAINING_ONLY_SCREEN` | 0 | **1** | Skip EMA/GPTQ/quant/sliding/TTT |
 
-Two env var changes from the 039b baseline:
-
+Plus diagnostic env vars:
 ```bash
-NEGATIVE_SLOPE=0.7071
-SLOPE_WARMDOWN=0.5
+export TORCH_LOGS=recompiles,dynamo,inductor
+export TORCHDYNAMO_VERBOSE=1
 ```
 
-All loop/architecture settings identical to baseline (layers 3-5, NL=2, frac=0.35).
+`TORCH_LOGS=recompiles` prints a line every time Dynamo invalidates a cache
+entry, with the exact guard that fired. `dynamo,inductor` add tracing &
+lowering events. **This will dump a lot of log volume** — that's the point.
 
 ## Regime
 
-- `4×H100`, `SEED=42`, `MAX_WALLCLOCK_SECONDS=1200`, `TTT_ENABLED=0`, `TRAINING_ONLY_SCREEN=1`
-- Regions: AP-JP-1 or US-NE-1
+- **2×H100, JP region** (cheap; we don't need 4×H100 for a 3-min smoke; full
+  spec was 4×H100 but the recompile is per-rank so 2×H100 is sufficient
+  to see it)
+- `SEED=42`, `MAX_WALLCLOCK_SECONDS=180`, `TTT_ENABLED=0`, `TRAINING_ONLY_SCREEN=1`
 
 ## Launch form
 
@@ -52,15 +70,15 @@ export VAL_BYTES_FILES='/workspace/parameter-golf/data/datasets/fineweb10B_sp819
 export VOCAB_SIZE=8192 NUM_LAYERS=11 XSA_LAST_N=11 MODEL_DIM=512 NUM_KV_HEADS=4 NUM_HEADS=8
 export MLP_MULT=4 TIE_EMBEDDINGS=1 LOGIT_SOFTCAP=30 ROPE_BASE=10000 ROPE_DIMS=16
 export ROPE_TRAIN_SEQ_LEN=2048 ROPE_YARN=0 LN_SCALE=1 QK_GAIN_INIT=5.0
-export NUM_LOOPS=2 LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.35
+export NUM_LOOPS=2 LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.30
 export PARALLEL_START_LAYER=8 PARALLEL_FINAL_LANE=mean
 export MIN_LR=0.1 EMBED_LR=0.6 TIED_EMBED_LR=0.03 TIED_EMBED_INIT_STD=0.005
 export MATRIX_LR=0.026 SCALAR_LR=0.02 MUON_MOMENTUM=0.97 MUON_BACKEND_STEPS=5
 export MUON_MOMENTUM_WARMUP_START=0.92 MUON_MOMENTUM_WARMUP_STEPS=1500 MUON_ROW_NORMALIZE=1
 export BETA1=0.9 BETA2=0.95 ADAM_EPS=1e-8 GRAD_CLIP_NORM=0.3 ADAM_WD=0.02 MUON_WD=0.095 EMBED_WD=0.085
-export EMA_DECAY=0.9965 TRAIN_BATCH_TOKENS=786432 TRAIN_SEQ_LEN=2048 TRAIN_LOG_EVERY=100
-export ITERATIONS=20000 WARMDOWN_FRAC=0.75 WARMUP_STEPS=20
-export VAL_BATCH_TOKENS=524288 EVAL_SEQ_LEN=2048 EVAL_STRIDE=64 VAL_LOSS_EVERY=1000
+export EMA_DECAY=0.9965 TRAIN_BATCH_TOKENS=786432 TRAIN_SEQ_LEN=2048 TRAIN_LOG_EVERY=20
+export ITERATIONS=20000 WARMDOWN_FRAC=0.72 WARMUP_STEPS=20
+export VAL_BATCH_TOKENS=524288 EVAL_SEQ_LEN=2048 EVAL_STRIDE=64 VAL_LOSS_EVERY=999999
 export CASEOPS_ENABLED=1 COMPRESSOR=brotli
 export MATRIX_BITS=6 MATRIX_CLIP_SIGMAS=12.85 ATTN_CLIP_SIGMAS=13.0 MLP_CLIP_SIGMAS=12.0
 export EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 GPTQ_CALIBRATION_BATCHES=16 GPTQ_RESERVE_SECONDS=4
@@ -72,35 +90,44 @@ export RECUR_DIAG_P2P_COS=0 SMEAR_GATE_ENABLED=1
 export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.7071 SLOPE_WARMDOWN=0.5
-export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=0 VAL_LOSS_EVERY=1000
-export RUN_ID="042A-slope-anneal-0707-to-05"
+export SEED=42 MAX_WALLCLOCK_SECONDS=180 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=1
+export RUN_ID="042A-recompile-smoke"
 
-mkdir -p /workspace/runs/042A-slope-anneal-0707-to-05-screen
+# Diagnostic logging — captures the recompile reason at the loop activation
+export TORCH_LOGS=recompiles,dynamo,inductor
+export TORCHDYNAMO_VERBOSE=1
 
-torchrun --standalone --nproc_per_node=4 \
+pip install brotli --break-system-packages -q
+
+mkdir -p /workspace/runs/042A-recompile-smoke
+
+torchrun --standalone --nproc_per_node=2 \
   /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py \
-  >> /workspace/runs/042A-slope-anneal-0707-to-05-screen/train.log 2>&1
+  >> /workspace/runs/042A-recompile-smoke/train.log 2>&1
 ```
 
-## What to watch
+## What to harvest after the run
 
-- **Slope switch:** `slope_anneal: 0.7071→0.5000 step:~1650 frac:0.250` in log
-- **Triton recompile pause:** ~2s gap in throughput immediately after switch
-- **Mid-run val trajectory (VAL_LOSS_EVERY=1000):** compare to baseline at matched steps
-- **Final EMA val_bpb:** vs baseline 1.06514
+The log will be huge. After it finishes, harvest:
+
+1. **Recompile events** — `grep -E "Recompiling|Cache miss|guard failed|GuardManager" train.log | head -50`
+2. **Lines around loop activation** — `grep -B3 -A30 "layer_loop:enabled" train.log`
+3. **Triton autotune events** — `grep -E "AUTOTUNE|autotuning" train.log | wc -l` (count) and `head -20`
+4. **Step timing around the events** — `grep "train_loss" train.log` (cadence is every 20 steps)
 
 ## Acceptance
 
-Baseline (039b): pre-quant EMA val_bpb **1.06514**
+This run is **not** judged on val_bpb. Success = we identify which of the three
+suspects causes the pause. Failure = logs are inconclusive → need finer
+instrumentation (single-step repro or Dynamo's `torch._dynamo.config.verbose=True`).
 
-- **Win**: pre-quant EMA val_bpb < **1.0641**
-- **Noise zone**: 1.0641–1.0670 — run second seed
-- **Kill**: pre-quant EMA val_bpb ≥ **1.0670**
+## After this run
 
-Post-quant val_bpb also recorded (no TTT). Watch quant damage vs baseline.
+Next spec applies the targeted fix (e.g. tensor-gate `looping_active`, or
+bump `cache_size_limit`, or pre-warm a wider cu_seqlens shape range) and
+re-runs the full 042A.
 
-## Prediction
+## Cost
 
-Hard to predict precisely. The contaminated runs had dramatically better mid-training loss
-but vibrated at warmdown. The clean version should capture some of that early advantage
-without the warmdown instability. Optimistic: ~1.063x. Conservative: noise zone.
+2×H100 JP × ~5 min wall (including SSH setup, pod boot, install, launch, run,
+shutdown) ≈ **$0.50**.
