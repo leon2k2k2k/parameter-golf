@@ -4,7 +4,7 @@
 **Created:** 2026-04-26
 **Status:** READY
 **Branch:** `exp/045-loop-layer-improvements`
-**Commit:** `1c6cd7cea0fa18ab07de120285c989df7c86b6bb`
+**Commit:** `fc54262` (latest; `1c6cd7c` for arms A–F)
 **Links to:** `research/ideas/loop-layer-improvements.md`
 
 ## Hypothesis
@@ -89,7 +89,39 @@ Same window as baseline (layers 3–5) but more passes (NL=3, 4 total vs baselin
 NOTE: baseline already uses LOOP_START=3 by default — Arm F is the natural NL=3 upgrade
 of what AC already demonstrated. 1/4 init. 19 total layer-passes post-loop (heavier than E).
 
-All D/E/F arms use the same branch/commit, hardware (4×H100, 20 min), and accept criteria.
+All D/E/F arms use branch commit `1c6cd7c`, hardware (4×H100, 20 min), and accept criteria.
+
+---
+
+## Optimizer bug discovery (2026-04-26)
+
+After reviewing Arm A and AC results, found that **`loop_iter_embeds` (Lever A) was never in any optimizer group** — it stayed at zero-init throughout all runs. `block_named_params` only covers `self.blocks`; `loop_iter_embeds` is a GPT-root parameter and was silently excluded.
+
+Implication: all arms using `LOOP_ITER_EMBEDS=1` (A, AC, E, F) tested Lever C alone (or NL=3+C). The "AC synergy" was likely just C. Fix committed in `fc54262` — adds `loop_iter_embeds` (and `loop_resid_mixes`) to `scalar_params` in `Optimizers.__init__`.
+
+Arms G/H/GH below use `fc54262` and are the first to run with actual working iter embeds.
+
+---
+
+**Arm G — AC + gradient-side 1/L (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip  LOOP_LR_SCALE=recip
+```
+Looped params accumulate L× gradients per step (weight-tied, run num_passes times). Gradient hooks on bank rows `[loop_start:loop_end+1]` and block-level scalars scale by 1/num_passes before Muon/AdamW step. Symmetric to Lever C's forward-pass 1/L. `loop_iter_embeds` and `loop_resid_mixes` excluded (each row used once, not shared).
+
+**Arm H — AC + per-pass resid_mix (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip  LOOP_PER_PASS_RESID_MIX=1
+```
+Each looped layer gets independent `[2, dim]` blend params per pass (GPT-level `[num_passes, num_looped, 2, dim]` parameter). Init to `[1, 0]` = byte-identical to baseline at step 0. Completes the per-pass trio: A (identity), C (scale), H (blend).
+
+**Arm GH — AC + both G and H (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip  LOOP_LR_SCALE=recip  LOOP_PER_PASS_RESID_MIX=1
+```
+Natural stack. Tests whether gradient normalization + blend calibration compound.
+
+All G/H/GH arms use commit `fc54262`, hardware (4×H100, 20 min), seed=42.
 
 ## Code changes
 
