@@ -378,6 +378,10 @@ class Hyperparameters:
     #    pass (vs sharing block.resid_mix across all passes). Init to [1, 0] = byte-
     #    identical to baseline at step 0. Disabled by default.
     loop_per_pass_resid_mix = bool(int(os.environ.get("LOOP_PER_PASS_RESID_MIX", "0")))
+    # I. Reverse last loop pass: final pass through looped layers runs in reversed
+    #    layer order (e.g. [3,4,5] forward then [5,4,3] on last pass). U-Net-style
+    #    palindrome — coarse routing forward, correction flows back up same weights.
+    loop_reverse_last_pass = bool(int(os.environ.get("LOOP_REVERSE_LAST_PASS", "0")))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -1358,8 +1362,9 @@ class GPT(nn.Module):
         if h.num_loops > 0:
             loop_seg = list(range(h.loop_start, h.loop_end + 1))
             all_indices = list(range(h.loop_start))
-            for _ in range(h.num_loops + 1):
-                all_indices.extend(loop_seg)
+            for i in range(h.num_loops + 1):
+                seg = list(reversed(loop_seg)) if (h.loop_reverse_last_pass and i == h.num_loops) else loop_seg
+                all_indices.extend(seg)
             all_indices.extend(range(h.loop_end + 1, h.num_layers))
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
