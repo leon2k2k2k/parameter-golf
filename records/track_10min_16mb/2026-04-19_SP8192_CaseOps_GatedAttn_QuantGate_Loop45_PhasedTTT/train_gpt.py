@@ -412,6 +412,22 @@ class Hyperparameters:
     gptq_calib_source = os.environ.get("GPTQ_CALIB_SOURCE", "train")
     gptq_ar_temp = float(os.environ.get("GPTQ_AR_TEMP", 1.0))
     gptq_ar_seq_len = int(os.environ.get("GPTQ_AR_SEQ_LEN", 512))
+    # Spec 046L — Deploy-time quant repair. Runs AFTER deserialize and BEFORE
+    # compile/eval. Generates AR self-gen calib data (no val leak), fits
+    # passthrough fp16 params (attn_scale, mlp_scale, resid_mix, q_gain, ...)
+    # to minimize next-token CE loss on those AR samples. Bypasses the
+    # 16,000,000-byte artifact cap by paying eval-time compute (~60s) for
+    # quant repair instead of artifact bytes. Uses ~60s of the 100-180s of
+    # leaderboard eval headroom that PR #1797 leaves unused.
+    # Rules-legal per challenge README: "you're free to evaluate however"
+    # + "we encourage competitors to push the bounds of evaluation methods".
+    # No val data accessed (AR self-gen from BOS).
+    deploy_time_repair_enabled = bool(int(os.environ.get("DEPLOY_TIME_REPAIR_ENABLED", "0")))
+    deploy_time_repair_iters = int(os.environ.get("DEPLOY_TIME_REPAIR_ITERS", 5))
+    deploy_time_repair_lr = float(os.environ.get("DEPLOY_TIME_REPAIR_LR", 1e-3))
+    deploy_time_repair_batches = int(os.environ.get("DEPLOY_TIME_REPAIR_BATCHES", 8))
+    deploy_time_repair_ar_seq_len = int(os.environ.get("DEPLOY_TIME_REPAIR_AR_SEQ_LEN", 512))
+    deploy_time_repair_ar_temp = float(os.environ.get("DEPLOY_TIME_REPAIR_AR_TEMP", 1.0))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -2722,6 +2738,125 @@ def fit_passthrough_params_to_match_base(eval_model, base_model, h, device):
         p.requires_grad_(False)
 
 
+@torch.no_grad()
+def _generate_ar_batch_for_repair(model, batch_size, seq_len, vocab_size, temp, device, bos_token_id=0):
+    """
+    Generate ONE batch of (input_ids, target_ids) sequences via autoregressive
+    sampling from the model itself, starting from BOS. Used by deploy-time
+    quant repair (spec 046L/M).
+
+    Returns:
+        x: (batch_size, seq_len) int64 - input token ids
+        y: (batch_size, seq_len) int64 - target token ids (shifted by 1)
+    """
+    # Generate seq_len + 1 tokens so we can split into (input, target) for next-token prediction
+    tokens = torch.full((batch_size, seq_len + 1), bos_token_id, dtype=torch.int64, device=device)
+    for t in range(1, seq_len + 1):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            logits = model.forward_logits(tokens[:, :t])
+        # Take last position's logits, apply temperature, sample
+        last = logits[:, -1, :].float() / max(temp, 1e-6)
+        probs = F.softmax(last, dim=-1)
+        next_tok = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        tokens[:, t] = next_tok
+    return tokens[:, :seq_len], tokens[:, 1:seq_len + 1]
+
+
+def fit_passthrough_on_ar_gen(eval_model, h, device):
+    """
+    Spec 046L/M — deploy-time quant repair via passthrough param fit on
+    AR self-generated text.
+
+    Generates synthetic next-token-prediction data using the quantized model
+    itself (sampling from BOS), then fits the small (numel <=65536) passthrough
+    fp16 params on next-token CE loss. Matrix weights stay frozen.
+
+    Bypasses the 16MB artifact byte cap by paying eval-time compute (~1-3 min)
+    for quant repair. Rules-legal: no val data accessed (AR self-gen from BOS).
+
+    The fitted params live on eval_model in-memory after this returns; caller
+    decides whether to (a) just run eval on the fitted model (screen mode) or
+    (b) re-serialize the artifact with the fitted values (production mode).
+    """
+    log("postquant_fit: starting AR self-gen + passthrough fit")
+    seq_len = h.deploy_time_repair_ar_seq_len
+    n_batches = h.deploy_time_repair_batches
+    # Pick a batch size that fits in memory. For 4xH100 with our 36M model,
+    # batch=8 at seq_len=512 is comfortable. Scale by world_size for parallelism.
+    batch_size = 8
+
+    # Generate AR data first (no grad; uses eval_model's quantized weights to sample)
+    eval_model.eval()
+    t0 = time.perf_counter()
+    ar_batches = []
+    for bi in range(n_batches):
+        x, y = _generate_ar_batch_for_repair(
+            eval_model, batch_size, seq_len, h.vocab_size,
+            h.deploy_time_repair_ar_temp, device,
+        )
+        ar_batches.append((x, y))
+        if (bi + 1) % 4 == 0 or bi == n_batches - 1:
+            log(
+                f"postquant_fit:ar_gen progress={bi+1}/{n_batches} "
+                f"tokens_so_far={(bi+1)*batch_size*seq_len} "
+                f"elapsed={time.perf_counter()-t0:.1f}s"
+            )
+    log(
+        f"postquant_fit:ar_gen done {n_batches*batch_size*seq_len} tokens "
+        f"in {time.perf_counter()-t0:.1f}s"
+    )
+
+    # Identify trainable params: small (<=65536 element) floating-point params.
+    # These are the passthrough fp16 tensors in our quant artifact.
+    fit_params = []
+    n_elements = 0
+    for name, p in eval_model.named_parameters():
+        if p.is_floating_point() and p.numel() <= 65536:
+            p.requires_grad_(True)
+            fit_params.append((name, p))
+            n_elements += p.numel()
+        else:
+            p.requires_grad_(False)
+    log(
+        f"postquant_fit: fitting {len(fit_params)} params "
+        f"({n_elements} elements) over {h.deploy_time_repair_iters} iters, "
+        f"lr={h.deploy_time_repair_lr}"
+    )
+
+    opt = torch.optim.AdamW(
+        [p for _, p in fit_params],
+        lr=h.deploy_time_repair_lr,
+        betas=(0.9, 0.95),
+        weight_decay=0.0,
+    )
+
+    eval_model.train()  # required for backward
+    t0 = time.perf_counter()
+    for it in range(h.deploy_time_repair_iters):
+        accum_loss = 0.0
+        for (x, y) in ar_batches:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits = eval_model.forward_logits(x)
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                y.reshape(-1),
+                reduction="mean",
+            )
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            accum_loss += loss.item()
+        log(
+            f"postquant_fit:iter={it+1}/{h.deploy_time_repair_iters} "
+            f"avg_ce={accum_loss / len(ar_batches):.6f}"
+        )
+    log(f"postquant_fit: fit done in {time.perf_counter()-t0:.1f}s")
+
+    eval_model.eval()
+    for _, p in fit_params:
+        p.requires_grad_(False)
+
+
 def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
     hessians = {}
     hooks = []
@@ -4442,6 +4577,29 @@ def train_model(h, device, val_data):
 
 
 def train_and_eval(h, device):
+    # GUARD: SPINQUANT_ENABLED=1 in this code path triggers residual-stream
+    # rotation in serialize() (_spinquant_rotate_sd_and_H) + deserialize()
+    # (install_spinquant_rotations). Per spec 009 analysis, that variant
+    # requires folding per-channel multipliers (attn_scale, mlp_scale,
+    # skip_weights, resid_mix) into the rotation — NOT IMPLEMENTED here.
+    # Confirmed catastrophic on spec 046C: post-quant val_bpb 7.85 vs ~1.075
+    # baseline (+6.78 BPB blow-up).
+    #
+    # The only working SpinQuant variant on this stack is the per-KV-group
+    # attention-internal R_a (d_head=64), which is float-invariant by
+    # construction (softmax(QK^T)V is rotation-equivariant in V's d_head
+    # axis). That variant lives in spinquant_hotstart.py with
+    # SPINQUANT_MODE=internal_only — see runs/009-spinquant-hotstart/
+    # internal_only/ and runs/010b-spinquant-sites/ for past results.
+    if h.spinquant_enabled:
+        raise RuntimeError(
+            "SPINQUANT_ENABLED=1 in train_gpt.py uses residual-stream rotation "
+            "which requires per-channel multiplier folding (attn_scale, "
+            "mlp_scale, skip_weights, resid_mix) — NOT IMPLEMENTED. "
+            "Confirmed catastrophic in spec 046C: post-quant val_bpb 7.85 "
+            "(+6.78 BPB vs ~1.075 baseline). For working SpinQuant on this "
+            "stack, use spinquant_hotstart.py with SPINQUANT_MODE=internal_only."
+        )
     random.seed(h.seed)
     np.random.seed(h.seed)
     torch.manual_seed(h.seed)
@@ -4542,6 +4700,13 @@ def train_and_eval(h, device):
             eval_model, base_model, h, device
         )
         log("postquant_lnfit:fit complete")
+    # Spec 046L/M — deploy-time quant repair (AR self-gen + passthrough fit).
+    # Runs in-memory on the loaded quantized model. SCREEN MODE: fitted values
+    # affect this run's quantized eval but DO NOT propagate back to artifact.
+    # PRODUCTION MODE (separate todo): re-serialize artifact with fitted passthrough.
+    if h.deploy_time_repair_enabled:
+        torch._dynamo.reset()
+        fit_passthrough_on_ar_gen(eval_model, h, device)
     compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
     compiled_forward_logits = torch.compile(
         eval_model.forward_logits, dynamic=False, fullgraph=True
