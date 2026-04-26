@@ -358,6 +358,18 @@ class Hyperparameters:
     # Diagnostics: compute/store pass-to-pass cosine similarity on block deltas.
     # Answers "is cross-pass XSA the right follow-up?" informational side-channel.
     recur_diag_p2p_cos = bool(int(os.environ.get("RECUR_DIAG_P2P_COS", "0")))
+    # Spec 045 — Loop layer improvements (three orthogonal levers):
+    # A. Iteration embeddings: learned per-pass vector added to x at loop_start
+    #    entry, zero-init so step 0 is byte-identical to baseline. Motivated by
+    #    Xu & Sato ICML 2025 — closes approximation gap in naive weight-tied loops.
+    loop_iter_embeds = bool(int(os.environ.get("LOOP_ITER_EMBEDS", "0")))
+    # B. MLP-only loop: on loop passes >= mlp_only_from_pass, skip attention and
+    #    run only MLP. Attention runs once (pass 0); MLP refines further.
+    #    0 = disabled (full block every pass, byte-identical to baseline).
+    mlp_only_from_pass = int(os.environ.get("MLP_ONLY_FROM_PASS", "0"))
+    # C. Residual 1/L init: initialize attn_scale and mlp_scale for looped layers
+    #    to 1/num_passes instead of 1.0. "ones" = baseline; "recip" = 1/L.
+    loop_scale_init = os.environ.get("LOOP_SCALE_INIT", "ones")
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -1245,16 +1257,19 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False):
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_out = self.attn(
-            self.attn_norm(x_in) * self.ln_scale_factor,
-            q_w, k_w, v_w, out_w,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
+        if not skip_attn:
+            attn_out = self.attn(
+                self.attn_norm(x_in) * self.ln_scale_factor,
+                q_w, k_w, v_w, out_w,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+            x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
+        else:
+            x_out = x_in
         x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
             None, None, :
         ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
@@ -1478,6 +1493,66 @@ class GPT(nn.Module):
                 persistent=False,
             )
             self._diag_prev_deltas = {}  # layer_idx -> tensor (updated in forward)
+
+        # Spec 045A — Iteration embeddings. Zero-init → step 0 byte-identical to baseline.
+        # Injected at the first layer of each loop-window pass (idx == loop_start).
+        # Precomputed info lists (parallel to enc/dec indices): embed pass index or None.
+        self.loop_iter_embeds_enabled = bool(h.loop_iter_embeds) and h.num_loops > 0
+        if self.loop_iter_embeds_enabled:
+            num_passes = h.num_loops + 1
+            self.loop_iter_embeds = nn.Parameter(
+                torch.zeros(num_passes, h.model_dim, dtype=torch.float32)
+            )
+            # Count how many times loop_start has been seen to assign pass index.
+            _lsc = 0
+            self._enc_iter_embed_info = []
+            for idx in self.encoder_indices:
+                if idx == h.loop_start:
+                    self._enc_iter_embed_info.append(_lsc)
+                    _lsc += 1
+                else:
+                    self._enc_iter_embed_info.append(None)
+            self._dec_iter_embed_info = []
+            for idx in self.decoder_indices:
+                if idx == h.loop_start:
+                    self._dec_iter_embed_info.append(_lsc)
+                    _lsc += 1
+                else:
+                    self._dec_iter_embed_info.append(None)
+        else:
+            self.loop_iter_embeds = None
+            self._enc_iter_embed_info = None
+            self._dec_iter_embed_info = None
+
+        # Spec 045B — MLP-only loop. Skip attention on loop passes >= mlp_only_from_pass.
+        # 0 = disabled. 1 = skip attn on passes 1+ (full block only on pass 0).
+        # Precomputed skip_attn lists parallel to enc/dec indices.
+        self.mlp_only_from_pass = int(h.mlp_only_from_pass) if h.num_loops > 0 else 0
+        if self.mlp_only_from_pass > 0:
+            _pass_ctr: dict = {}
+            self._enc_skip_attn = []
+            for idx in self.encoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pass_ctr.get(idx, 0)
+                    _pass_ctr[idx] = pi + 1
+                    self._enc_skip_attn.append(pi >= self.mlp_only_from_pass)
+                else:
+                    self._enc_skip_attn.append(False)
+            self._dec_skip_attn = []
+            for idx in self.decoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pass_ctr.get(idx, 0)
+                    _pass_ctr[idx] = pi + 1
+                    self._dec_skip_attn.append(pi >= self.mlp_only_from_pass)
+                else:
+                    self._dec_skip_attn.append(False)
+        else:
+            self._enc_skip_attn = None
+            self._dec_skip_attn = None
+
+        # Spec 045C — Residual 1/L init for looped layers. Applied after _init_weights.
+        self._loop_scale_init = h.loop_scale_init
+
         self._init_weights()
 
     def _init_weights(self):
@@ -1505,6 +1580,14 @@ class GPT(nn.Module):
                     and module.weight.shape[1] >= 64
                 ):
                     nn.init.orthogonal_(module.weight, gain=1.0)
+        # Spec 045C — 1/L residual init for looped layers only.
+        if self._loop_scale_init == "recip" and self._num_loops > 0:
+            num_passes = self._num_loops + 1
+            scale = 1.0 / num_passes
+            for li in range(self.loop_start, self.loop_end + 1):
+                with torch.no_grad():
+                    self.blocks[li].attn_scale.fill_(scale)
+                    self.blocks[li].mlp_scale.fill_(scale)
 
     def _bank_weights(self, i):
         n = self.num_layers
@@ -1592,8 +1675,15 @@ class GPT(nn.Module):
         carry = {} if enc_alpha_info is not None else None
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            # Spec 045A: inject per-pass iter embed at entry of each loop-window pass.
+            if self.loop_iter_embeds is not None and self.looping_active:
+                _einfo = self._enc_iter_embed_info[step_idx]
+                if _einfo is not None:
+                    x = x + self.loop_iter_embeds[_einfo].to(dtype=x.dtype)
             x_before = x
-            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            # Spec 045B: skip attention on MLP-only passes.
+            _skip_attn = bool(self._enc_skip_attn is not None and self.looping_active and self._enc_skip_attn[step_idx])
+            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -1659,8 +1749,15 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
+                # Spec 045A: inject per-pass iter embed at entry of each loop-window pass.
+                if self.loop_iter_embeds is not None and self.looping_active:
+                    _einfo = self._dec_iter_embed_info[skip_idx]
+                    if _einfo is not None:
+                        x = x + self.loop_iter_embeds[_einfo].to(dtype=x.dtype)
                 x_before = x
-                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                # Spec 045B: skip attention on MLP-only passes.
+                _skip_attn = bool(self._dec_skip_attn is not None and self.looping_active and self._dec_skip_attn[skip_idx])
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     beta = self.recur_beta[local_idx].to(x_new.dtype)
