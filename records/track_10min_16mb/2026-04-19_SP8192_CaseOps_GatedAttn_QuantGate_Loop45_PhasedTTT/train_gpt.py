@@ -384,6 +384,34 @@ class Hyperparameters:
     #    pass (vs sharing block.resid_mix across all passes). Init to [1, 0] = byte-
     #    identical to baseline at step 0. Disabled by default.
     loop_per_pass_resid_mix = bool(int(os.environ.get("LOOP_PER_PASS_RESID_MIX", "0")))
+    # Spec 046E — Post-quant fit of small (passthrough fp16) params on the
+    # quantized eval_model to match base_model's pre-quant logits via MSE.
+    # Designed in PR #1818-B (taka6745). Mechanism: GPTQ shifts logit
+    # distributions; small per-block params (attn_scale, mlp_scale,
+    # resid_mix, q_gain, recur_alpha/beta, smear_lambda, parallel_*_lambdas)
+    # were trained against pre-quant activations. Re-fitting them on
+    # post-quant activations should compensate at zero artifact-byte cost.
+    # Runs only when RESUME_FROM_CKPT is set (base_model still in memory).
+    # NOTE: in-memory only for screen — fitted values do NOT update the
+    # serialized artifact in this implementation. If lever wins the screen,
+    # follow-up work productionizes by re-serializing post-fit.
+    postquant_lnfit_enabled = bool(int(os.environ.get("POSTQUANT_LNFIT_ENABLED", "0")))
+    postquant_lnfit_iters = int(os.environ.get("POSTQUANT_LNFIT_ITERS", 5))
+    postquant_lnfit_lr = float(os.environ.get("POSTQUANT_LNFIT_LR", 1e-3))
+    postquant_lnfit_batches = int(os.environ.get("POSTQUANT_LNFIT_BATCHES", 8))
+    # Spec 046F — AR self-generated GPTQ calibration. PR #756 ablation
+    # showed AR self-gen calib matches val-data calib within 0.0003 BPB
+    # on this stack. PR #1234 failed due to 210s training-time cost; in
+    # eval-only mode (RESUME_FROM_CKPT) generation cost is no longer
+    # competing against training steps. GPTQ_CALIB_SOURCE: "train" (default,
+    # current behavior — uses ShuffledSequenceLoader on train data) or "ar"
+    # (model-generated tokens via AR sampling from BOS). GPTQ_AR_TEMP is
+    # the sampling temperature (1.0 = neutral). GPTQ_AR_SEQ_LEN caps the
+    # AR generation length (default 512 — shorter than train_seq_len 2048
+    # to keep generation time manageable; ~16 batches at 512 ≈ 8K AR steps).
+    gptq_calib_source = os.environ.get("GPTQ_CALIB_SOURCE", "train")
+    gptq_ar_temp = float(os.environ.get("GPTQ_AR_TEMP", 1.0))
+    gptq_ar_seq_len = int(os.environ.get("GPTQ_AR_SEQ_LEN", 512))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -2577,6 +2605,123 @@ def restore_fp32_params(model):
     model.mlp_down_bank.data = model.mlp_down_bank.data.float()
 
 
+class ARSelfGenCalibLoader:
+    """
+    GPTQ calibration data source that generates samples by autoregressive
+    sampling from the model itself (vs reading train/val data). Mimics
+    ShuffledSequenceLoader's .next_batch interface so it can be drop-in
+    swapped at the collect_hessians callsite.
+
+    Strategy: pre-generate all calib batches at construction time (cached),
+    then serve them from cache. This isolates AR generation cost from the
+    Hessian-collection loop and lets us reuse generated samples cleanly.
+
+    AR uses a shorter seq_len than training (default 512 vs 2048) to keep
+    total generation time bounded — ~n_batches × seq_len forward steps.
+    For 16 batches × 512 = 8K steps at batch=auto, takes a few minutes
+    (slower than reading from disk; eval_only-friendly).
+    """
+
+    def __init__(self, h, model, device, n_batches, temp=1.0, bos_token_id=0):
+        self.h = h
+        self.device = device
+        self.world_size = h.world_size if h.distributed else 1
+        self.seq_len = h.gptq_ar_seq_len
+        self.cache = []
+        log(f"ar_calib: generating {n_batches} batches at seq_len={self.seq_len} temp={temp}")
+        t0 = time.perf_counter()
+        for bi in range(n_batches):
+            x = self._generate_batch(model, h.train_batch_tokens, h.grad_accum_steps, temp, bos_token_id)
+            y = torch.zeros_like(x)  # not used by collect_hessians (it just calls forward_logits(x))
+            self.cache.append((x, y))
+        log(f"ar_calib: generated {n_batches} batches in {time.perf_counter()-t0:.1f}s")
+        self._cursor = 0
+
+    @torch.no_grad()
+    def _generate_batch(self, model, global_tokens, grad_accum_steps, temp, bos):
+        device_tokens = global_tokens // (self.world_size * grad_accum_steps)
+        device_batch_size = max(1, device_tokens // self.seq_len)
+        x = torch.full((device_batch_size, self.seq_len), bos, dtype=torch.int64, device=self.device)
+        for t in range(1, self.seq_len):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits = model.forward_logits(x[:, :t])
+            last = logits[:, -1, :].float() / max(temp, 1e-6)
+            probs = F.softmax(last, dim=-1)
+            next_tok = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            x[:, t] = next_tok
+        return x
+
+    def next_batch(self, global_tokens, grad_accum_steps):
+        x, y = self.cache[self._cursor % len(self.cache)]
+        self._cursor += 1
+        return x, y
+
+
+def fit_passthrough_params_to_match_base(eval_model, base_model, h, device):
+    """
+    Spec 046E — fit eval_model's small (passthrough fp16) params to minimize
+    MSE between eval_model logits (post-quant) and base_model logits (pre-quant).
+
+    Optimizes ~10s of small per-block scalars/vectors (attn_scale, mlp_scale,
+    resid_mix, q_gain, recur_alpha/beta, smear_lambda, parallel_*_lambdas)
+    that are stored as fp16 passthrough in the artifact. Matrix weights
+    (the int6-quantized ones) stay frozen.
+
+    Calibration data: ShuffledSequenceLoader on train data (same source as
+    GPTQ Hessian collection). This keeps the fit objective in-distribution
+    with what GPTQ optimized for.
+
+    Note: this is the SCREEN implementation. Updated values live in eval_model
+    in-memory only — they do NOT propagate back to the saved artifact in this
+    code. If the lever wins the screen, productionization requires either
+    re-serialization or a separate "fitted-params" overlay file in the artifact.
+    """
+    fit_params = []
+    n_elements = 0
+    for name, p in eval_model.named_parameters():
+        if p.is_floating_point() and p.numel() <= 65536:
+            p.requires_grad_(True)
+            fit_params.append((name, p))
+            n_elements += p.numel()
+        else:
+            p.requires_grad_(False)
+    log(
+        f"postquant_lnfit: fitting {len(fit_params)} params "
+        f"({n_elements} elements) over {h.postquant_lnfit_iters} iters "
+        f"× {h.postquant_lnfit_batches} batches, lr={h.postquant_lnfit_lr}"
+    )
+    opt = torch.optim.AdamW(
+        [p for _, p in fit_params],
+        lr=h.postquant_lnfit_lr,
+        betas=(0.9, 0.95),
+        weight_decay=0.0,
+    )
+    fit_loader = ShuffledSequenceLoader(h, device)
+
+    base_model.eval()
+    for it in range(h.postquant_lnfit_iters):
+        accum_loss = 0.0
+        for _ in range(h.postquant_lnfit_batches):
+            x, _ = fit_loader.next_batch(h.train_batch_tokens, h.grad_accum_steps)
+            with torch.no_grad():
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    target = base_model.forward_logits(x).float()
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                pred = eval_model.forward_logits(x).float()
+            loss = F.mse_loss(pred, target)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            accum_loss += loss.item()
+        log(
+            f"postquant_lnfit:iter={it+1}/{h.postquant_lnfit_iters} "
+            f"avg_mse={accum_loss / h.postquant_lnfit_batches:.6f}"
+        )
+    eval_model.eval()
+    for _, p in fit_params:
+        p.requires_grad_(False)
+
+
 def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
     hessians = {}
     hooks = []
@@ -3227,7 +3372,16 @@ def serialize(h, base_model, code):
     sd_cpu = _unbank_state_dict(base_model.state_dict(), h.num_layers)
     device = torch.device("cuda", h.local_rank)
     t0 = time.perf_counter()
-    calib_loader = ShuffledSequenceLoader(h, device)
+    if h.gptq_calib_source == "ar":
+        # Spec 046F — AR self-gen calib via model-generated tokens.
+        calib_loader = ARSelfGenCalibLoader(
+            h, base_model, device,
+            n_batches=h.gptq_calibration_batches,
+            temp=h.gptq_ar_temp,
+            bos_token_id=0,
+        )
+    else:
+        calib_loader = ShuffledSequenceLoader(h, device)
     log("GPTQ:collecting Hessians from calibration data...")
     hessians = collect_hessians(
         base_model,
@@ -4378,6 +4532,16 @@ def train_and_eval(h, device):
     if h.num_loops > 0:
         eval_model.looping_active = True
         eval_model.looping_depth = h.num_loops  # always full depth at eval/TTT
+    # Spec 046E — fit post-quant passthrough params to match base_model logits.
+    # Requires base_model still in scope (RESUME_FROM_CKPT or train path; not
+    # available in pure EVAL_ONLY=1 mode). In-memory only; artifact unchanged.
+    if h.postquant_lnfit_enabled and not h.eval_only:
+        torch._dynamo.reset()
+        log("postquant_lnfit:starting fit")
+        fit_passthrough_params_to_match_base(
+            eval_model, base_model, h, device
+        )
+        log("postquant_lnfit:fit complete")
     compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
     compiled_forward_logits = torch.compile(
         eval_model.forward_logits, dynamic=False, fullgraph=True
