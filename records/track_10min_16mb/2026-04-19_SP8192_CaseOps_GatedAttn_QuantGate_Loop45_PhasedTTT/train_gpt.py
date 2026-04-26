@@ -257,6 +257,13 @@ class Hyperparameters:
     # in a follow-up code change for size/quant headroom. Default 0 =
     # standard behavior (layer 0 attn enabled).
     disable_layer0_attn = bool(int(os.environ.get("DISABLE_LAYER0_ATTN", "0")))
+    # QK_GAIN_FROZEN=1 freezes q_gain (per-head Q multiplier) at its init
+    # value throughout training (requires_grad=False). Default 0 = learnable
+    # as in baseline. Use case: 044D — test whether the train_loss vs
+    # val_bpb disconnect we saw in 044A (learnable, init=2.5) is from the
+    # gradient on q_gain itself or from the value. Pair with QK_GAIN_INIT
+    # to fix at any constant value.
+    qk_gain_frozen = bool(int(os.environ.get("QK_GAIN_FROZEN", "0")))
     mlp_outer_activation = os.environ.get("MLP_OUTER_ACTIVATION", "leaky_relu_square")
     mlp_middle_activation = os.environ.get("MLP_MIDDLE_ACTIVATION", "leaky_relu_square")
     mlp_middle_negative_slope = float(
@@ -1324,6 +1331,9 @@ class GPT(nn.Module):
         )
         if h.disable_layer0_attn:
             self.blocks[0]._skip_attn = True
+        if h.qk_gain_frozen:
+            for block in self.blocks:
+                block.attn.q_gain.requires_grad_(False)
         if h.rope_dims > 0:
             head_dim = h.model_dim // h.num_heads
             for block in self.blocks:
