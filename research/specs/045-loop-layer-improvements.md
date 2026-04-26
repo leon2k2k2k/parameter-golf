@@ -113,6 +113,8 @@ LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
 ```
 Re-run of Arm AC on `fc54262`. Required comparison point for Arms G and H — without this we can't tell whether G/H gains come from the new levers or just from A finally working. Old AC result (1.06472) is invalid as a baseline for G/H.
 
+⚠️ **First AC-fix attempt FAILED** (NCCL collective timeout at step ~2200): mid-training recompile on cold fc54262 cache caused rank desync. Fix: add `TORCHINDUCTOR_COMPILE_THREADS=8 TRITON_AUTOTUNE_NUM_RUNS=1` (see compile note below). Must rerun.
+
 ---
 
 **Arm G — AC + gradient-side 1/L (added 2026-04-26):**
@@ -135,6 +137,8 @@ Natural stack. Tests whether gradient normalization + blend calibration compound
 
 All A2/AC-fix/G/H/GH arms use commit `fc54262`, hardware (4×H100, 20 min), seed=42.
 
+**Run order: sequential on the same pod** — AC-fix first (pays cold compile ~8 min), then A2, G, H on the same pod (warm cache, no compile cost). Do NOT run in parallel on separate pods — each parallel pod pays the full cold compile independently and risks NCCL hang if compile env vars are missing.
+
 **⚠️ COMPILE NOTE — required for all fc54262 arms:**
 The code changes in fc54262 changed the graph hash, invalidating the inductor cache from 1c6cd7c runs. Every fc54262 arm MUST set:
 ```
@@ -146,7 +150,8 @@ These cut cold compile time from ~15 min to ~8 min (per `runs/042B-prewarm-speed
 ## Code changes
 
 Branch: `exp/045-loop-layer-improvements`
-Commit: `1c6cd7cea0fa18ab07de120285c989df7c86b6bb`
+- Commit `1c6cd7c` — Arms A/B/AC/D/E/F (Levers A, B, C)
+- Commit `fc54262` — Arms A2/AC-fix/G/H/GH (optimizer bug fix + Levers G, H)
 
 Key changes in `train_gpt.py`:
 
