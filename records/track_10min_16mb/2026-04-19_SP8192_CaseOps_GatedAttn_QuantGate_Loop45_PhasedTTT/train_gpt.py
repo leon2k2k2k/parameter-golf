@@ -251,6 +251,12 @@ class Hyperparameters:
     )
     mlp_middle_layers = os.environ.get("MLP_MIDDLE_LAYERS", "3,4,5")
     training_only_screen = bool(int(os.environ.get("TRAINING_ONLY_SCREEN", "0")))
+    # EVAL_ONLY=1 skips train_model() entirely and runs only the deserialize +
+    # quantized-eval portion. Requires the artifacts (final_model.pt and the
+    # quantized blob) to already exist at h.model_path / h.quantized_model_path.
+    # Use case: test deserialize/quant fixes without paying for a full training
+    # rerun (~$4). Pre-quant EMA val is also skipped (needs base_model).
+    eval_only = bool(int(os.environ.get("EVAL_ONLY", "0")))
     skip_gates_enabled = bool(int(os.environ.get("SKIP_GATES_ENABLED", "1")))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 3e1))
@@ -4090,25 +4096,39 @@ def train_and_eval(h, device):
         f"train_shards: {len(list(Path(h.datasets_dir).resolve().glob('fineweb_train_*.bin')))}"
     )
     log(f"val_tokens: {val_data.val_tokens.numel()-1}")
-    base_model, compiled_model, compiled_forward_logits = train_model(
-        h, device, val_data
-    )
-    torch._dynamo.reset()
-    timed_eval(
-        "diagnostic pre-quantization post-ema",
-        eval_val,
-        h,
-        device,
-        val_data,
-        compiled_model,
-        compiled_forward_logits,
-    )
-    if h.training_only_screen:
-        log("training_only_screen:stopping_after_prequant_eval")
-        return
-    serialize(h, base_model, Path(__file__).read_text(encoding="utf-8"))
-    if h.distributed:
-        dist.barrier()
+    if h.eval_only:
+        # EVAL_ONLY=1: skip train_model + serialize, jump straight to
+        # deserialize + quantized eval. Requires final_model.int6.ptz (and
+        # final_model.pt for SpinQuant template) to already exist on disk.
+        # Use case: test deserialize / quant fixes without paying for a full
+        # training rerun (~$4). Pre-quant EMA val is also skipped — we don't
+        # have base_model loaded.
+        log(f"eval_only=1: skipping train_model, loading existing artifacts from {h.quantized_model_path}")
+        if not os.path.exists(h.quantized_model_path):
+            raise FileNotFoundError(
+                f"EVAL_ONLY=1 requires existing quantized blob at {h.quantized_model_path}. "
+                f"Run a full training first (without EVAL_ONLY) to produce it."
+            )
+    else:
+        base_model, compiled_model, compiled_forward_logits = train_model(
+            h, device, val_data
+        )
+        torch._dynamo.reset()
+        timed_eval(
+            "diagnostic pre-quantization post-ema",
+            eval_val,
+            h,
+            device,
+            val_data,
+            compiled_model,
+            compiled_forward_logits,
+        )
+        if h.training_only_screen:
+            log("training_only_screen:stopping_after_prequant_eval")
+            return
+        serialize(h, base_model, Path(__file__).read_text(encoding="utf-8"))
+        if h.distributed:
+            dist.barrier()
     eval_model = deserialize(h, device)
     if h.num_loops > 0:
         eval_model.looping_active = True
