@@ -9,6 +9,20 @@
 - "On the Residual Scaling of Looped Transformers" (OpenReview 2026, id: bj8l2FYjSd)
 - NL ablation series: specs 041H, 041K, 041N, 041L
 
+## Prior art scan — openai/parameter-golf PRs (checked 2026-04-26)
+
+| Lever | PRs found | Has result? |
+|---|---|---|
+| A — iteration embeddings | #1552 (additive pass embeds), #1554 (iteration_embed param), #1640 (FiLM γ/β per step) | **None** — all pending compute |
+| B — MLP-only loop | None found | N/A — novel |
+| C — residual 1/L init | None explicit; #1779 uses frozen learned alpha/beta (different) | Partial |
+
+**Key finding for Lever A:** Three independent teams (#1552, #1554, #1640) have proposed iteration-level conditioning on this exact competition stack. All are OPEN with no training result. We would be the first to produce a number. The #1640 variant uses FiLM (scale + shift per step) which is strictly more expressive than additive embeddings alone — worth implementing both as arms.
+
+**Key finding for Lever B:** No PR in the entire repo attempts MLP-only loop passes. Confirmed novel.
+
+**Key finding for Lever C:** Our current baseline (#1779) already has `frozen_recurrent_alpha` — learned per-layer blend scalars trained to convergence then frozen. This partially addresses residual scaling (the alpha gate effectively learns a per-layer scale). Pure 1/L init on `attn_scale`/`mlp_scale` is still different and untested, but the marginal gain may be smaller than if we had no alpha at all. Lower priority vs A and B.
+
 ## Overview
 
 Three improvements to the looped layers motivated by the 2025 recurrent-transformer literature. All three target the same architectural region (layers 4–5, Loop45) and are independent — any subset can be combined.
