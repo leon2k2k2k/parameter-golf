@@ -2,9 +2,9 @@
 
 **Slug:** `046L-deploy-time-quant-repair`
 **Created:** 2026-04-27
-**Status:** DRAFT — needs ~50-100 lines code (mostly wiring existing 046E/F)
+**Status:** READY (code landed in commit `fcb816f`)
 **Branch:** `exp/046-quant-repair`
-**Commit:** TBD (after code lands)
+**Commit:** `fcb816f`
 **Parent:** `research/ideas/quant-repair-fundamentally-new.md` (Idea A — highest EV)
 
 ## The fundamental shift
@@ -184,10 +184,126 @@ If 046L-baseline gives ~null:
 | 046L-baseline ~null | Try a richer param set (e.g., a tiny LoRA-style adapter); else close direction |
 | 046L hurts | Bug or fundamental incompatibility; investigate |
 
-## Pre-requisite checklist
+## Pre-requisite checklist (all complete)
 
-- [ ] Verify rules-legality of deploy-time param updates (beyond TTT's LoRA)
-- [ ] Read challenge README for any restrictions
-- [ ] Confirm AR-self-gen calib qualifies as no-val-leak
-- [ ] Plan code: refactor `fit_passthrough_params_to_match_base` to use CE-on-AR objective
-- [ ] Verify deserialize leaves passthrough params trainable (currently they're loaded as fp16 buffers; need to mark as Parameter)
+- [x] **Verified rules-legality** — challenge README §"What are the restrictions on evaluation?" says: "you're free to evaluate however" + "we encourage competitors to push the bounds of evaluation methods"
+- [x] **AR self-gen confirmed no-val-leak** — generates from BOS, no external data needed
+- [x] **Code written and pushed** — commit `fcb816f`:
+  - `_generate_ar_batch_for_repair()`: AR sampling with eager forward (no KV cache)
+  - `fit_passthrough_on_ar_gen()`: full pipeline (gen → fit → return)
+  - Wired in `train_and_eval()` after `deserialize()`, before compile
+- [x] **Verified passthrough params are nn.Parameter** — `named_parameters()` picks them up correctly
+
+## Launch form (Phase 1 — single 64K-token arm)
+
+Reference checkpoint: `/workspace/runs/045-loop-layer-improvements/armD/final_model.pt`
+
+```bash
+# Standard armD env vars (load checkpoint architecture matches)
+export DATA_DIR=/workspace/parameter-golf/data
+export DATASETS_DIR='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved'
+export TOKENIZER_PATH='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model'
+export TRAIN_FILES='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved/fineweb_train_*.bin'
+export VAL_FILES='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved/fineweb_val_*.bin'
+export VAL_BYTES_FILES='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved/fineweb_val_bytes_*.bin'
+export VOCAB_SIZE=8192 NUM_LAYERS=11 XSA_LAST_N=11 MODEL_DIM=512 NUM_KV_HEADS=4 NUM_HEADS=8
+export MLP_MULT=4 TIE_EMBEDDINGS=1 LOGIT_SOFTCAP=30 ROPE_BASE=10000 ROPE_DIMS=16
+export ROPE_TRAIN_SEQ_LEN=2048 ROPE_YARN=0 LN_SCALE=1 QK_GAIN_INIT=5.0
+export NUM_LOOPS=2 LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.35
+export PARALLEL_START_LAYER=8 PARALLEL_FINAL_LANE=mean
+# armD's spec 045 levers (must match training-time)
+export LOOP_ITER_EMBEDS=0 MLP_ONLY_FROM_PASS=0 LOOP_SCALE_INIT=recip
+export MIN_LR=0.1 EMBED_LR=0.6 TIED_EMBED_LR=0.03 TIED_EMBED_INIT_STD=0.005
+export MATRIX_LR=0.026 SCALAR_LR=0.02 MUON_MOMENTUM=0.97 MUON_BACKEND_STEPS=5
+export MUON_MOMENTUM_WARMUP_START=0.92 MUON_MOMENTUM_WARMUP_STEPS=1500 MUON_ROW_NORMALIZE=1
+export BETA1=0.9 BETA2=0.95 ADAM_EPS=1e-8 GRAD_CLIP_NORM=0.3 ADAM_WD=0.02 MUON_WD=0.095 EMBED_WD=0.085
+export EMA_DECAY=0.9965 TRAIN_BATCH_TOKENS=786432 TRAIN_SEQ_LEN=2048 TRAIN_LOG_EVERY=100
+export ITERATIONS=20000 WARMDOWN_FRAC=0.75 WARMUP_STEPS=20
+export VAL_BATCH_TOKENS=524288 EVAL_SEQ_LEN=2048 EVAL_STRIDE=64 VAL_LOSS_EVERY=1000
+export CASEOPS_ENABLED=1 COMPRESSOR=brotli
+# baseline quant config (don't change for the test)
+export MATRIX_BITS=6 MATRIX_CLIP_SIGMAS=12.85 ATTN_CLIP_SIGMAS=13.0 MLP_CLIP_SIGMAS=12.0
+export EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 GPTQ_CALIBRATION_BATCHES=16 GPTQ_RESERVE_SECONDS=4
+export SKIP_GATES_ENABLED=1 SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_INIT_STD=0.0 SPARSE_ATTN_GATE_SCALE=1.0
+export GATED_ATTN_ENABLED=0 GATED_ATTN_INIT_STD=0.005 GATED_ATTN_QUANT_GATE=1
+export ATTN_OUT_GATE_ENABLED=0 ATTN_OUT_GATE_SRC=proj GATE_WINDOW=12
+export RECUR_ALPHA_ENABLED=1
+export RECUR_DIAG_P2P_COS=0 SMEAR_GATE_ENABLED=1
+export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64
+export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
+export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5
+export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=0
+
+# resume from armD checkpoint
+export RESUME_FROM_CKPT=/workspace/runs/045-loop-layer-improvements/armD/final_model.pt
+
+# *** the new lever ***
+export DEPLOY_TIME_REPAIR_ENABLED=1
+export DEPLOY_TIME_REPAIR_BATCHES=16        # 16 × 8 × 512 = 65,536 AR tokens
+export DEPLOY_TIME_REPAIR_ITERS=5
+export DEPLOY_TIME_REPAIR_LR=1e-3
+export DEPLOY_TIME_REPAIR_AR_SEQ_LEN=512
+export DEPLOY_TIME_REPAIR_AR_TEMP=1.0
+
+export RUN_ID="046L-arself-64k-iters5-lr1e3"
+
+pip install brotli --break-system-packages -q
+
+mkdir -p /workspace/runs/046L-arself-64k-iters5-lr1e3
+
+torchrun --standalone --nproc_per_node=4 \
+  /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py \
+  >> /workspace/runs/046L-arself-64k-iters5-lr1e3/train.log 2>&1
+```
+
+## What to watch in the log
+
+- `postquant_fit:ar_gen progress=N/16 tokens_so_far=...` — AR generation progress
+- `postquant_fit:ar_gen done 65536 tokens in Xs` — verify total tokens generated
+- `postquant_fit: fitting N params (M elements) over 5 iters` — verify ~32K elements
+- `postquant_fit:iter=N/5 avg_ce=X.XXXX` — loss trace; expect monotonically decreasing
+- `diagnostic quantized val_loss:Y val_bpb:Z` — the headline number
+- Total wallclock: expect ~10-12 min
+
+## Acceptance
+
+Reference = 046 verification quantized = **1.07467**.
+
+- **Strong win**: quantized < 1.0735 (-0.0012 BPB) — paradigm unlock
+- **Win**: quantized < 1.0739 (-0.0008) — meaningful real improvement
+- **Marginal**: 1.0739–1.0746 — directionally positive but tiny
+- **Null**: 1.0746–1.0750 — passthrough capacity insufficient (matches 046E lesson)
+- **Hurts**: > 1.0750 — AR-gen distribution mismatch with real val
+- **Diverges**: NaN or `avg_ce` increasing — bug in fit (kill arm, debug)
+
+## Cost
+
+Single arm: ~$2-3 (10-12 min on 4×H100 NE-1).
+
+## Phase 2 (only if Phase 1 wins)
+
+If Phase 1 shows ≥-0.0008 BPB win, follow up with parameter sweep:
+
+| Arm | Iters | LR | Batches (× 4096 tokens each) |
+|---|---|---|---|
+| 046L-iters3-lr1e3 | 3 | 1e-3 | 16 |
+| 046L-iters10-lr1e3 | 10 | 1e-3 | 16 |
+| 046L-iters5-lr3e4 | 5 | 3e-4 | 16 |
+| 046L-iters5-lr3e3 | 5 | 3e-3 | 16 |
+| 046L-batches8 | 5 | 1e-3 | 8 (32K tokens) |
+| 046L-batches32 | 5 | 1e-3 | 32 (128K tokens) |
+
+Phase 2 cost: ~$15-20 across 6 arms.
+
+## Phase 3 (if Phase 2 finds meaningful winner)
+
+Productionize: re-serialize artifact with fitted passthrough values baked in, so
+the win is permanent and doesn't need to re-run at deploy time on every eval.
+Spec separately as 046M after Phase 1+2 results.
+
+## Post-arm checklist
+
+- [ ] Pre-quant val_bpb unchanged at 1.06546 (sanity — fit shouldn't affect pre-quant)
+- [ ] Quantized val_bpb logged
+- [ ] Total wallclock ≤ 15 min (else AR gen too slow; use smaller batches or KV cache)
+- [ ] Submission size still ≤ 16,000,000 bytes (this should be unchanged; fit doesn't add bytes)
