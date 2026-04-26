@@ -1,4 +1,4 @@
-import base64, collections, copy, fcntl, glob, hashlib, io, lzma, math, os
+import base64, collections, copy, datetime, fcntl, glob, hashlib, io, lzma, math, os
 from pathlib import Path
 import random, re, subprocess, sys, time, uuid, numpy as np, sentencepiece as spm, torch, torch.distributed as dist, torch.nn.functional as F
 from torch import Tensor, nn
@@ -4440,7 +4440,7 @@ def main():
     device = torch.device("cuda", local_rank)
     torch.cuda.set_device(device)
     if distributed:
-        dist.init_process_group(backend="nccl", device_id=device)
+        dist.init_process_group(backend="nccl", device_id=device, timeout=datetime.timedelta(hours=2))
         dist.barrier()
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
