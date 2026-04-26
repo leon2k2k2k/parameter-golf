@@ -3067,6 +3067,18 @@ def deserialize(h, device):
     hidden_dim = int(h.mlp_mult * h.model_dim)
     deq_state = _rebank_state_dict(deq_flat, h.num_layers, h.model_dim, kv_dim, hidden_dim)
     eval_model.load_state_dict(deq_state, strict=True)
+    # Slope warmdown sync: if a slope switch was configured, the trained
+    # (and quantized) weights were optimized for slope=h.slope_warmdown after
+    # the switch. The fresh GPT(h) here was initialized with negative_slope=
+    # h.negative_slope (the pre-switch value), and load_state_dict only
+    # restores tensors, not Python attributes. Without this sync, the eval
+    # forward runs the wrong slope and produces garbage activations,
+    # destroying the post-quant val_bpb (042A bug: 1.07 -> 2.05).
+    if h.slope_warmdown >= 0.0 and h.slope_warmdown != h.negative_slope:
+        for module in eval_model.modules():
+            if isinstance(module, MLP):
+                module.negative_slope = h.slope_warmdown
+        log(f"deserialize: slope synced to warmdown value {h.slope_warmdown:.4f}")
     # SpinQuant V1: banks now hold rotated weights (W @ R). Install the matching
     # R buffers and flip the class-level flag so the forward rotation hooks fire.
     # Math: F.linear(x @ R, W @ R) == F.linear(x, W) exactly (to fp precision).
