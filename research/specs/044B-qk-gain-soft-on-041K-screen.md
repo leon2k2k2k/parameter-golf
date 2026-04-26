@@ -4,7 +4,7 @@
 **Created:** 2026-04-27
 **Status:** READY (parallel-launchable with 044A)
 **Branch:** `exp/042-slope-anneal-screen` (no code change needed)
-**Commit:** `3d4776b`
+**Commit:** `a187ce4`
 **Links to:** `research/ideas/per-layer-qk-gain.md`,
               041K result (4-5, NL=3, frac=0.35 → EMA 1.06563 — best single-lever to date)
 

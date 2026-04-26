@@ -4,7 +4,7 @@
 **Created:** 2026-04-27
 **Status:** READY (parallel-launchable with 044B)
 **Branch:** `exp/042-slope-anneal-screen` (no code change needed)
-**Commit:** `3d4776b`
+**Commit:** `a187ce4`
 **Links to:** `research/ideas/per-layer-qk-gain.md` (PR #1648 source)
 
 ## Hypothesis
