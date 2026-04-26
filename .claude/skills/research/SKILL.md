@@ -30,3 +30,34 @@ You are in **research mode** for the Parameter Golf record-track push.
 - Numbering is linear: `000`, `001`, `002`, …. Assigned at spec-freeze time.
 - Multi-seed runs are one spec, not many.
 - Accept criteria and stop-early criteria must be in every spec.
+
+## Spec freeze checklist — a spec is NOT ready until ALL pass
+
+Whenever you write or update a spec, the spec is not "ready" / "frozen" /
+"handed off to execution" until **every** item below is true. Run through this
+before claiming the spec is done, before pausing the conversation, and before
+the user has to ask "is it pushed?".
+
+1. **Spec file committed.** `git status` shows the spec file is not in the
+   working tree as modified or untracked. If it's modified, `git add` + commit
+   it now with a descriptive message.
+2. **Code commit pushed.** The commit hash the spec pins must exist on
+   `fork`. Run `git ls-remote fork <branch>` and compare to the local HEAD or
+   the spec's pinned hash. If stale, `git push fork <branch>` immediately —
+   no permission prompt.
+3. **Spec change pushed.** If the spec lives on a branch that's tracked on
+   fork (typical for `exp/<slug>` branches that hold both code and the spec),
+   the spec commit must also be pushed.
+4. **No silent code changes.** If you edited training code, the diff must be
+   in the pinned commit. If you have uncommitted code edits sitting in the
+   worktree, the pod will check out the pinned commit and run **without**
+   them — silently producing the wrong run.
+5. **Verify with one command:** `git status` (clean) AND `git ls-remote fork <branch>` (HEAD matches local).
+
+Reason: An execution session reads the spec and immediately preflights a pod
+(~$0.20–0.40/min). Any unfrozen state (uncommitted spec, unpushed code) either
+blocks the pod or, worse, runs the wrong code. Pushing is publishing what was
+already authored intentionally — never ask permission.
+
+After hand-off, the spec is immutable until the run completes. Edits during a
+run silently change the contract under execution's feet.
