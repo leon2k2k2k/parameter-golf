@@ -263,6 +263,12 @@ class Hyperparameters:
     # Use case: test deserialize/quant fixes without paying for a full training
     # rerun (~$4). Pre-quant EMA val is also skipped (needs base_model).
     eval_only = bool(int(os.environ.get("EVAL_ONLY", "0")))
+    # RESUME_FROM_CKPT=<path> skips train_model(), loads an existing
+    # final_model.pt (EMA-applied state_dict) into base_model, then proceeds
+    # normally to pre-quant eval -> serialize (= GPTQ with current env vars)
+    # -> deserialize -> quantized eval. Lets us iterate on quant settings at
+    # ~$1/variant instead of ~$5-10 full training. Empty string = disabled.
+    resume_from_ckpt = os.environ.get("RESUME_FROM_CKPT", "")
     skip_gates_enabled = bool(int(os.environ.get("SKIP_GATES_ENABLED", "1")))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 3e1))
@@ -4306,6 +4312,41 @@ def train_and_eval(h, device):
                 f"EVAL_ONLY=1 requires existing quantized blob at {h.quantized_model_path}. "
                 f"Run a full training first (without EVAL_ONLY) to produce it."
             )
+    elif h.resume_from_ckpt:
+        # RESUME_FROM_CKPT=<path>: skip train_model, load EMA-applied
+        # state_dict from path, then proceed normally through pre-quant eval
+        # -> serialize (= GPTQ with current env vars) -> deserialize ->
+        # quantized eval. Used for quant-repair sweeps at ~$1/variant.
+        log(f"resume_from_ckpt={h.resume_from_ckpt}: skipping train_model, loading checkpoint")
+        if not os.path.exists(h.resume_from_ckpt):
+            raise FileNotFoundError(
+                f"RESUME_FROM_CKPT={h.resume_from_ckpt} not found."
+            )
+        torch._dynamo.config.cache_size_limit = 32
+        base_model = GPT(h).to(device).bfloat16()
+        restore_fp32_params(base_model)
+        state = torch.load(h.resume_from_ckpt, map_location=device, weights_only=True)
+        base_model.load_state_dict(state, strict=True)
+        compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+        compiled_forward_logits = torch.compile(
+            base_model.forward_logits, dynamic=False, fullgraph=True
+        )
+        torch._dynamo.reset()
+        timed_eval(
+            "diagnostic pre-quantization post-ema (from ckpt)",
+            eval_val,
+            h,
+            device,
+            val_data,
+            compiled_model,
+            compiled_forward_logits,
+        )
+        if h.training_only_screen:
+            log("training_only_screen:stopping_after_prequant_eval")
+            return
+        serialize(h, base_model, Path(__file__).read_text(encoding="utf-8"))
+        if h.distributed:
+            dist.barrier()
     else:
         base_model, compiled_model, compiled_forward_logits = train_model(
             h, device, val_data
