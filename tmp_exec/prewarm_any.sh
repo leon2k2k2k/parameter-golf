@@ -46,8 +46,10 @@ mkdir -p "$LOGDIR"
 # --- Deps ---
 pip install brotli python-minifier sentencepiece --break-system-packages -q
 
-# --- Worktree: check out the target commit ---
-WORKTREE="/workspace/pg-prewarm"
+# --- Worktree: commit-specific path so concurrent pods don't clobber each other ---
+# /workspace/pg-prewarm is NOT used — shared path would let a second pod's
+# `git checkout <other-sha>` silently switch the directory mid-run.
+WORKTREE="/workspace/pg-prewarm-${SHA}"
 if [ ! -d "$WORKTREE" ]; then
   git -C /workspace/parameter-golf worktree add --detach "$WORKTREE" "$SHA"
 fi

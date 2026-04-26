@@ -31,10 +31,18 @@ $SSH 'pip install brotli sentencepiece --break-system-packages -q' >/dev/null 2>
 
 # Launch a micro-run with TRAIN_LOG_EVERY=10 ITERATIONS=80 MAX_WALLCLOCK_SECONDS=240.
 # Use the same train_gpt.py shape as the real run so the warmup throughput is comparable.
-cat > /tmp/_speed_launch.sh <<'EOS'
+cat > /tmp/_speed_launch.sh <<EOS
 #!/bin/bash
 set -e
-cd /workspace/parameter-golf
+# Use a commit-specific worktree so concurrent pods don't clobber each other.
+# /workspace/parameter-golf HEAD can be on any commit — never use it directly.
+WORKTREE="/workspace/pg-speed-${SHA:-head}"
+if [ -n "${SHA}" ] && [ ! -d "\$WORKTREE" ]; then
+  git -C /workspace/parameter-golf worktree add --detach "\$WORKTREE" "${SHA}"
+elif [ -z "${SHA}" ]; then
+  WORKTREE=/workspace/parameter-golf
+fi
+cd "\$WORKTREE"
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
 # TRITON_AUTOTUNE_NUM_RUNS=1 intentionally NOT set: it costs ~6% throughput at 4xH100
 # (picks first-candidate kernels). Without cache, Stage 1 compile is slower but tok/s
@@ -63,7 +71,7 @@ export RECUR_ALPHA_ENABLED=1 SMEAR_GATE_ENABLED=1
 export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5
 export SEED=42 RUN_ID="podspeed"
-torchrun --standalone --nproc_per_node=4 records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py >/tmp/podspeed.log 2>&1
+torchrun --standalone --nproc_per_node=4 "\$WORKTREE/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py" >/tmp/podspeed.log 2>&1
 EOS
 scp -o StrictHostKeyChecking=no -i "$HOME/.runpod/ssh/RunPod-Key-Go" -P "$PORT" /tmp/_speed_launch.sh "root@${HOST}:/tmp/_speed_launch.sh" >/dev/null
 $SSH 'mkdir -p /workspace/runs/_podspeed && setsid bash /tmp/_speed_launch.sh </dev/null >/tmp/podspeed.out 2>&1 & disown'
