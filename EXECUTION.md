@@ -75,7 +75,11 @@ On receiving spec number `NNN`:
 - [ ] Hotstart checkpoint exists and is readable (if spec specifies one).
 - [ ] `git rev-parse HEAD` on the pod matches the commit hash in the spec. Use `git stash push -u -m "pod-local"` to clear any uncommitted pod-local edits that might block `checkout`.
 - [ ] Enough free disk on `/workspace/` for expected checkpoints (9 × ~300 MB = ~2.7 GB for the standard phase-boundary set).
-- [ ] `TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache` set on the launch env, and `mkdir -p /workspace/.torch_inductor_cache` on the volume beforehand. Persists the torch.compile cache across pod cycles; reruns of the same commit skip ~80% of the ~5min compile (saves 3-4min wallclock). Graph-hash-keyed so it's safe — different commits just don't reuse each other's entries.
+- [ ] **Inductor cache restored from volume.** Do NOT point `TORCHINDUCTOR_CACHE_DIR` at `/workspace/` or `/runpod/` — NFS FUSE causes Triton compile workers to race and die with "Stale file handle". The cache must live in `/tmp/`.
+  - Check if a stash exists for this spec's commit: `bash tmp_exec/restore_cache_local.sh <commit-sha>` (runs on pod — no SSH needed; rsync from `/workspace/.inductor_cache_<sha>` → `/tmp/inductor_cache/`).
+  - If the restore exits 0: set `export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache` in the launch env. Do **NOT** set `TRITON_AUTOTUNE_NUM_RUNS=1` — that flag costs ~6% throughput at 4×H100 (~250 training steps in a 20-min run).
+  - If restore exits 1 (cache missing): **STOP. Do not launch.** Report to user — research must run `bash tmp_exec/prewarm_any.sh <sha> <stage1-env> [...]` on a fresh pod (~25 min, ~$6-8), then `cache_stash.sh`. Launching cold risks mid-run recompile and NCCL deadlock (see spec 045 incident).
+  - Verify tok/s ≥ 4,300,000 at step 100 on the first arm before committing to a full 20-min run.
 
 If any check fails and it's an **environment** issue (missing dep, path typo), fix it and re-check. If it's a **logic** issue (wrong commit, bad config), stop and hand back to research.
 
