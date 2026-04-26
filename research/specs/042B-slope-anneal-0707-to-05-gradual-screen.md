@@ -111,11 +111,29 @@ torchrun --standalone --nproc_per_node=2 \
 
 ## What to harvest
 
-1. **Pre-warm time** — timestamp(`warmup_step: 1/20`) − timestamp(`Hyperparameters:`)
-2. **Recompile count** — `grep -c "Recompiling\|cache miss" train.log` → should be 0
-   for any line matching the looping_active or slope-switch trigger steps
-3. **Throughput** — average tok/s after warmup. Compare to 042A smoke's
-   ~2.19M tok/s. Drop > 5% suggests `TRITON_AUTOTUNE_NUM_RUNS=1` is too aggressive.
+1. **Pre-warm time** — timestamp(`warmup_step: 1/20`) − timestamp(`Hyperparameters:`).
+2. **Slope pre-warm fired** — confirm log line:
+   `slope_anneal: precompiled warmdown kernel slope=0.5000`
+   appears at startup. Without this, the warmdown kernel was never compiled
+   and the slope switch will hit a cold compile.
+3. **Slope switch actually fired during training** — confirm log line:
+   `slope_anneal: 0.7071→0.5000 step:N frac:0.XXX`
+   appears at frac ≈ 0.28 (elapsed ~50s). If missing, the trigger condition
+   in the training loop didn't fire — investigate before doing anything else.
+4. **Loop activated** — confirm log line:
+   `layer_loop:enabled step:N frac:0.XXX depth:3 encoder:[...] decoder:[...]`
+   appears at frac ≈ 0.30 (elapsed ~54s). Same diagnostic value as #3.
+5. **No mid-training pause at the switch step** — step rate stays steady before
+   and after both events. From `train_loss` log lines (every 20 steps), compute
+   step delta; should be roughly constant around 1-2s/step. A 30s+ gap at the
+   slope switch or loop activation = the pre-warm didn't cover that variant
+   and we still have a recompile bug.
+6. **Recompile count from TORCH_LOGS** — `grep -cE "Recompiling|cache_size_limit|guard failed" train.log`
+   → should be 0 mid-training (any pre-warm-time recompiles are fine).
+7. **Throughput** — average tok/s after the loop activation. Compare to 042A
+   smoke's ~2.19M (post-loop) and 042A original's ~1.7M (post-loop on 4×H100,
+   so 2×H100 should be ~50-60% of that). Drop > 5% from the smoke baseline
+   suggests `TRITON_AUTOTUNE_NUM_RUNS=1` is too aggressive.
 
 ## Acceptance
 
