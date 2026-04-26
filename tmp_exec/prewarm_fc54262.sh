@@ -25,13 +25,13 @@ export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
 mkdir -p /tmp/inductor_cache
 pip install brotli python-minifier sentencepiece --break-system-packages -q
 
-if [ ! -d /workspace/pg-prewarm ]; then
-  git -C /workspace/parameter-golf worktree add --detach /workspace/pg-prewarm fc54262
+if [ ! -d /workspace/pg-prewarm-fc54262 ]; then
+  git -C /workspace/parameter-golf worktree add --detach /workspace/pg-prewarm-fc54262 fc54262
 fi
-cd /workspace/pg-prewarm
+cd /workspace/pg-prewarm-fc54262
 git checkout fc54262
 
-TRAIN=/workspace/pg-prewarm/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py
+TRAIN=/workspace/pg-prewarm-fc54262/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py
 LOGDIR=/workspace/runs/045-loop-layer-improvements/prewarm-fc54262
 mkdir -p "$LOGDIR"
 

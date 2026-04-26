@@ -36,11 +36,15 @@ cat > /tmp/_speed_launch.sh <<EOS
 set -e
 # Use a commit-specific worktree so concurrent pods don't clobber each other.
 # /workspace/parameter-golf HEAD can be on any commit — never use it directly.
-WORKTREE="/workspace/pg-speed-${SHA:-head}"
-if [ -n "${SHA}" ] && [ ! -d "\$WORKTREE" ]; then
+if [ -z "${SHA}" ]; then
+  echo "[speed] ERROR: commit-sha arg required. Usage: pod_speed_test.sh <host> <port> <sha>"
+  echo "[speed] Using /workspace/parameter-golf directly is unsafe with multiple pods sharing"
+  echo "[speed] the same volume — another pod's git checkout can silently switch the directory."
+  exit 1
+fi
+WORKTREE="/workspace/pg-speed-${SHA}"
+if [ ! -d "\$WORKTREE" ]; then
   git -C /workspace/parameter-golf worktree add --detach "\$WORKTREE" "${SHA}"
-elif [ -z "${SHA}" ]; then
-  WORKTREE=/workspace/parameter-golf
 fi
 cd "\$WORKTREE"
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
