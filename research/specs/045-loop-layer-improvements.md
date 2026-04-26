@@ -98,9 +98,10 @@ All three levers disabled by default → byte-identical to baseline on step 0.
 
 ## Hardware ladder
 
-**Mini (required — code change):** 2×H100, 4h 20min wallclock, 1 seed per arm.
+**Mini (required — code change):** 4×H100, 20 min wallclock, 1 seed per arm.
 - Arms: A, B, A+C (3 arms minimum; add B+C or C-solo if time allows).
 - Cost estimate: ~$7/arm × 3 arms ≈ **$21**. Run arms in parallel on 3 separate pods.
+- 4×H100 matches the step count of our 039b baseline (~5000 steps) — better signal than 2×H100.
 
 **Official:** 8×H100 full run, 3 seeds. Only for arms that clear the mini accept threshold.
 
@@ -129,7 +130,7 @@ Pre-quant EMA checkpoint + quantized blob (standard). No optim state needed on m
 
 | Rung | Arms | Cost |
 |---|---|---|
-| Mini 2×H100 | 3 parallel arms (~21 min each) | ~$21 |
+| Mini 4×H100 | 3 parallel arms (~20 min each) | ~$21 |
 | Official 8×H100 | 1 arm × 3 seeds | ~$18 |
 | Total (if one arm wins) | | ~$39 |
 
