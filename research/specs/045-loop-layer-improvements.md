@@ -56,17 +56,19 @@ LOOP_ITER_EMBEDS=1
 # Arm B: MLP-only loop (passes 2+)
 MLP_ONLY_FROM_PASS=1
 
-# Arm C: residual 1/L init
+# Arm C: residual 1/L init (solo — isolates C contribution)
 LOOP_SCALE_INIT=recip
 
-# Arm A+C: natural stack
+# Arm AC: natural stack (A+C combined)
 LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
 
 # Arm B+C: MLP-only with stable init
 MLP_ONLY_FROM_PASS=1  LOOP_SCALE_INIT=recip
 ```
 
-Budget: run A and B first (highest signal). C is cheap to stack; run A+C or B+C if budget allows.
+**Arm D added post-screen** (2026-04-26): C alone, based on AC result showing Lever C does the work.
+Prediction: D ≈ 1.0641 (additivity estimate: AC − A = baseline − 0.00042 − (+0.00062) → C ≈ −0.00104).
+Could land right at or below win threshold.
 
 ## Code changes
 
