@@ -9,7 +9,7 @@
 #   bash tmp_exec/cache_stash.sh <host> <port> fc54262   (from local machine)
 set -euo pipefail
 
-SHA="fc54262"
+SHA="7c6ac51"
 ARM="armG"
 RUNDIR="/workspace/runs/045-loop-layer-improvements/armG"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py"
