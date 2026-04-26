@@ -4,19 +4,32 @@
 **Created:** 2026-04-26
 **Status:** READY (recompile bug fixed)
 **Branch:** `exp/042-slope-anneal-screen`
-**Commit:** `4b29c64`
+**Commit:** `aff2de4`
 **Links to:** `research/ideas/slope-annealing-sqrt-to-half.md`
 **Predecessor smoke:** `runs/042A-recompile-smoke/notes.md`
 
 ## Recompile fix in this commit
 
 The original 042A run (commit `2593982`) lost ~7-8 minutes mid-training to a
-Dynamo recompile when looping_active flipped. Smoke run identified the cause as
-**Dynamo LRU cache eviction**: pre-warm generated 17 unique `_forward_hidden`
-graph variants but `cache_size_limit` defaulted to 8, so by the time training
-hit the loop activation, the looping_active=True graphs had been evicted →
-full Dynamo retrace. Commit `4b29c64` raises the limit to 32, covering the full
-pre-warm vocabulary with headroom.
+Dynamo recompile when looping_active flipped. The smoke run on `dd63a75`
+(`runs/042A-recompile-smoke/notes.md`) identified the cause:
+
+**Dynamo LRU cache eviction.** Pre-warm correctly generated all required graph
+variants (cu_seqlens × looping_active × slope), including the slope=0.5 path.
+But `cache_size_limit` defaulted to 8, and the pre-warm produced 17+ unique
+graphs. Earlier graphs (including the slope=0.5 ones) were LRU-evicted before
+training reached the slope-switch + loop-activation transition, forcing full
+Dynamo retraces. **Fix in `4b29c64`:** `cache_size_limit = 32`, which holds
+all pre-warm variants simultaneously.
+
+A small additional fix in `aff2de4` extends the pre-warm to also cover
+`compiled_forward_logits` (a separately-compiled function used by `eval_val`)
+and the `looping_active=True` slope variant. Without this, the first val_loss
+eval and the first val after the slope switch would each cold-compile
+forward_logits (~30s each, one-time). Not critical, but cheap defense-in-depth.
+
+Combined: all four (forward × forward_logits) × (slope=0.7071 × slope=0.5)
+graph variants are pre-cached before training begins.
 
 ## Hypothesis
 
