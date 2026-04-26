@@ -133,7 +133,15 @@ LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip  LOOP_LR_SCALE=recip  LOOP_PER_PASS_RE
 ```
 Natural stack. Tests whether gradient normalization + blend calibration compound.
 
-All G/H/GH arms use commit `fc54262`, hardware (4×H100, 20 min), seed=42.
+All A2/AC-fix/G/H/GH arms use commit `fc54262`, hardware (4×H100, 20 min), seed=42.
+
+**⚠️ COMPILE NOTE — required for all fc54262 arms:**
+The code changes in fc54262 changed the graph hash, invalidating the inductor cache from 1c6cd7c runs. Every fc54262 arm MUST set:
+```
+TORCHINDUCTOR_COMPILE_THREADS=8
+TRITON_AUTOTUNE_NUM_RUNS=1
+```
+These cut cold compile time from ~15 min to ~8 min (per `runs/042B-prewarm-speedup-smoke`), keeping the precompile bracket within the warmup phase so zero mid-training recompiles occur. Running multiple arms sequentially on the same pod means only the first arm pays the compile cost.
 
 ## Code changes
 
