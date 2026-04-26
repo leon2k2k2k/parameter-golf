@@ -4327,6 +4327,13 @@ def train_and_eval(h, device):
         restore_fp32_params(base_model)
         state = torch.load(h.resume_from_ckpt, map_location=device, weights_only=True)
         base_model.load_state_dict(state, strict=True)
+        # Mirror what deserialize() does for the eval model: enable looping
+        # at full depth, since the EMA endpoint was trained with looping ON
+        # past ENABLE_LOOPING_AT. Without this the pre-quant eval reports
+        # 1.3+ BPB (model arch != training arch).
+        if h.num_loops > 0:
+            base_model.looping_active = True
+            base_model.looping_depth = h.num_loops
         compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
         compiled_forward_logits = torch.compile(
             base_model.forward_logits, dynamic=False, fullgraph=True
