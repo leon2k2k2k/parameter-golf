@@ -36,5 +36,6 @@
 - [Always send plots to Discord](feedback_always_send_plots_discord.md) — every generated plot must be sent to Discord immediately after saving, without being asked
 - [Loop steps vs val_bpb](project_loop_steps_vs_valbpb.md) — ~2.2e-6 val_bpb/loop step; loop steps worth ~2× no-loop; delaying frac is always a losing trade at this scale
 - [VAL_LOSS_EVERY=1000 for 4H screens](feedback_val_loss_every.md) — always set in 4×H100 screen specs; mid-run raw val_bpb trajectory; ~7% step cost, acceptable
+- [NEVER allow recompile during training](feedback_no_recompile_ever.md) — always prewarm inductor cache (~100 steps, kill, relaunch) before real run on any new commit; recompile mid-run biases step count and val_bpb comparison
 - [GPT-root params must be added to optimizer explicitly](feedback_gpt_root_params_optimizer.md) — blocks.named_parameters() misses GPT-root nn.Parameters; add by hand in Optimizers.__init__ or they never train
 - [Spec 045 arm invalidation — Lever A never trained](project_spec045_arm_invalidation.md) — Arms A/AC/E/F had LOOP_ITER_EMBEDS=1 as no-op; only Lever C validated; fix in fc54262; rerun as A2/G/H/GH
