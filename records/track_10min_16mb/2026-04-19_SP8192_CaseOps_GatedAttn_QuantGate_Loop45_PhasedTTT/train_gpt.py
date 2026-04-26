@@ -250,6 +250,13 @@ class Hyperparameters:
     # Use case: 043 series — fire slope shock simultaneously with early loop
     # activation, without changing the LR warmdown duration.
     slope_warmdown_at = float(os.environ.get("SLOPE_WARMDOWN_AT", -1.0))
+    # DISABLE_LAYER0_ATTN=1 skips the attention computation in layer 0's
+    # forward pass (params still allocated but unused). Layer 0 attention
+    # has near-uniform entropy on fresh embeddings and is often a near-no-op.
+    # If skipping doesn't hurt val_bpb, the unused params can be reclaimed
+    # in a follow-up code change for size/quant headroom. Default 0 =
+    # standard behavior (layer 0 attn enabled).
+    disable_layer0_attn = bool(int(os.environ.get("DISABLE_LAYER0_ATTN", "0")))
     mlp_outer_activation = os.environ.get("MLP_OUTER_ACTIVATION", "leaky_relu_square")
     mlp_middle_activation = os.environ.get("MLP_MIDDLE_ACTIVATION", "leaky_relu_square")
     mlp_middle_negative_slope = float(
@@ -1248,13 +1255,20 @@ class Block(nn.Module):
     def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0):
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_out = self.attn(
-            self.attn_norm(x_in) * self.ln_scale_factor,
-            q_w, k_w, v_w, out_w,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
+        if getattr(self, "_skip_attn", False):
+            # Layer-0 attention disabled (DISABLE_LAYER0_ATTN=1). Skip the
+            # attention computation entirely — fresh embeddings have no useful
+            # context to attend to. attn_scale * attn_out is zeroed out by
+            # construction; resid+MLP path remains.
+            x_out = x_in
+        else:
+            attn_out = self.attn(
+                self.attn_norm(x_in) * self.ln_scale_factor,
+                q_w, k_w, v_w, out_w,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+            x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
         x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
             None, None, :
         ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
@@ -1308,6 +1322,8 @@ class GPT(nn.Module):
                 for i in range(h.num_layers)
             ]
         )
+        if h.disable_layer0_attn:
+            self.blocks[0]._skip_attn = True
         if h.rope_dims > 0:
             head_dim = h.model_dim // h.num_heads
             for block in self.blocks:
