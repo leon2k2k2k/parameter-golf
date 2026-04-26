@@ -2,7 +2,10 @@
 
 **Slug:** `041M-loop45-nl3-frac020-screen`
 **Created:** 2026-04-26 (queued for 2026-04-27, run AFTER 041L)
-**Status:** READY (run after 041L; only worth running if 041L is in noise zone)
+**Status:** **DEPRECATED** — do NOT run. 041L (NL=3 + frac=0.25) showed
+NEGATIVE interaction between NL=3 and early activation (1.06615 vs 041K's
+1.06563). Going more aggressive (frac=0.20) on the same anti-additive
+combination would just be worse. Killed 2026-04-26 evening.
 **Branch:** `exp/042-slope-anneal-screen` (no code change needed)
 **Commit:** `23abb5e`
 **Continues:** 041 series
