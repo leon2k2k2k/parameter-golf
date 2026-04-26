@@ -99,7 +99,13 @@ After reviewing Arm A and AC results, found that **`loop_iter_embeds` (Lever A) 
 
 Implication: all arms using `LOOP_ITER_EMBEDS=1` (A, AC, E, F) tested Lever C alone (or NL=3+C). The "AC synergy" was likely just C. Fix committed in `fc54262` — adds `loop_iter_embeds` (and `loop_resid_mixes`) to `scalar_params` in `Optimizers.__init__`.
 
-Arms G/H/GH below use `fc54262` and are the first to run with actual working iter embeds.
+Arms A2/G/H/GH below use `fc54262` and are the first to run with actual working iter embeds.
+
+**Arm A2 — Lever A fixed (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1
+```
+Re-run of Arm A on `fc54262` where `loop_iter_embeds` is actually in the optimizer. First real test of iteration embeddings alone. Compare to baseline (1.06514) and to original Arm A result (1.06576, which was just baseline noise).
 
 ---
 
