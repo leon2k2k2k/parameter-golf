@@ -107,6 +107,12 @@ LOOP_ITER_EMBEDS=1
 ```
 Re-run of Arm A on `fc54262` where `loop_iter_embeds` is actually in the optimizer. First real test of iteration embeddings alone. Compare to baseline (1.06514) and to original Arm A result (1.06576, which was just baseline noise).
 
+**Arm AC-fix — True AC baseline (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
+```
+Re-run of Arm AC on `fc54262`. Required comparison point for Arms G and H — without this we can't tell whether G/H gains come from the new levers or just from A finally working. Old AC result (1.06472) is invalid as a baseline for G/H.
+
 ---
 
 **Arm G — AC + gradient-side 1/L (added 2026-04-26):**
