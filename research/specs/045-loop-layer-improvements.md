@@ -77,16 +77,17 @@ Additivity estimate: C ≈ −0.00104 → may land at or below win threshold.
 ```
 NUM_LOOPS=3  LOOP_START=4  LOOP_END=5  LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
 ```
-041K showed NL=3 is the sweet spot. A+C used (not C alone) — train loss analysis shows A and C
-are synergistic: together ~2.5× stronger than either alone. 1/4 init at NL=3.
+Narrower window than baseline (layers 4–5 only, vs baseline's 3–5), but more passes (4 total).
+1/4 init. Tests whether tighter window + more depth + A+C beats the baseline Loop345.
 17 total layer-passes post-loop.
 
-**Arm F — Loop345 NL=2 + A+C (added 2026-04-26):**
+**Arm F — Loop345 NL=3 + A+C (added 2026-04-26):**
 ```
-NUM_LOOPS=2  LOOP_START=3  LOOP_END=5  LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
+NUM_LOOPS=3  LOOP_START=3  LOOP_END=5  LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
 ```
-Expand loop window to layer 3 (never looped before). Same compute as Arm E (17 layer-passes).
-1/L init = 1/3. A+C combined per same synergy rationale. Higher risk, novel.
+Same window as baseline (layers 3–5) but more passes (NL=3, 4 total vs baseline's 3).
+NOTE: baseline already uses LOOP_START=3 by default — Arm F is the natural NL=3 upgrade
+of what AC already demonstrated. 1/4 init. 19 total layer-passes post-loop (heavier than E).
 
 All D/E/F arms use the same branch/commit, hardware (4×H100, 20 min), and accept criteria.
 
