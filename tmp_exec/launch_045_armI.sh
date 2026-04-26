@@ -4,10 +4,8 @@
 # U-Net-style: coarse routing forward, correction flows back up same weights.
 # Compare to AC-fix rerun (pre-quant 1.06479) to isolate Lever I contribution.
 #
-# NOTE: SHA 7926027 is a new commit — cache for this SHA is COLD.
-# Run prewarm first on this pod:
-#   bash tmp_exec/prewarm_armI.sh
-# Then stash and restore before launching this script.
+# Self-contained: if cache for 7926027 not found, seeds from 7c6ac51 and
+# runs inline prewarm (~5-7 min) before the real training run.
 set -euo pipefail
 
 SHA="7926027"
@@ -18,17 +16,38 @@ TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_Quant
 # ── 1. Git setup (all git ops here — none after this block) ───────────────
 WORKTREE=$(bash /workspace/parameter-golf/tmp_exec/setup_worktree.sh "$SHA" "$ARM")
 
-# ── 2. Inductor cache restore (must exist — exit 1 if missing) ────────────
-SRC="/workspace/.inductor_cache_${SHA}"
-if [ ! -d "$SRC" ]; then
-  echo "[launch] ERROR: no stashed cache for ${SHA}."
-  echo "[launch] Run tmp_exec/prewarm_armI.sh first, then cache_stash.sh <host> <port> ${SHA}."
-  exit 1
-fi
-mkdir -p /tmp/inductor_cache
-rsync -a "${SRC}/" /tmp/inductor_cache/
+# ── 2. Inductor cache — inline prewarm if stash missing ───────────────────
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
-echo "[launch] cache restored: $(du -sh /tmp/inductor_cache | cut -f1)"
+mkdir -p /tmp/inductor_cache
+STASH="/workspace/.inductor_cache_${SHA}"
+
+if [ ! -d "$STASH" ]; then
+  echo "[launch] No stash for ${SHA} — running inline prewarm (~5-7 min)..."
+  # Seed from 7c6ac51: pre-loop graphs are identical, only reversed-pass graph is new
+  if [ -d /workspace/.inductor_cache_7c6ac51 ]; then
+    rsync -a /workspace/.inductor_cache_7c6ac51/ /tmp/inductor_cache/
+    echo "[launch] seeded from 7c6ac51: $(du -sh /tmp/inductor_cache | cut -f1)"
+  else
+    echo "[launch] WARNING: 7c6ac51 cache not found — cold compile (~15 min)"
+  fi
+  mkdir -p "$RUNDIR"
+  # Short prewarm: compiles the reversed-pass loop graph, then stops
+  PREWARM_LOG="${RUNDIR}/prewarm.log"
+  echo "[launch] compiling reversed-pass graph..."
+  MAX_WALLCLOCK_SECONDS=300 TRAINING_ONLY_SCREEN=1 RUN_ID="045-armI-prewarm" \
+  LOOP_SCALE_INIT=recip LOOP_REVERSE_LAST_PASS=1 \
+  torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
+    >> "$PREWARM_LOG" 2>&1
+  PREWARM_TOK=$(grep "^100/20000 train_loss" "$PREWARM_LOG" | tail -1 | grep -o 'tok/s: [0-9]*' | grep -o '[0-9]*')
+  echo "[launch] prewarm done. tok/s at step 100: ${PREWARM_TOK:-UNKNOWN}"
+  # Stash to volume so future pods can restore without recompiling
+  rsync -a /tmp/inductor_cache/ "$STASH/"
+  echo "[launch] stashed to ${STASH}: $(du -sh $STASH | cut -f1)"
+else
+  echo "[launch] restoring stash for ${SHA}..."
+  rsync -a "${STASH}/" /tmp/inductor_cache/
+  echo "[launch] cache restored: $(du -sh /tmp/inductor_cache | cut -f1)"
+fi
 
 # ── 3. Deps ───────────────────────────────────────────────────────────────
 pip install brotli python-minifier sentencepiece --break-system-packages -q
