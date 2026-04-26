@@ -111,7 +111,19 @@ torchrun --standalone --nproc_per_node=2 \
 
 ## What to harvest
 
-1. **Pre-warm time** — timestamp(`warmup_step: 1/20`) − timestamp(`Hyperparameters:`).
+1. **Total pre-warm time** — timestamp(`warmup_step: 1/20`) − timestamp(`Hyperparameters:`).
+   This is the headline number. Compare to:
+   - 042A smoke (`dd63a75`, no env tweaks, cache_size_limit=8): ~10-12 min
+   - 042A full estimate (`aff2de4`, no env tweaks): ~15 min
+   - This run target: < 6 min (strong win), 6-8 min (weak win), ≥ 10 min (no win)
+
+1a. **Compile-time bracket** — for finer attribution, also record
+    timestamp(`slope_anneal: precompiled warmdown kernel slope=0.5000`) −
+    timestamp(`warmup_cu_buckets:`). That's the actual Triton/Inductor compile
+    portion (everything between is graph compilation). Subtract from total
+    pre-warm to see how much is non-compile overhead (model init, state save,
+    etc.).
+
 2. **Slope pre-warm fired** — confirm log line:
    `slope_anneal: precompiled warmdown kernel slope=0.5000`
    appears at startup. Without this, the warmdown kernel was never compiled
