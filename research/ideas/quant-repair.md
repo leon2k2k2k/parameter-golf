@@ -1,185 +1,238 @@
-# Quant repair — landscape & ranked ideas
+# Quant repair — landscape, results, and final state
 
 **Created:** 2026-04-27
-**Sources:** technique-timeline (PR survey) + literature survey, both 2026-04-27
-**Status:** ideas pool, no specs frozen yet
+**Last updated:** 2026-04-27 (post-046 family results)
+**Sources:** technique-timeline (PR survey) + literature survey + 046 family runs (A-H)
+**Status:** **DIRECTION ESSENTIALLY CLOSED** — see results section
 
-## Context
+## TL;DR after 046 family
 
-- Baseline #1736 quant tax (post-quant − pre-quant EMA): **+0.009 BPB**
-- Stack: GPTQ int6 matrices / int7 emb, SDClip (k=12.85 mat, k=15 emb), LQER asym rank-4 top-3, EMA decay 0.9965, 16-batch calibration, **SpinQuant code wired but disabled**
-- Artifact-cap headroom: ~46 KB under 16 MB
-- Reference 5-seed σ on quant gap: ~0.0005 (anything <0.001 is noise)
+**Only one real win**: SDClip tightening (-0.00086 to -0.00216 BPB). **All over byte cap.**
+**Every other quant repair lever**: null or negative.
+**Byte-saving moves to make SDClip wins legal**: all hurt more than they help.
 
-## Key empirical fact (don't forget)
+**Practical conclusion**: stuck at the legal cap with 1.07467 quantized baseline. Quant-side direction exhausted on this stack.
 
-**Rotation methods are essentially null on this stack.** Four independent ablations agree:
-- #670 (abaybektursun): SpinQuant on 11L = −0.0002 BPB
-- #1224 (vermissa0ss): per-layer Hadamard = −0.00006 BPB
-- #1718 (himanshudongre): "null on Muon sub-Gaussian weights"
-- #1695 (X-Abhishek-X): SpinQuant V1 ported, quant tax unchanged at +0.012
+## Setup baseline
 
-Mechanism: Muon's orthogonalization already produces sub-Gaussian weights; GPTQ act-order + Cholesky already handles residual outliers; rotations have nothing to do. **This is why SpinQuant is wired but disabled in #1736.**
+- Stack (from `045-loop-layer-improvements/armD` checkpoint, used as eval reference):
+  - GPTQ int6 matrices / int7 emb
+  - SDClip (k=12.85 mat, k=12 MLP, k=13 attn, k=15 emb)
+  - LQER asym rank-4 top-3 (covers tok_emb + 11 MLP fc tensors)
+  - EMA decay 0.9965, 16-batch GPTQ calibration
+  - SpinQuant code wired but disabled (correctly so — see results)
+- Quant tax: +0.00920 (post-quant 1.07467 − pre-quant EMA 1.06547)
+- Artifact size: 15,953,718 bytes / 16,000,000 cap = **46 KB headroom (0.29% slack)**
+- 5-seed σ on quant gap: ~0.0005 (anything <0.001 is noise)
 
-→ Drop QuaRot, SpinQuant, DuQuant, FlatQuant, Hadamard pre-rotation from the literature recommendations regardless of how strong they look on LLaMA. Wrong paradigm for this stack.
+## Cap = 16,000,000 bytes DECIMAL (not 16 MiB)
 
-## What's already in the stack
+Verified in upstream code (`records/track_non_record_16mb/2026-03-21_DepthRecurrence_MixedPrecisionQuant/train_gpt.py`: `if total_artifact > 16_000_000`) and PR #1797 body. Common mistake to use 16,777,216 (binary MiB) — that's wrong.
 
-- **SDClip** (PR #1394) — `c = k·σ(row)`. Foundational primitive every winning PR since stacks on
-- **Hessian-aware SDClip** (PR #1412) — modulate clip by row sensitivity, λ=0.175
-- **Per-layer adaptive clip** (PR #1586) — MLP=12.0, attn=13.0, **emb=15.0 with int7** → 1.07493 (pre-CaseOps)
-- **LQER asym rank-4 top-3** (PR #1797) — recovers ~0.009 of the ~0.012 raw quant tax
+## RESUME_FROM_CKPT infrastructure (committed)
 
-## What QAT taught us (and why it's not in stack)
+Added in commit `0ea6a97` (later `381baf2` and `44b55b0` for fixes). Lets us iterate on quant settings via:
+- Skip train_model()
+- Load `final_model.pt` (post-EMA) into base_model
+- Set `looping_active=True` (CRITICAL — without this pre-quant eval is broken)
+- Run pre-quant eval → serialize (= GPTQ) → deserialize → quantized eval
 
-QAT dominated Phase 0 (March), removed in #1218 with note: "appeared to provide little or no benefit." Critical follow-up finding (#1773): **QAT FakeQuantize formula must match save-time clip exactly** — naive absmax mismatch = +0.17 BPB damage. Don't revisit QAT unless we want to align it with SDClip explicitly.
+Cost per arm: ~$1, ~5-7 min on 4×H100 (vs ~$5-10 + 20 min for full screen).
 
-## Ranked ideas
+**Reference checkpoint**: `/workspace/runs/045-loop-layer-improvements/armD/final_model.pt` on NE-1 volume.
 
-### Tier 1: cheap, high-precedent, config-only
+## RESULTS — 046 family (all run via RESUME_FROM_CKPT)
 
-**Q1. Per-layer SDClip + int7 emb on CaseOps stack** (re-port #1586)
-- Source: PR-precedent (clean −0.011 on pre-CaseOps stack)
-- Change: MLP k=12.0, attn k=13.0, emb k=15.0, EMBED_BITS=7 (currently 7 already? verify)
-- Bytes: int7 emb saves ~530 KB → can fund higher LQER rank or other levers
-- Δ guess: −0.001 to −0.003
-- Risk: low (config-only)
-- Cost: ~$10-15 (3-seed)
-- **Caveat**: CaseOps changed embedding shape with control tokens — optimum may have shifted. Should sweep, not just re-use #1586's exact values.
+### 046B-tight (SDClip tightening) — **REAL WIN, ILLEGAL**
 
-**Q2. SpinQuant ON ablation in current baseline**
-- Source: PR diagnostic — settles the rotation question in our exact stack
-- Change: `SPINQUANT_ENABLED=1 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'`
-- Bytes: 0
-- Δ guess: ±0.001 (most likely null per prior evidence; cheap to confirm in current stack)
-- Risk: low
-- Cost: ~$10
-- **Why bother**: prior nulls predate LQER + CaseOps + current Muon-WD-ratio. Worth confirming the fact applies post-LQER before truly closing the direction.
+| Arm | Quantized | Δ vs verify (1.07467) | Size | Legal? |
+|---|---|---|---|---|
+| 046B-tight (MLP=11.5/ATTN=12.5/EMBED=14.5) | **1.07381** | **-0.00086** | 16,183,797 | ❌ +184 KB over |
+| 046B-loose (MLP=12.5/ATTN=13.5/EMBED=15.5) | 1.07499 | +0.00031 | 15,724,208 | ✓ legal but worse |
+| 046B-mlp-only-tight (MLP=11.5 only) | 1.07422 | -0.00045 | 16,095,521 | ❌ +96 KB over |
 
-**Q5. Bigger calibration: 16 → 64 or 128 batches**
-- Source: literature (Hubara et al. 2021, GPTQ paper used 128)
-- Change: `GPTQ_CALIBRATION_BATCHES=128`
-- Bytes: 0
-- Δ guess: −0.001 to −0.003
-- Risk: low (calibration is offline, doesn't blow training budget)
-- Cost: ~$5
-- **Cheapest experiment in the list.** GPTQ calib at 1/8 the literature default is plausibly leaving free signal on the table.
+**Lever direction: tighter wins, looser hurts. Confirmed real signal.**
 
-### Tier 2: novel, code-needed, high-upside
+### 046G-tighter (push the SDClip lever) — **MONOTONIC, ALL ILLEGAL**
 
-**Q3. Post-quant LN/bias fitting loop** (#1818-B design)
-- Source: PR-novel — designed by taka6745, never implemented
-- Change: After GPTQ baking, run 5 iterations re-fitting LayerNorm scales/shifts (and biases if present) against fp32 activations on calib data
-- Bytes: 0 (LN params already exist)
-- Δ guess: −0.005 to −0.020 (designer's projection — take with salt)
-- Risk: medium (novel, designer's number unverified; but mechanism is principled)
-- Cost: ~30 lines of code + $10 for screen
-- **Highest-upside Tier-1/2 candidate.** No one has tried it. Even at the low end (−0.005) it'd be the biggest single quant lever since SDClip.
+| Arm | Quantized | Δ | Size | Legal? |
+|---|---|---|---|---|
+| 046G-tighter (-1.0σ each) | 1.07322 | -0.00146 | 16,427,706 | ❌ +428 KB |
+| **046G-tightest (-1.5σ each)** | **1.07251** | **-0.00216** | 16,688,654 | ❌ +689 KB |
+| 046G-mlp-only-tighter | 1.07379 | -0.00088 | 16,254,785 | ❌ +255 KB |
+| 046G-attn-only-tighter | 1.07432 | -0.00035 | 16,078,450 | ❌ +78 KB |
+| 046G-embed-only-tighter | 1.07440 | -0.00027 | 16,007,406 | ❌ **+7 KB** (closest!) |
+| 046G-tight-emb8 | 1.07255 | -0.00212 | 16,713,164 | ❌ +713 KB |
 
-**Q6. OmniQuant** (learnable per-channel clipping + LET smoothing)
-- Source: literature (Shao et al. 2024, ICLR)
-- Change: replace GPTQ rounding with block-wise reconstruction; learnable per-channel weight clip thresholds + per-channel smoothing scale
-- Bytes: ~0 (LET fuses into adjacent weights, LWC bakes into scales)
-- Δ guess: −0.002 to −0.005
-- Risk: medium (5-7d of code, untested in comp; OmniQuant on 50M scale unproven)
-- Cost: ~$10-15 to validate
-- **Defer until Tier 1 + Q3 land.**
+**Findings**:
+- SDClip is **monotonic** — every -0.5σ tightening keeps winning (~-0.0007 BPB per notch)
+- MLP tightening carries ~50% of the gain but adds ~250 KB per -0.5σ
+- ATTN tightening: smaller win, smaller bytes
+- EMBED tightening: smallest win (-0.00027), almost legal (+7 KB only)
+- Each -0.5σ adds ~250 KB of artifact (less compressible quant weights)
+- EMBED_BITS=8 doesn't help over emb=7 with tight clip
 
-### Tier 3: code-complete elsewhere, never run
+### 046A (calibration batches) — null
 
-**Q7. Group-size 128 GPTQ** (#1664)
-- Source: PR-code-complete by zoharb157, never validated
-- Change: GPTQ with group_size=128 instead of per-row
-- Bytes: groupwise scales add ~2% storage overhead
-- Δ guess: −0.002 to −0.005
-- Risk: medium (interaction with SDClip unknown)
-- Cost: ~$10
-
-**Q8. Mixed int5 attn / int6 MLP / int7 emb** (#1817 pattern)
-- Source: PR-precedent (works at 1h compute on different arch)
-- Change: per-tensor-type bit allocation
-- Bytes: byte-saving (int5 attn frees space for tighter MLP/emb)
-- Δ guess: −0.002 to −0.005 if attention tolerates int5 here
-- Risk: medium-high (#1646 showed wholesale int5 fails)
-- Cost: ~$10
-- **Caveat**: needs careful per-component damage measurement first; could regress badly.
-
-**Q4. Short-burst AR self-gen calibration** (~30s reserve, not 210s)
-- Source: PR + literature
-- #756 showed AR matches val-calib within 0.0003 BPB
-- #1234 failed only because 210s reservation cost 30% of training steps
-- Change: ≤30s AR generation, smaller batch (16 batches × 2048 tokens)
-- Bytes: 0
-- Δ guess: −0.0003 to −0.001 (small but legal)
-- Risk: low
-- Cost: ~$5-7
-
-**Q9. AdaRound** (Nagel 2020) layered on GPTQ output
-- Source: literature, untried in comp
-- Change: per-layer rounding-mask optimization with AdamW for 200-500 steps post-GPTQ
-- Bytes: 0
-- Δ guess: −0.001 to −0.004
-- Risk: medium (may overlap heavily with GPTQ + LQER which already address these layers)
-- Cost: ~$7
-- **Defer — likely redundant with what LQER already corrects.**
-
-### Tier 4: explicitly NOT to try
-
-- **QuaRot / SpinQuant / DuQuant / Hadamard rotations** — null on Muon weights (4 ablations)
-- **AQLM / QuIP# / QTIP / GPTVQ / SpQR** — codebooks add bytes, designed for int2-3 not int6
-- **SmoothQuant / QDrop** — designed for activation quant, we're weight-only
-- **AffineQuant** — subsumed by FlatQuant for our scale; affine bytes risk cap
-- **BitNet** — requires retraining from scratch
-- **TurboQuant** — already killed (PR #918, 41× worse quant penalty than int6)
-- **CROWN-Q** — predates SDClip, never ported; small effect (~0.0005), unlikely to help
-- **Naive AR self-gen with 210s reserve** (#1234 failure mode) — must be short-burst
-
-## Suggested sequencing
-
-1. **Q1 + Q2 + Q5 in parallel** (config-only, ~$30 total, ~1 wallclock day)
-   - All three are cheap; results triangulate the "is there free signal in clip/emb-bits/calib?" question
-2. **If any Tier-1 wins, fold into a new baseline before Tier-2**
-3. **Q3 (post-quant LN fit)** — independent code work; spec separately. Highest expected upside.
-4. **Q6/Q7/Q8** — only if Q1-Q3 don't get us close to #1801 (1.06287 quantized)
-
-## Open questions to resolve before specing
-
-- Is `EMBED_BITS=7` actually our current setting, or did I misremember? (verify in launch.out)
-- Does CaseOps stack have biases on linears? (relevant for Q3)
-- What's the actual current `GPTQ_CALIBRATION_BATCHES` setting? (16 in spec but verify)
-- For Q3, what activations do we capture for the fit objective — last hidden state? per-block output?
-
-## Reference checkpoint for quant-repair sweeps
-
-**Use `045-loop-layer-improvements/armD`** as the iteration reference:
-
-- Path on NE-1 volume: `/workspace/runs/045-loop-layer-improvements/armD/final_model.pt` (135 MB)
-- Pre-quant EMA val_bpb: 1.06547 (+0.0003 vs canonical baseline — noise-level)
-- Quantized val_bpb: 1.07467 (+0.0006 vs canonical)
-- **Quant tax: +0.00920** (essentially identical to canonical baseline's +0.00896)
-- Hardware: 4×H100, 5101 steps, 1199s wallclock
-- Single lever active: `LOOP_SCALE_INIT=recip` (LOOP_ITER_EMBEDS=0, MLP_ONLY_FROM_PASS=0)
-- Git commit: `1c6cd7c`
-
-Why armD: canonical 039 baseline checkpoint was never saved (only train.log exists). armD is the closest full-run checkpoint we have. Quant-tax delta is what matters for repair experiments, and armD's quant-tax matches baseline within noise.
-
-## Workflow
-
-1. **Add `RESUME_FROM_CKPT` mode** to `train_gpt.py` (~20 lines): skip `train_model()`, load checkpoint into `base_model`, then proceed normally to pre-quant eval → `serialize()` (= GPTQ with current env vars) → deserialize + quantized eval. Cost: ~30 min code.
-2. **Verify**: load armD's `final_model.pt`, run with current quant config, confirm reproduces armD's 1.07467 quantized number. If it does, infra works. ~$1.
-3. **Sweep Tier 1** (Q5, Q1, Q2, Q4, Q5b, Q5c — all config-only): ~6 variants × ~$1 = ~$6 total, ~1h wallclock on a single 4×H100 pod.
-4. **If any Tier 1 wins**, fold into a new combined config and re-test.
-5. **Tier 2**: Q3 (post-quant LN/bias fit) is the dark horse — ~30 lines code + ~$1 to validate. Q6/Q7/Q9 only if Tier 1 + Q3 don't get us close to #1801 (1.06287 quantized).
-
-## Cost comparison
-
-| Mode | Cost per experiment | Wallclock |
+| Arm | Quantized | Δ |
 |---|---|---|
-| Full screen (current) | ~$5-10 | ~20 min train + ~1 min eval |
-| RESUME_FROM_CKPT (proposed) | ~$1 | ~5-7 min (GPTQ + eval only) |
+| GPTQ_CALIBRATION_BATCHES=32 | 1.07459 | -0.00008 |
+| GPTQ_CALIBRATION_BATCHES=64 | 1.07462 | -0.00005 |
+| GPTQ_CALIBRATION_BATCHES=128 | 1.07461 | -0.00006 |
 
-5-10× cost reduction. Lets us explore 20+ variants for the cost of 2 full screens.
+**Saturated at 16 batches.** Confirms PR #756 finding.
 
-## Bigger-picture caveat
+### 046C (SpinQuant) — broken / closed
 
-Our quant tax is +0.009. Even a perfect quant repair (tax → 0) gets us pre-quant 1.06514 → post-quant 1.06514, which is **still 0.002 worse than #1801 (1.06287)** and 0.004 worse than #1797 (1.06157). Quant repair alone won't catch the frontier — it has to compose with pre-quant wins. Worth doing for the headroom it might free, not for being the single lever that wins.
+Catastrophic +6.78 BPB on RESUME_FROM_CKPT path. Root cause: residual-stream rotation requires per-channel multiplier folding (attn_scale, mlp_scale, skip_weights, resid_mix) that's NOT IMPLEMENTED. Spec 009 deferred this variant for that reason.
+
+Historical SpinQuant on this stack via `spinquant_hotstart.py`:
+- 009/internal_only: 1.06731 vs baseline 1.06728 = **+0.00003 (null)**
+- 010/port_1695: 1.06723 vs 1.06728 = **-0.00005 (null)**
+- Multiple PR ablations agree (null on Muon weights)
+
+**Even if we fixed the code, the upside is null. Direction permanently closed.**
+
+### 046D (LQER knobs) — null
+
+| Arm | Quantized | Δ | Size delta |
+|---|---|---|---|
+| LQER_TOP_K=5 | 1.07466 | -0.00001 | +7 KB |
+| LQER_TOP_K=8 | 1.07466 | -0.00001 | +14 KB |
+| LQER_ASYM_GROUP=32 | 1.07467 | 0 | +2 KB |
+| LQER_ASYM_GROUP=128 | 1.07468 | +0.00001 | +1 KB |
+| LQER_RANK=6 | 1.07467 | 0 | +5 KB |
+
+**LQER is at its Pareto point.** Adding more bytes to LQER (more rank, more tensors, finer groups) gives ~0 BPB. The first 3 tensors carry ALL the LQER recovery (~-0.009 per PR #1797). Marginal tensors contribute nothing.
+
+Going DOWN in LQER untested but bounded:
+- TOP_K=2: ~-3 KB savings, unknown cost
+- TOP_K=1: ~-7 KB savings, likely costs -0.005+ (most LQER credit on MLP fc)
+- LQER off: ~-30 KB savings, costs -0.009 BPB
+- RANK=3: ~-3 KB savings, unknown cost
+
+**LQER byte savings cap out at ~30 KB for full removal — proportional to the BPB lost.**
+
+### 046E (post-quant param fit) — hurts
+
+Fit ~32K passthrough fp16 params (attn_scale, mlp_scale, resid_mix, q_gain, etc.) to match base_model logits via AdamW MSE.
+
+| Arm | Quantized | Δ |
+|---|---|---|
+| 046E-iters5 (lr=1e-3, 5 iters × 8 batches) | 1.07510 | +0.00043 |
+| 046E-iters10 | 1.07516 | +0.00049 |
+| 046E-cb16 (16 batches) | 1.07516 | +0.00049 |
+| 046E-lowlr (lr=3e-4) | 1.07501 | +0.00034 |
+
+**All arms hurt.** MSE objective doesn't descend cleanly (bounces 0.32-0.35). 32K params don't have capacity to compensate for matrix-weight quant error. **TTT does this job better in the eval pipeline.**
+
+### 046F (AR self-gen calib) — null
+
+| Arm | Quantized | Δ |
+|---|---|---|
+| 046F-ar-temp1 (temp=1.0, seq_len=512) | 1.07481 | +0.00014 |
+
+Within noise floor. Matches PR #756's prediction (~±0.0003 vs val-data calib). Skipped remaining arms — same null expected.
+
+### 046H (EMBED_BITS reduction) — hurts
+
+| Arm | Quantized | Δ vs verify | Size | Legal? |
+|---|---|---|---|---|
+| EMBED_BITS=6 pure (clip=15) | 1.08072 | **+0.00605** | 15,431,094 | ✓ legal |
+| EMBED_BITS=5 pure | 1.10845 | +0.03378 | 14,943,812 | ✓ legal |
+| EMBED_BITS=6 + clip=12 | 1.07803 | +0.00336 | 15,586,422 | ✓ legal |
+| EMBED_BITS=5 + clip=12 | 1.09452 | +0.01985 | 15,059,230 | ✓ legal |
+| EMBED_BITS=5 + clip=10 | 1.08769 | +0.01302 | 15,196,807 | ✓ legal |
+| EMBED_BITS=6 + 046B-tight | 1.07943 | +0.00476 | 15,657,893 | ✓ legal |
+| EMBED_BITS=6 + 046G-tighter | 1.07859 | +0.00392 | 15,898,038 | ✓ legal |
+| EMBED_BITS=6 + 046G-tightest | 1.07737 | +0.00270 | 16,161,778 | ❌ +162 KB |
+
+**EMBED_BITS reduction direction is dead.** Cost (+0.006 for emb6) is 6× the SDClip win. LQER doesn't absorb int6 emb error like it does for MLP fc.
+
+## Param-cut historical experiments — all hurt
+
+| Run | What was cut | Pre-quant cost vs current baseline |
+|---|---|---|
+| 041G (mlp_late_mult 4.0 → 3.0) | MLP capacity in late layers | +0.006 BPB |
+| 041D (loop_start=5,loop_end=5) | shrunk loop band | +0.0045 BPB |
+| 045 armB (MLP_ONLY_FROM_PASS=1) | skip attn on loop passes 2+ | **diverged, killed** |
+| 045 armG (LOOP_LR_SCALE=recip) | gradient 1/L on loop layers | early signs of slowing pre-loop learning |
+
+Pattern: **any param removal hurts pre-quant by way more than the freed bytes recover via clip-tightening.** Model is highly tuned; marginal capacity reductions don't recover.
+
+## Key empirical facts (don't forget)
+
+1. **Cap is 16,000,000 bytes DECIMAL** (not 16 MiB binary). Verified.
+2. **Rotation methods are null on this stack** (4 ablations agree). SpinQuant lever permanently dead — Muon orthogonalization already produces sub-Gaussian weights, GPTQ act-order handles outliers.
+3. **LQER is at its Pareto point**. Adding more rank/coverage gives 0. Removing trades bytes for proportional BPB loss.
+4. **SDClip is the only real lever** but hits the byte cap immediately. Each -0.5σ tightening: -0.0007 BPB at +250 KB.
+5. **EMBED_BITS lower than 7 hurts more than it helps.** LQER doesn't absorb emb quant error like it absorbs MLP fc error.
+6. **Post-quant fitting on small params can't compete with TTT.** TTT does this job better at eval time.
+7. **GPTQ calibration is saturated at 16 batches.**
+8. **The artifact is ~95% large matrices** (tok_emb + attn + MLP). Everything else is fingernails.
+
+## Where the bytes live
+
+| Component | Approx bytes | % of artifact |
+|---|---|---|
+| `tok_emb` (int7+LQER) | ~3.7 MB | ~23% |
+| 11× attn matrices (int6+GPTQ) | ~5.5 MB | ~34% |
+| 11× MLP fc + proj (int6+GPTQ+LQER) | ~6.1 MB | ~38% |
+| Passthrough fp16 (q_gain, scales, gates, lambdas) | ~50-100 KB | <1% |
+| LQER A+B factors (12 tensors) | ~30 KB | <1% |
+| Code (compressed) | ~36 KB | <1% |
+| Brotli/wrapper overhead | ~30 KB | <1% |
+
+## Untouched ideas (low EV, but unexplored)
+
+These are the remaining "find more bytes" candidates we haven't tried:
+
+1. **Code dead-path strip** — strip RESUME_FROM_CKPT, 046E fit, 046F AR loader from final submission. ~10-20 KB potential. Cheap, low risk.
+2. **Quantize passthrough fp16 → int8** — ~50-100 KB potential. ~30 lines code. Per-channel scales currently fp16; int8 might add noise but mostly fine.
+3. **Surgical near-zero weight strip** — Muon WD pushes some weights to ~0. Set hard threshold pre-quant, brotli compresses zeros well. ~50-300 KB potential. Risky.
+4. **Single-layer int5 mix** — int5 on ONE least-sensitive layer. ~50-100 KB. Risky (PR #1646 said int5 fails wholesale).
+5. **Different compressor** (lzma vs brotli) — speculative ±50 KB.
+
+**Even the best of these (passthrough int8 ~80 KB) only unlocks 046B-tight (-0.00086) legally.** Total potential -0.001 BPB after TTT compression.
+
+## Untouched code-needed ideas (multi-day work)
+
+These would take 2-7 days of engineering with uncertain payoff:
+
+1. **AdaRound** — per-weight rounding decision optimization. Likely overlaps LQER.
+2. **OmniQuant** — block-wise reconstruction with learnable clipping. Maxed out at SDClip-level wins probably.
+3. **Sequential cross-layer GPTQ** (#1664 design) — code-complete elsewhere, never run on our stack.
+4. **Block reconstruction (BRECQ)** — likely overlaps LQER.
+5. **Per-tensor Hessian-derived clip** (#1689) — Hessian sensitivity per-tensor instead of per-category.
+
+## Final practical state
+
+**Best legal config**: armD baseline = 1.07467 quantized. Same as #1797's pre-TTT (1.07443 ± 0.00065).
+
+**Post-TTT projection**: ~1.062, competitive with #1797's 1.06157.
+
+**Quant repair direction effectively closed.** Engineering investment is no longer justified given:
+- 3 days to deadline
+- All cheap config-only levers tested and either null/negative
+- All byte-saving moves cost more BPB than they unlock
+- Surviving directions need multi-day code work with uncertain payoff
+
+**Recommended pivots**:
+1. Multi-seed final at current config WITH TTT enabled (~$30, the actual submission)
+2. Optional: passthrough fp16→int8 quantization (~$1, only untouched cheap byte-saver, unlocks ~-0.0006 post-TTT)
+3. EMA decay sweep was queued but user explicitly skipped — they're trying other things in training
+
+## What worked / didn't — summary table
+
+| Lever | Result | Status |
+|---|---|---|
+| 046B/G SDClip tighter | -0.00086 to -0.00216 BPB, all illegal | proven win, byte-blocked |
+| 046A calib batches | null | closed |
+| 046C SpinQuant | catastrophic / null | closed |
+| 046D LQER knobs | null | closed |
+| 046E post-quant fit | hurts | closed |
+| 046F AR self-gen calib | null | closed |
+| 046H EMBED_BITS reduction | hurts more than helps | closed |
+| Passthrough fp16→int8 | untested | open (only viable byte-saver remaining) |
+| Surgical zero-weight strip | untested | open (risky) |
+| AdaRound / OmniQuant / BRECQ | untested | open (multi-day code) |
