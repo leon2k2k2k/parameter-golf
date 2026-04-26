@@ -1,0 +1,222 @@
+# Spec 045 — Loop Layer Improvements
+
+**Slug:** `045-loop-layer-improvements`
+**Created:** 2026-04-26
+**Status:** READY
+**Branch:** `exp/045-loop-layer-improvements`
+**Commit:** `fc54262` (latest; `1c6cd7c` for arms A–F)
+**Links to:** `research/ideas/loop-layer-improvements.md`
+
+## Hypothesis
+
+Three independent levers targeting the Loop45 layers (4–5). Each default to disabled
+and are byte-identical to baseline when off. Test each alone; best performers stack.
+
+**A — Iteration embeddings:** Naive weight-tied loops can't distinguish pass 0 from pass 2.
+ICML 2025 proves adding a timestep signal closes a fundamental approximation gap. A
+zero-init `[num_passes, model_dim]` parameter injected at `loop_start` entry on each pass
+costs ~1536 params and risks nothing.
+
+**B — MLP-only loop:** Attention routes; MLP retrieves. After pass 0, re-running attention
+may be redundant re-routing. Skipping attn on passes 2+ is cheaper per step → can afford
+NL=3 or NL=4 for same throughput cost as NL=2 full-block. No prior art in ~300 PRs scanned.
+
+**C — Residual 1/L init:** Weight-tied blocks repeated L times accumulate O(L) residual
+norm at init. OpenReview 2026 prescribes 1/L init for `attn_scale`/`mlp_scale` in looped
+layers. Pure init change, no new params, non-looped layers unchanged.
+
+## Baseline
+
+`runs/039-neg-slope-screen-on-1797-base/baseline/`
+Pre-quant EMA val_bpb: **1.06514** | Quantized: **1.07410** | Steps: 5156
+
+## Expected Δ
+
+| Lever | Expected Δ | Confidence |
+|---|---|---|
+| A (iter embeds) | −0.001 to −0.003 | Medium (theoretically strong, empirically untested on our stack) |
+| B (MLP-only) | −0.001 to −0.004 | Low-medium (novel, unknown risk) |
+| C (1/L init) | −0.001 to −0.002 | Low (early-training stability, may wash out at 5k steps) |
+| A+C stack | −0.002 to −0.004 | Medium |
+
+## Accept criteria
+
+- **Win:** pre-quant EMA ≤ 1.0641 (Δ ≤ −0.00104)
+- **Noise:** 1.0641 – 1.0670
+- **Kill:** ≥ 1.0670
+
+## Config diff
+
+All other config is identical to baseline (039b). Arms:
+
+```
+# Arm A: iteration embeddings
+LOOP_ITER_EMBEDS=1
+
+# Arm B: MLP-only loop (passes 2+)
+MLP_ONLY_FROM_PASS=1
+
+# Arm C: residual 1/L init (solo — isolates C contribution)
+LOOP_SCALE_INIT=recip
+
+# Arm AC: natural stack (A+C combined)
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
+
+# Arm B+C: MLP-only with stable init
+MLP_ONLY_FROM_PASS=1  LOOP_SCALE_INIT=recip
+```
+
+**Arm D (added 2026-04-26, post A/AC results):**
+```
+LOOP_SCALE_INIT=recip
+```
+C alone — no iter embeds. Lever C is systematic throughout training; Lever A is noise.
+Additivity estimate: C ≈ −0.00104 → may land at or below win threshold.
+
+**Arm E — Loop45 NL=3 + A+C (added 2026-04-26):**
+```
+NUM_LOOPS=3  LOOP_START=4  LOOP_END=5  LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
+```
+Narrower window than baseline (layers 4–5 only, vs baseline's 3–5), but more passes (4 total).
+1/4 init. Tests whether tighter window + more depth + A+C beats the baseline Loop345.
+17 total layer-passes post-loop.
+
+**Arm F — Loop345 NL=3 + A+C (added 2026-04-26):**
+```
+NUM_LOOPS=3  LOOP_START=3  LOOP_END=5  LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
+```
+Same window as baseline (layers 3–5) but more passes (NL=3, 4 total vs baseline's 3).
+NOTE: baseline already uses LOOP_START=3 by default — Arm F is the natural NL=3 upgrade
+of what AC already demonstrated. 1/4 init. 19 total layer-passes post-loop (heavier than E).
+
+All D/E/F arms use branch commit `1c6cd7c`, hardware (4×H100, 20 min), and accept criteria.
+
+---
+
+## Optimizer bug discovery (2026-04-26)
+
+After reviewing Arm A and AC results, found that **`loop_iter_embeds` (Lever A) was never in any optimizer group** — it stayed at zero-init throughout all runs. `block_named_params` only covers `self.blocks`; `loop_iter_embeds` is a GPT-root parameter and was silently excluded.
+
+Implication: all arms using `LOOP_ITER_EMBEDS=1` (A, AC, E, F) tested Lever C alone (or NL=3+C). The "AC synergy" was likely just C. Fix committed in `fc54262` — adds `loop_iter_embeds` (and `loop_resid_mixes`) to `scalar_params` in `Optimizers.__init__`.
+
+Arms A2/G/H/GH below use `fc54262` and are the first to run with actual working iter embeds.
+
+**Arm A2 — Lever A fixed (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1
+```
+Re-run of Arm A on `fc54262` where `loop_iter_embeds` is actually in the optimizer. First real test of iteration embeddings alone. Compare to baseline (1.06514) and to original Arm A result (1.06576, which was just baseline noise).
+
+**Arm AC-fix — True AC baseline (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip
+```
+Re-run of Arm AC on `fc54262`. Required comparison point for Arms G and H — without this we can't tell whether G/H gains come from the new levers or just from A finally working. Old AC result (1.06472) is invalid as a baseline for G/H.
+
+⚠️ **First AC-fix attempt FAILED** (NCCL collective timeout at step ~2200): mid-training recompile on cold fc54262 cache caused rank desync. **Second attempt ran with `TRITON_AUTOTUNE_NUM_RUNS=1` but this costs ~6% throughput at 4×H100 (~250 fewer steps in 20 min), making the EMA comparison to baseline invalid.** Must rerun with pre-warmed cache (see execution note below).
+
+---
+
+**Arm G — AC + gradient-side 1/L (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip  LOOP_LR_SCALE=recip
+```
+Looped params accumulate L× gradients per step (weight-tied, run num_passes times). Gradient hooks on bank rows `[loop_start:loop_end+1]` and block-level scalars scale by 1/num_passes before Muon/AdamW step. Symmetric to Lever C's forward-pass 1/L. `loop_iter_embeds` and `loop_resid_mixes` excluded (each row used once, not shared).
+
+**Arm H — AC + per-pass resid_mix (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip  LOOP_PER_PASS_RESID_MIX=1
+```
+Each looped layer gets independent `[2, dim]` blend params per pass (GPT-level `[num_passes, num_looped, 2, dim]` parameter). Init to `[1, 0]` = byte-identical to baseline at step 0. Completes the per-pass trio: A (identity), C (scale), H (blend).
+
+**Arm GH — AC + both G and H (added 2026-04-26):**
+```
+LOOP_ITER_EMBEDS=1  LOOP_SCALE_INIT=recip  LOOP_LR_SCALE=recip  LOOP_PER_PASS_RESID_MIX=1
+```
+Natural stack. Tests whether gradient normalization + blend calibration compound.
+
+All A2/AC-fix/G/H/GH arms use commit `fc54262`, hardware (4×H100, 20 min), seed=42.
+
+**Run order: parallel on separate pods is now safe** — each arm restores the pre-warmed inductor cache from the volume (read-only), so there is no cold-compile risk and no shared state between pods during training. Each arm gets its own worktree (`/workspace/pg-arm<X>-fc54262`).
+
+**⚠️ ERRATUM — compile note superseded (2026-04-27):**
+The original compile note (`TRITON_AUTOTUNE_NUM_RUNS=1`) is now known to cost ~6% throughput at 4×H100, invalidating step-count and EMA comparisons. It is NOT used in the launch scripts.
+
+**Correct execution protocol for all fc54262 arms:**
+1. **Pre-warm pod** (one-time, ~25 min, ~$6-8): run `bash tmp_exec/prewarm_fc54262.sh` on a fresh pod; stash with `bash tmp_exec/cache_stash.sh <host> <port> fc54262` from local machine.
+2. **Each arm pod**: use `tmp_exec/launch_045_arm{ACfix,A2,G,H}.sh` — these restore the stashed cache, set up an isolated worktree, and do NOT set `TRITON_AUTOTUNE_NUM_RUNS=1`.
+3. **Verify**: tok/s ≥ 4,300,000 at step 100. If below, reprovision — do not commit to a full 20-min run.
+4. **Re-run AC-fix and A2**: prior runs used the throughput-penalized flag and are not valid comparisons to baseline.
+
+## Code changes
+
+Branch: `exp/045-loop-layer-improvements`
+- Commit `1c6cd7c` — Arms A/B/AC/D/E/F (Levers A, B, C)
+- Commit `fc54262` — Arms A2/AC-fix/G/H/GH (optimizer bug fix + Levers G, H)
+
+Key changes in `train_gpt.py`:
+
+```python
+# Hyperparameters additions (~line 361)
+loop_iter_embeds = bool(int(os.environ.get("LOOP_ITER_EMBEDS", "0")))
+mlp_only_from_pass = int(os.environ.get("MLP_ONLY_FROM_PASS", "0"))
+loop_scale_init = os.environ.get("LOOP_SCALE_INIT", "ones")
+
+# Block.forward: skip_attn flag (Lever B)
+def forward(self, ..., skip_attn=False):
+    if not skip_attn:
+        attn_out = self.attn(...)
+        x_out = x_in + self.attn_scale * attn_out
+    else:
+        x_out = x_in  # skip attention entirely
+    x_out = x_out + self.mlp_scale * self.mlp(...)
+
+# GPT.__init__: precomputed info lists (Levers A, B) + 1/L init trigger (Lever C)
+# Forward: embed injection + skip_attn dispatch per step_idx
+```
+
+All three levers disabled by default → byte-identical to baseline on step 0.
+
+## Hardware ladder
+
+**Mini (required — code change):** 4×H100, 20 min wallclock, 1 seed per arm.
+- Arms: A, B, A+C (3 arms minimum; add B+C or C-solo if time allows).
+- Cost estimate: ~$7/arm × 3 arms ≈ **$21**. Run arms in parallel on 3 separate pods.
+- 4×H100 matches the step count of our 039b baseline (~5000 steps) — better signal than 2×H100.
+
+**Official:** 8×H100 full run, 3 seeds. Only for arms that clear the mini accept threshold.
+
+## Seed plan
+
+Mini: seed=42 for all arms (same as baseline). Official: seeds 42, 314, 1337.
+
+## Inputs
+
+- Data: `/workspace/parameter-golf/data/` (standard fineweb shards)
+- Tokenizer: `/workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/tokenizer.model`
+- No hotstart (full run from scratch, same as baseline)
+- Config: same as 039b baseline, plus arm-specific env vars above
+
+## Checkpoints to emit
+
+Pre-quant EMA checkpoint + quantized blob (standard). No optim state needed on mini.
+
+## Stop-early criteria
+
+- NaN at any val eval → stop immediately
+- val_bpb > 1.15 at step 1000 → stop (baseline ~1.24 at step 1000; 1.15 would be exceptional regression)
+- Step time > 300ms sustained after loop activation → stop (throughput regression)
+
+## Cost estimate
+
+| Rung | Arms | Cost |
+|---|---|---|
+| Mini 4×H100 | 3 parallel arms (~20 min each) | ~$21 |
+| Official 8×H100 | 1 arm × 3 seeds | ~$18 |
+| Total (if one arm wins) | | ~$39 |
+
+## Open questions for interview
+
+1. Should arm B also test `MLP_ONLY_FROM_PASS=1, NUM_LOOPS=3` (extra MLP-only pass at low cost)? Budget allowing.
+2. The `skip_attn` flag in Block.forward is a Python bool — does `torch.compile(fullgraph=True)` handle this cleanly, or does it cause unexpected recompilation? Execution should watch for extra compile events in the log.
+3. Does the `loop_iter_embeds` parameter end up in the SCALAR or MATRIX optimizer group? It's shape `[num_passes, model_dim]` which is 2D — likely treated as a matrix by Muon. Verify in param-group debug logging.
