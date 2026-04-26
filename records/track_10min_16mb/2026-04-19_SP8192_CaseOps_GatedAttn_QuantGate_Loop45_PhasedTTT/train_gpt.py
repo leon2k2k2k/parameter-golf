@@ -3858,15 +3858,39 @@ def train_model(h, device, val_data):
             optimizers.zero_grad_all()
             torch.cuda.empty_cache()
             base_model.looping_active = False
+        def _run_forward_logits_bucket_warmup():
+            base_model.eval()
+            with torch.no_grad():
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                    for bucket_len in warmup_cu_buckets:
+                        boundaries = list(range(0, x.size(1), max(h.train_seq_len, 1)))
+                        if boundaries[-1] != x.size(1):
+                            boundaries.append(x.size(1))
+                        cu = torch.full((bucket_len,), x.size(1), dtype=torch.int32, device=device)
+                        cu[: len(boundaries)] = torch.tensor(boundaries, dtype=torch.int32, device=device)
+                        compiled_forward_logits(x, cu_seqlens=cu, max_seqlen=h.train_seq_len)
+            base_model.train()
+        # forward_logits is compiled separately from forward; pre-warm at the
+        # base slope so the first val_loss eval doesn't trigger a cold compile.
+        _run_forward_logits_bucket_warmup()
         if h.slope_warmdown >= 0.0 and h.slope_warmdown != h.negative_slope:
+            # Pre-compile forward AND forward_logits at the warmdown slope so
+            # the slope switch at frac=1-warmdown_frac is a cache hit on both
+            # compiled functions, and so subsequent val_loss evals after the
+            # switch also hit the cache.
             for module in base_model.modules():
                 if isinstance(module, MLP):
                     module.negative_slope = h.slope_warmdown
             _run_cu_bucket_warmup()
+            if h.num_loops > 0:
+                base_model.looping_active = True
+                _run_cu_bucket_warmup()
+                base_model.looping_active = False
+            _run_forward_logits_bucket_warmup()
             for module in base_model.modules():
                 if isinstance(module, MLP):
                     module.negative_slope = h.negative_slope
-            log(f"slope_anneal: precompiled warmdown kernel slope={h.slope_warmdown:.4f}")
+            log(f"slope_anneal: precompiled warmdown kernel slope={h.slope_warmdown:.4f} (forward+forward_logits, both looping states)")
         for warmup_step in range(h.warmup_steps):
             step_fn(warmup_step, 1.0)
             if (
