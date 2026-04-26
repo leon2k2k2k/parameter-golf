@@ -244,6 +244,12 @@ class Hyperparameters:
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
     negative_slope = float(os.environ.get("NEGATIVE_SLOPE", 0.5))
     slope_warmdown = float(os.environ.get("SLOPE_WARMDOWN", -1.0))
+    # SLOPE_WARMDOWN_AT decouples the slope step-switch trigger from
+    # WARMDOWN_FRAC. Default -1 = use legacy trigger (frac >= 1 - warmdown_frac).
+    # Set explicitly to fire the slope shock at any frac (e.g. 0.20 = 20% in).
+    # Use case: 043 series — fire slope shock simultaneously with early loop
+    # activation, without changing the LR warmdown duration.
+    slope_warmdown_at = float(os.environ.get("SLOPE_WARMDOWN_AT", -1.0))
     mlp_outer_activation = os.environ.get("MLP_OUTER_ACTIVATION", "leaky_relu_square")
     mlp_middle_activation = os.environ.get("MLP_MIDDLE_ACTIVATION", "leaky_relu_square")
     mlp_middle_negative_slope = float(
@@ -4011,10 +4017,14 @@ def train_model(h, device, val_data):
             log(
                 f"loop_depth:upgraded step:{step} frac:{frac:.3f} depth:{h.num_loops + 1} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
+        slope_trigger_frac = (
+            h.slope_warmdown_at if h.slope_warmdown_at >= 0.0
+            else (1.0 - h.warmdown_frac)
+        )
         if (
             h.slope_warmdown >= 0.0
             and not slope_switched
-            and frac >= 1.0 - h.warmdown_frac
+            and frac >= slope_trigger_frac
         ):
             for module in base_model.modules():
                 if isinstance(module, MLP):
