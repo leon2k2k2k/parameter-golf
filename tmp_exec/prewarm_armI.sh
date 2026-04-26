@@ -13,6 +13,17 @@ set -euo pipefail
 SHA="7926027"
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
 mkdir -p /tmp/inductor_cache
+
+# Seed cache from 7c6ac51 — pre-loop graphs are identical, only reversed-pass
+# decoder graph is new. This saves ~10 min vs cold compile.
+if [ -d /workspace/.inductor_cache_7c6ac51 ]; then
+  echo "[prewarm] seeding from 7c6ac51 cache (pre-loop graphs reusable)..."
+  rsync -a /workspace/.inductor_cache_7c6ac51/ /tmp/inductor_cache/
+  echo "[prewarm] seeded: $(du -sh /tmp/inductor_cache | cut -f1)"
+else
+  echo "[prewarm] WARNING: 7c6ac51 cache not found — starting cold (will take ~15 min longer)"
+fi
+
 pip install brotli python-minifier sentencepiece --break-system-packages -q
 
 if [ ! -d /workspace/pg-prewarm-${SHA} ]; then
