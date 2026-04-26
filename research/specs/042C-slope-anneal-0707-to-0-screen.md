@@ -1,47 +1,30 @@
-# Spec 042A — slope anneal 0.707→0.5 at warmdown
+# Spec 042C — slope anneal 0.707→0.0 at warmdown
 
-**Slug:** `042A-slope-anneal-0707-to-05-screen`
+**Slug:** `042C-slope-anneal-0707-to-0-screen`
 **Created:** 2026-04-26
-**Status:** READY (recompile bug fixed)
+**Status:** READY
 **Branch:** `exp/042-slope-anneal-screen`
 **Commit:** `4b29c64`
 **Links to:** `research/ideas/slope-annealing-sqrt-to-half.md`
-**Predecessor smoke:** `runs/042A-recompile-smoke/notes.md`
-
-## Recompile fix in this commit
-
-The original 042A run (commit `2593982`) lost ~7-8 minutes mid-training to a
-Dynamo recompile when looping_active flipped. Smoke run identified the cause as
-**Dynamo LRU cache eviction**: pre-warm generated 17 unique `_forward_hidden`
-graph variants but `cache_size_limit` defaulted to 8, so by the time training
-hit the loop activation, the looping_active=True graphs had been evicted →
-full Dynamo retrace. Commit `4b29c64` raises the limit to 32, covering the full
-pre-warm vocabulary with headroom.
 
 ## Hypothesis
 
-The fused backward bug (commits before 5bbf12f) accidentally used effective slope
-√0.5≈0.707 on negative activations instead of 0.5. Contaminated runs showed dramatically
-better mid-training signal but vibrated at warmdown due to forward/backward inconsistency.
+Same mechanism as 042A but anneals all the way to `NEGATIVE_SLOPE=0.0` (pure squared ReLU)
+instead of 0.5. Two effects compound:
 
-This spec harvests that benefit intentionally: run with `NEGATIVE_SLOPE=0.7071` (≈√0.5)
-for the first 75% of training, then switch cleanly to `NEGATIVE_SLOPE=0.5` at warmdown
-start. The switch fires exactly once at `frac = 1 - WARMDOWN_FRAC = 0.25`.
+1. **Phase-1 benefit (same as 042A):** Running at s=0.707 for the first 75% gives more
+   gradient flow through negative activations, especially around loop activation at frac=0.35.
 
-- Phase 1 (frac 0–0.25): s=0.7071 — more gradient flow through negative activations,
-  especially beneficial when the recurrent loop activates at frac=0.35
-- Phase 2 (frac 0.25–1.0): s=0.5 — forward/backward consistent, clean convergence
+2. **Phase-2 sparsity bonus:** Pure `relu_square` (s=0) produces ~80-95% natural activation
+   sparsity in the FFN intermediate. NVIDIA H100 has native 2:4 structured sparse tensor
+   core support — the sparse activations can accelerate FFN GEMMs ~1.3-1.5×, squeezing
+   more effective steps into the 1200s wallclock cap.
 
-The pre-warm now compiles both slope variants, so the slope kernel switch is a cache
-hit (~0ms). Logged at startup as `slope_anneal: precompiled warmdown kernel slope=0.5000`,
-and at the switch step as `slope_anneal: 0.7071→0.5000 step:N frac:0.250`.
-
-## Predecessor signal
-
-The original (broken) 042A run reached step 3034/20000 in 1196s — 6× fewer steps
-than baseline — yet pre-quant EMA val_bpb was **1.0886**, only ~0.024 worse than
-the fully-trained 039b baseline (1.06514). With the recompile fix, this run should
-reach the full step count and the early-training advantage should compound.
+Unlike 042A (step switch), the slope decays continuously — linearly from 0.7071 to 0.0
+over the first 50% of warmdown (frac 0.25→0.625), then holds at 0.0 for the remainder.
+This gives the model half of warmdown to fully adapt to pure relu_square before the
+final convergence push. `NEGATIVE_SLOPE` is now a runtime Triton arg (not constexpr),
+so there is no recompile at any point.
 
 ## Config diff
 
@@ -49,7 +32,7 @@ Two env var changes from the 039b baseline:
 
 ```bash
 NEGATIVE_SLOPE=0.7071
-SLOPE_WARMDOWN=0.5
+SLOPE_WARMDOWN=0.0
 ```
 
 All loop/architecture settings identical to baseline (layers 3-5, NL=2, frac=0.35).
@@ -90,40 +73,38 @@ export RECUR_ALPHA_ENABLED=1
 export RECUR_DIAG_P2P_COS=0 SMEAR_GATE_ENABLED=1
 export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
-export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.7071 SLOPE_WARMDOWN=0.5
+export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.7071 SLOPE_WARMDOWN=0.0
 export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0 TRAINING_ONLY_SCREEN=0 VAL_LOSS_EVERY=1000
-export RUN_ID="042A-slope-anneal-0707-to-05"
+export RUN_ID="042C-slope-anneal-0707-to-0"
 
 pip install brotli --break-system-packages -q
 
-mkdir -p /workspace/runs/042A-slope-anneal-0707-to-05-screen
+mkdir -p /workspace/runs/042C-slope-anneal-0707-to-0-screen
 
 torchrun --standalone --nproc_per_node=4 \
   /workspace/parameter-golf/records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py \
-  >> /workspace/runs/042A-slope-anneal-0707-to-05-screen/train.log 2>&1
+  >> /workspace/runs/042C-slope-anneal-0707-to-0-screen/train.log 2>&1
 ```
 
 ## What to watch
 
-- **Slope pre-warm at startup:** `slope_anneal: precompiled warmdown kernel slope=0.5000`
-- **Slope switch:** `slope_anneal: 0.7071→0.5000 step:~1650 frac:0.250` in log
-- **No mid-training pause:** step rate at step 1700 should match step 1600 (no 7-8 min gap)
-- **Mid-run val trajectory (VAL_LOSS_EVERY=1000):** compare to baseline at matched steps
-- **Final EMA val_bpb:** vs baseline 1.06514
+- **Slope switch:** `slope_anneal: 0.7071→0.0000 step:~1650 frac:0.250` in log
+- **Post-switch throughput:** expect slight increase in tok/s if H100 sparse path engages
+- **Post-switch val trajectory:** does it destabilize (spike up) or continue descent?
+- **Final EMA val_bpb:** vs baseline 1.06514 and vs 042A result
 
 ## Acceptance
 
 Baseline (039b): pre-quant EMA val_bpb **1.06514**
 
 - **Win**: pre-quant EMA val_bpb < **1.0641**
-- **Noise zone**: 1.0641–1.0670 — run second seed
-- **Kill**: pre-quant EMA val_bpb ≥ **1.0670**
+- **Noise zone**: 1.0641–1.0670 — compare to 042A result
+- **Kill**: pre-quant EMA val_bpb ≥ **1.0670**, or val spikes at slope switch
 
-Post-quant val_bpb also recorded (no TTT). Watch quant damage vs baseline.
+Post-quant val_bpb also recorded (no TTT).
 
 ## Prediction
 
-The original (broken) 042A reached step 3034 with val_bpb 1.0886 — ~0.024 from
-baseline at 6× fewer steps. Extrapolating naively, the early-training advantage
-should compound. Optimistic: ~1.063x (clear win). Conservative: low end of noise
-zone (~1.0645).
+More aggressive than 042A. The sparsity benefit could add ~50-200 extra effective steps
+via throughput gain. Risk is warmdown instability from the full zero-out of negative slopes.
+Optimistic: ~1.062. Conservative: noise zone or slightly worse than 042A if instability bites.
