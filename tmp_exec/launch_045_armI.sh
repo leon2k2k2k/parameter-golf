@@ -16,46 +16,13 @@ TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_Quant
 # ── 1. Git setup (all git ops here — none after this block) ───────────────
 WORKTREE=$(bash /workspace/parameter-golf/tmp_exec/setup_worktree.sh "$SHA" "$ARM")
 
-# ── 2. Inductor cache — inline prewarm if stash missing ───────────────────
-export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
-mkdir -p /tmp/inductor_cache
-STASH="/workspace/.inductor_cache_${SHA}"
-
-if [ ! -d "$STASH" ]; then
-  echo "[launch] No stash for ${SHA} — running inline prewarm (~5-7 min)..."
-  # Seed from 7c6ac51: pre-loop graphs are identical, only reversed-pass graph is new
-  if [ -d /workspace/.inductor_cache_7c6ac51 ]; then
-    rsync -a /workspace/.inductor_cache_7c6ac51/ /tmp/inductor_cache/
-    echo "[launch] seeded from 7c6ac51: $(du -sh /tmp/inductor_cache | cut -f1)"
-  else
-    echo "[launch] WARNING: 7c6ac51 cache not found — cold compile (~15 min)"
-  fi
-  mkdir -p "$RUNDIR"
-  # Short prewarm: compiles the reversed-pass loop graph, then stops
-  PREWARM_LOG="${RUNDIR}/prewarm.log"
-  echo "[launch] compiling reversed-pass graph..."
-  MAX_WALLCLOCK_SECONDS=300 TRAINING_ONLY_SCREEN=1 RUN_ID="045-armI-prewarm" \
-  LOOP_SCALE_INIT=recip LOOP_REVERSE_LAST_PASS=1 \
-  torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
-    >> "$PREWARM_LOG" 2>&1
-  PREWARM_TOK=$(grep "^100/20000 train_loss" "$PREWARM_LOG" | tail -1 | grep -o 'tok/s: [0-9]*' | grep -o '[0-9]*')
-  echo "[launch] prewarm done. tok/s at step 100: ${PREWARM_TOK:-UNKNOWN}"
-  # Stash to volume so future pods can restore without recompiling
-  rsync -a /tmp/inductor_cache/ "$STASH/"
-  echo "[launch] stashed to ${STASH}: $(du -sh $STASH | cut -f1)"
-else
-  echo "[launch] restoring stash for ${SHA}..."
-  rsync -a "${STASH}/" /tmp/inductor_cache/
-  echo "[launch] cache restored: $(du -sh /tmp/inductor_cache | cut -f1)"
-fi
-
-# ── 3. Deps ───────────────────────────────────────────────────────────────
+# ── 2. Deps ───────────────────────────────────────────────────────────────
 pip install brotli python-minifier sentencepiece --break-system-packages -q
 
-# ── 4. Output dir ─────────────────────────────────────────────────────────
+# ── 3. Output dir ─────────────────────────────────────────────────────────
 mkdir -p "$RUNDIR"
 
-# ── 5. Config (base: identical to 039b baseline) ──────────────────────────
+# ── 4. Config (must be exported before prewarm torchrun) ──────────────────
 export DATA_DIR=/workspace/parameter-golf/data
 export DATASETS_DIR='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved'
 export TOKENIZER_PATH='/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/datasets/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model'
@@ -84,17 +51,42 @@ export RECUR_ALPHA_ENABLED=1 RECUR_DIAG_P2P_COS=0 SMEAR_GATE_ENABLED=1
 export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5 SLOPE_WARMDOWN=-1.0
-export SEED=42 MAX_WALLCLOCK_SECONDS=1200 TRAINING_ONLY_SCREEN=0 TTT_ENABLED=0
-export PHASED_TTT_ENABLED=3 PHASED_TTT_NUM_PHASES=3
-export RUN_ID="045-armI"
-
-# ── 6. Arm I levers ───────────────────────────────────────────────────────
+export SEED=42 PHASED_TTT_ENABLED=3 PHASED_TTT_NUM_PHASES=3
 export LOOP_SCALE_INIT=recip
 export LOOP_REVERSE_LAST_PASS=1
 
-# ── 7. Train (no git ops below this line) ─────────────────────────────────
+# ── 5. Inductor cache — inline prewarm if stash missing ───────────────────
+export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
+mkdir -p /tmp/inductor_cache
+STASH="/workspace/.inductor_cache_${SHA}"
+
+if [ ! -d "$STASH" ]; then
+  echo "[launch] No stash for ${SHA} — running inline prewarm (~5-7 min)..."
+  if [ -d /workspace/.inductor_cache_7c6ac51 ]; then
+    rsync -a /workspace/.inductor_cache_7c6ac51/ /tmp/inductor_cache/
+    echo "[launch] seeded from 7c6ac51: $(du -sh /tmp/inductor_cache | cut -f1)"
+  else
+    echo "[launch] WARNING: 7c6ac51 cache not found — cold compile (~15 min)"
+  fi
+  PREWARM_LOG="${RUNDIR}/prewarm.log"
+  MAX_WALLCLOCK_SECONDS=300 TRAINING_ONLY_SCREEN=1 TTT_ENABLED=0 RUN_ID="045-armI-prewarm" \
+    torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
+    >> "$PREWARM_LOG" 2>&1
+  PREWARM_TOK=$(grep "^100/20000 train_loss" "$PREWARM_LOG" | tail -1 | grep -o 'tok/s: [0-9]*' | grep -o '[0-9]*')
+  echo "[launch] prewarm done. tok/s at step 100: ${PREWARM_TOK:-UNKNOWN}"
+  rsync -a /tmp/inductor_cache/ "$STASH/"
+  echo "[launch] stashed: $(du -sh $STASH | cut -f1)"
+else
+  rsync -a "${STASH}/" /tmp/inductor_cache/
+  echo "[launch] cache restored: $(du -sh /tmp/inductor_cache | cut -f1)"
+fi
+
+# ── 6. Train ──────────────────────────────────────────────────────────────
+export MAX_WALLCLOCK_SECONDS=1200 TRAINING_ONLY_SCREEN=0 TTT_ENABLED=0
+export RUN_ID="045-armI"
+
 echo "[launch] starting torchrun — worktree: ${WORKTREE}"
-echo "[launch] verify tok/s >= 4,300,000 at step 100 before committing to full run"
+echo "[launch] verify tok/s >= 4,300,000 at step 100"
 torchrun --standalone --nproc_per_node=4 \
   "${WORKTREE}/${TRAIN_SCRIPT}" \
   >> "${RUNDIR}/train.log" 2>&1
