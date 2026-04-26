@@ -2778,7 +2778,8 @@ def fit_passthrough_on_ar_gen(eval_model, h, device):
     decides whether to (a) just run eval on the fitted model (screen mode) or
     (b) re-serialize the artifact with the fitted values (production mode).
     """
-    log("postquant_fit: starting AR self-gen + passthrough fit")
+    log("postquant_fit:start (clocking total deploy-time-repair budget)")
+    t_total_start = time.perf_counter()
     seq_len = h.deploy_time_repair_ar_seq_len
     n_batches = h.deploy_time_repair_batches
     # Pick a batch size that fits in memory. For 4xH100 with our 36M model,
@@ -2787,7 +2788,7 @@ def fit_passthrough_on_ar_gen(eval_model, h, device):
 
     # Generate AR data first (no grad; uses eval_model's quantized weights to sample)
     eval_model.eval()
-    t0 = time.perf_counter()
+    t_ar_start = time.perf_counter()
     ar_batches = []
     for bi in range(n_batches):
         x, y = _generate_ar_batch_for_repair(
@@ -2799,12 +2800,38 @@ def fit_passthrough_on_ar_gen(eval_model, h, device):
             log(
                 f"postquant_fit:ar_gen progress={bi+1}/{n_batches} "
                 f"tokens_so_far={(bi+1)*batch_size*seq_len} "
-                f"elapsed={time.perf_counter()-t0:.1f}s"
+                f"elapsed={time.perf_counter()-t_ar_start:.1f}s"
             )
+    ar_gen_time = time.perf_counter() - t_ar_start
     log(
         f"postquant_fit:ar_gen done {n_batches*batch_size*seq_len} tokens "
-        f"in {time.perf_counter()-t0:.1f}s"
+        f"in {ar_gen_time:.1f}s"
     )
+
+    # Save AR tokens for inspection / reproducibility / inter-run cache.
+    # Only rank 0 saves to avoid duplicates. Cheap (~500KB-2MB depending on size).
+    # Tokens saved as int64 .pt; can decode later via tokenizer if needed.
+    if h.is_main_process and h.artifact_dir:
+        try:
+            ar_path = os.path.join(h.artifact_dir, "deploy_time_repair_ar_tokens.pt")
+            torch.save(
+                {
+                    "x": torch.cat([x.cpu() for (x, _) in ar_batches], dim=0),
+                    "y": torch.cat([y.cpu() for (_, y) in ar_batches], dim=0),
+                    "config": {
+                        "n_batches": n_batches,
+                        "batch_size": batch_size,
+                        "seq_len": seq_len,
+                        "temp": h.deploy_time_repair_ar_temp,
+                        "vocab_size": h.vocab_size,
+                        "ar_gen_time_s": ar_gen_time,
+                    },
+                },
+                ar_path,
+            )
+            log(f"postquant_fit:ar_tokens_saved path={ar_path} bytes={os.path.getsize(ar_path)}")
+        except Exception as e:
+            log(f"postquant_fit:ar_tokens_save_failed err={type(e).__name__}: {e}")
 
     # Identify trainable params: small (<=65536 element) floating-point params.
     # These are the passthrough fp16 tensors in our quant artifact.
@@ -2831,7 +2858,7 @@ def fit_passthrough_on_ar_gen(eval_model, h, device):
     )
 
     eval_model.train()  # required for backward
-    t0 = time.perf_counter()
+    t_fit_start = time.perf_counter()
     for it in range(h.deploy_time_repair_iters):
         accum_loss = 0.0
         for (x, y) in ar_batches:
@@ -2848,9 +2875,17 @@ def fit_passthrough_on_ar_gen(eval_model, h, device):
             accum_loss += loss.item()
         log(
             f"postquant_fit:iter={it+1}/{h.deploy_time_repair_iters} "
-            f"avg_ce={accum_loss / len(ar_batches):.6f}"
+            f"avg_ce={accum_loss / len(ar_batches):.6f} "
+            f"elapsed={time.perf_counter()-t_fit_start:.1f}s"
         )
-    log(f"postquant_fit: fit done in {time.perf_counter()-t0:.1f}s")
+    fit_time = time.perf_counter() - t_fit_start
+    total_time = time.perf_counter() - t_total_start
+    log(f"postquant_fit:fit_done in {fit_time:.1f}s")
+    log(
+        f"postquant_fit:DEPLOY_TIME_BUDGET total={total_time:.1f}s "
+        f"(ar_gen={ar_gen_time:.1f}s fit={fit_time:.1f}s) "
+        f"vs_eval_cap_600s headroom={600 - total_time:.0f}s"
+    )
 
     eval_model.eval()
     for _, p in fit_params:
