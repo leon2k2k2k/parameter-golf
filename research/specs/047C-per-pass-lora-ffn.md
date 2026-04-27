@@ -1,0 +1,207 @@
+# Spec 047C — Per-pass LoRA on looped FFN (rank-2, both sites)
+
+**Slug:** `per-pass-lora-ffn`
+**Created:** 2026-04-27
+**Status:** READY
+**Branch:** `exp/047C-per-pass-lora-ffn` (forked from `exp/045-loop-layer-improvements` @ `ece7b76`)
+**Commit:** `5cf60f9`
+**Links to:** `research/ideas/per-pass-lora-ffn.md`
+
+## Hypothesis
+
+Loop45 band currently uses fully tied FFN weights across all 3 passes. ALBERT
+(1909.11942 Table 4) shows FFN-tying is the dominant cost in tied/recurrent
+transformers (~1.4–2.8 avg-task drop), while attention-tying is approximately free.
+Relaxed Recursive (2410.20672) and MoLoRA (2512.12880) recover most of the
+FFN-tying gap on tied stacks by adding a small per-pass LoRA delta.
+
+Adding rank-2 LoRA on both `mlp_up` and `mlp_down` of every (pass, layer) in the
+band gives each pass a small subspace of freedom on top of the shared FFN. We
+expect this to recover a measurable fraction of the loss that pure FFN tying
+imposes.
+
+This is the matrix-valued generalization of frozen α/β (rank-0 scalar per pass).
+
+## Baseline
+
+**Spec 045 armAC-fix-rerun**, 4×H100, 1 seed, post-EMA pre-quant:
+- val_bpb = **1.06479** at step 5126
+- val_loss = 2.33028
+- ~20 min wallclock
+
+This is the matched-rung baseline. Comparison is at training endpoint, post-EMA,
+**no quant** (per `[Screen via training-endpoint val_bpb]` memory).
+
+## Expected Δ
+
+- Pre-quant post-EMA: **−0.0005 to −0.0030** vs 1.06479
+- Confidence: medium-low. Lit signal is positive but at much larger scale (Relaxed
+  Recursive on Gemma-2B; MoLoRA on ALBERT-base). Small-LM regime + 3-pass-only
+  recurrence is novel.
+- Negative result is informative: would confirm pure tying is not the binding
+  constraint at K=3, send us back to schedule/band-position levers.
+
+## Accept criteria
+
+- Wait-and-see — no fixed kill threshold (per user direction).
+- Read the val_bpb curve at matched steps + post-EMA bpb. Compare to baseline 1.06479.
+- Decision rubric (post-hoc):
+  - **Promote:** post-EMA Δ ≤ −0.0010 → write 047C-mini eval, run a second seed,
+    plan int4 storage variant for submission rung.
+  - **Iterate:** Δ ∈ (−0.0010, 0): try `r=4` if signal direction is right but
+    weak, or up-only (cheaper) if compute is the constraint.
+  - **Kill:** Δ ≥ 0 — pure tying is not the binding constraint at K=3.
+
+## Code changes
+
+**Branch:** `exp/047C-per-pass-lora-ffn` from `exp/045-loop-layer-improvements`.
+**Commit:** TBD (implementation pending).
+
+**New parameters** added to `GPT.__init__`:
+```python
+# r = LOOP_FFN_LORA_RANK; 0 = disabled, byte-identical to baseline
+# num_passes = num_loops + 1; num_looped = loop_end - loop_start + 1
+self.loop_ffn_up_lora_A   = nn.Parameter(  # (P, NL, hidden_dim, r)
+    torch.empty(num_passes, num_looped, hidden_dim, r))
+self.loop_ffn_up_lora_B   = nn.Parameter(  # (P, NL, r, model_dim)
+    torch.empty(num_passes, num_looped, r, model_dim))
+self.loop_ffn_down_lora_A = nn.Parameter(  # (P, NL, model_dim, r)
+    torch.empty(num_passes, num_looped, model_dim, r))
+self.loop_ffn_down_lora_B = nn.Parameter(  # (P, NL, r, hidden_dim)
+    torch.empty(num_passes, num_looped, r, hidden_dim))
+```
+
+**Init (standard LoRA):** A ~ Kaiming-uniform, B = 0 → initial delta is exactly 0,
+training-loss neutral at step 0.
+
+**Forward (in MLP / Block.forward, only when layer ∈ band and pass p):**
+```python
+# pseudocode for the up projection at (pass=p, layer_in_band=i)
+up_base = mlp_up_bank[layer_idx]                     # (hidden_dim, model_dim)
+up_lora = loop_ffn_up_lora_A[p, i] @ loop_ffn_up_lora_B[p, i]
+                                                     # (hidden_dim, model_dim)
+W_up_eff = up_base + up_lora
+h_up = W_up_eff @ x                                  # ~ same cost as base
+# (same for down)
+```
+
+Implementation note: forward materializes the full delta `A @ B` once per
+(pass, layer), then adds to `up_w`/`down_w` and reuses the existing fused MLP
+kernel. With r=2 this is 9 deltas of size (2048, 512) per forward — small.
+
+**Optimizer routing — divergence from interview answer.** Spec interview said
+"Muon for matrix params." On implementation, the LoRA matrices have extreme
+aspect ratio at small r (e.g. up_A is `(9, 2048, 2)` — only r=2 columns).
+Muon's NS5 orthogonalization is meaningless at r=2 and the per-bank scale
+factor `sqrt(2048/2) = 32` would be aggressive. The original LoRA paper uses
+Adam. Routed to `scalar AdamW` group instead, matching the `recur_alpha` /
+`loop_resid_mixes` precedent for tiny matrix params on the GPT root. If r is
+raised to ≥16 in a follow-up, revisit Muon routing.
+
+**Activation flag:**
+- `LOOP_FFN_LORA_RANK=0` → disabled, byte-identical to baseline. Default.
+- `LOOP_FFN_LORA_RANK=2` → activates rank-2 LoRA on both sites.
+
+## Config diff vs 045 armAC-fix-rerun
+
+```
+LOOP_FFN_LORA_RANK=2     # new; default 0
+```
+
+All other env vars inherit armAC-fix-rerun.
+
+## Param accounting (FP)
+
+| Site | Per (pass, layer) | × 3 passes × 3 layers | Total |
+|---|---|---|---|
+| `up_A` (hidden_dim, r) | 2048×2 = 4096 | ×9 | 36,864 |
+| `up_B` (r, model_dim) | 2×512 = 1024 | ×9 | 9,216 |
+| `down_A` (model_dim, r) | 512×2 = 1024 | ×9 | 9,216 |
+| `down_B` (r, hidden_dim) | 2×2048 = 4096 | ×9 | 36,864 |
+| **Total** | 10,240 | ×9 | **92,160** |
+
+At FP16 = ~184 KB; at int4 (LQER-style, future) = ~46 KB.
+
+For this screen we don't quantize or submit, so FP is fine.
+
+## Hardware ladder
+
+**4×H100 mini, 1 seed only.** No 8×H100 in this spec — promotion to 8H is a
+follow-up after eval.
+
+Per `[Smaller-H smoke before full trial]` and `[Use Parameter Golf pod template]`:
+- Pod template: `--template-id y5cejece4j`
+- Region: JP preferred (per `[Prefer JP region for pods]`)
+- Speed check at step 500–1000: ≥ 4.30M tok/s pre-loop (per `[Pod throughput is per-pod not per-region]`)
+
+**Prewarm:** new commit → loop-active autotune graph is cold → must prewarm or
+accept `TRITON_AUTOTUNE_NUM_RUNS=1` (~6% throughput hit). For a screen, accept
+the throughput hit; full prewarm is wasted on a non-submission run.
+
+## Seed plan
+
+- Single seed for screen (seed = 314 to match 045 AC-fix-rerun lineage).
+- Multi-seed deferred to promotion path.
+
+## Inputs
+
+- Data: `/workspace/parameter-golf/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved/`
+- Tokenizer: `/workspace/parameter-golf/tokenizers/fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model`
+- Hotstart: same as armAC-fix-rerun (path TBD from launch script)
+
+Path layout matches both JP and NE-1 per `[JP and NE-1 volume layout]`.
+
+## Checkpoints to emit
+
+- `final_model.pt` (FP, post-EMA) — for promotion analysis
+- `train.log` — full training log
+- (No INT6 quant artifact this spec — screen only)
+
+Retention: under `runs/047C-per-pass-lora-ffn/seed_314/`.
+
+## Stop-early criteria
+
+- NaN in train_loss or val_loss → stop, file in tmp_exec, alert.
+- step_time > 1.5× baseline at step 1000 → stop and investigate (likely LoRA
+  forward inefficiency — fix `A@B@x` ordering).
+- val_bpb at step 4500 > baseline + 0.005 → likely a divergence; stop and inspect.
+
+Otherwise: run to wallclock cap (matched to baseline ~20 min).
+
+## Cost estimate
+
+- 4×H100 ≈ $5.50/hr
+- ~20 min training + ~5 min eval/cleanup = 25 min
+- **~$2.30 per arm × 1 arm = ~$2.30** (no prewarm, no second seed in this spec)
+
+## Monitoring
+
+Per `[1-min polling with comparison table]` and `[30s polling cadence]`:
+- 1-min cron from launch.
+- Compare table: 047C arm vs 045 AC-fix-rerun baseline (cached log) at matched
+  steps. Show train_loss, step_time, tok/s.
+- Auto-stop on completion + report final EMA pre-quant val_bpb.
+- Alert on stopping_early or NaN.
+
+## Open questions for interview
+
+1. **LoRA fold-in.** Resolved: additive on the linear weight (`up_w + A@B`,
+   `down_w + A@B`), reusing the existing fused MLP kernel. Implementation in
+   `_apply_loop_ffn_lora` helper.
+2. **Hotstart compatibility.** New LoRA params are zero-init at construction;
+   if checkpoint omits them they keep the zero-init. Verify load_state_dict
+   uses `strict=False` or that `_rebank_state_dict` ignores missing keys.
+   Pre-flight check before launch.
+3. **Prewarm strategy.** New code path → loop-active graph is cold. For this
+   single-arm screen, accept `TRITON_AUTOTUNE_NUM_RUNS=1` (~6% throughput hit).
+   If 047C wins, prewarm before any follow-up arm.
+4. **Quant/serialize wiring.** Out of scope for this screen
+   (`TRAINING_ONLY_SCREEN=1` skips serialize/quant). Follow-up work if 047C
+   wins: passthrough fp16 (or int4 LQER-style) for the 4 LoRA banks. They sum
+   to ~92K params at r=2 → above the 65536 auto-passthrough threshold, so
+   explicit handling will be needed.
+
+## Extra artifacts
+
+- Run command saved under `tmp_exec/launch_047C.sh` (to be created with code).
+- Inductor cache stash to `/workspace/inductor_cache_stash/047C/` for follow-up arms.
