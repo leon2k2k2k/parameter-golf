@@ -4,7 +4,7 @@
 **Created:** 2026-04-27
 **Status:** READY
 **Branch:** `exp/047C-per-pass-lora-ffn` (forked from `exp/045-loop-layer-improvements` @ `ece7b76`)
-**Commit:** `5cf60f9`
+**Commit:** `e2f7a3d` (5cf60f9 = code change; e2f7a3d adds `tmp_exec/launch_047C.sh` + `launch_047C_smoke.sh`)
 **Links to:** `research/ideas/per-pass-lora-ffn.md`
 
 ## Hypothesis
@@ -131,12 +131,42 @@ follow-up after eval.
 
 Per `[Smaller-H smoke before full trial]` and `[Use Parameter Golf pod template]`:
 - Pod template: `--template-id y5cejece4j`
-- Region: JP preferred (per `[Prefer JP region for pods]`)
+- Region: **NE-1 preferred** (per `[Prefer NE-1 region for pods]`, flipped 2026-04-27); fall back to JP
 - Speed check at step 500–1000: ≥ 4.30M tok/s pre-loop (per `[Pod throughput is per-pod not per-region]`)
 
 **Prewarm:** new commit → loop-active autotune graph is cold → must prewarm or
 accept `TRITON_AUTOTUNE_NUM_RUNS=1` (~6% throughput hit). For a screen, accept
 the throughput hit; full prewarm is wasted on a non-submission run.
+
+## Launch plan
+
+Two scripts on the worktree (`exp/047C-per-pass-lora-ffn` @ `e2f7a3d`):
+
+- `tmp_exec/launch_047C_smoke.sh` — 200 steps, 180s wallclock, ~$0.30. Exercises
+  the LoRA path past loop-activation (frac=0.35 of 180s ≈ 63s).
+- `tmp_exec/launch_047C.sh` — full screen, ~22 min, ~$2.30. Restores fc54262
+  cache, sets `TRITON_AUTOTUNE_NUM_RUNS=1`, background-stashes to
+  `/workspace/.inductor_cache_5cf60f9` after 10 min for promotion-path warm start.
+
+**Smoke gate before full screen:**
+1. No NaN / divergence
+2. step_time pre-loop within 10% of baseline (≥4.30M tok/s on 4×H100)
+3. Loss at step 0 matches AC-fix-rerun within rounding (LoRA delta = 0 at init)
+
+**Compile watch during full run:**
+- Expected: 10–30s step_time spike when looping flips on at frac=0.35
+  (~step 1750). Some inductor recompile on the cold LoRA subgraph paths.
+- KILL if step_time > 5× baseline for >10 steps post-spike — graph is mis-
+  cached; need a proper prewarm before retrying.
+
+## Failure-case branches
+
+1. Smoke fails → stop pod, debug code, do not proceed.
+2. Mid-run compile pause >60s → stop, build `prewarm_5cf60f9.sh`, retry hot.
+3. Δ ≥ 0 → KILL 047C; per-pass FFN freedom thesis wrong on our stack.
+4. Δ ∈ (-0.001, 0) → ITERATE: try `r=4` (after a proper prewarm).
+5. Δ ≤ -0.001 → PROMOTE: prewarm 5cf60f9, run multi-seed (3 seeds), then
+   plan int4 storage wiring for submission.
 
 ## Seed plan
 
