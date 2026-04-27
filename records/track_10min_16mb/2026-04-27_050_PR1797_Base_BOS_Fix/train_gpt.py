@@ -3517,8 +3517,6 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
-            _run_cu_bucket_warmup()
-            log("loop_rewarm: loop-active compiled graph re-warmed across all cu_seqlens buckets")
         train_loss = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
