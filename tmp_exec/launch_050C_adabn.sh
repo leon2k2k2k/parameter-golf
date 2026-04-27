@@ -60,15 +60,18 @@ export SEED=42 PHASED_TTT_NUM_PHASES=3
 # 050C has two new graph variants at loop activation:
 #   - block.forward with pass_gamma_attn=None (pre-loop)
 #   - block.forward with pass_gamma_attn=<tensor> (post-loop)
-# Smoke reaches loop activation at 0.35*600=210s and compiles both.
+# Smoke reaches loop activation at 0.35*900=315s and compiles both.
+# Wallclock bumped from 600 to 900 — per memory feedback_prewarm_wallclock_for_loop_changes,
+# AdaLN's loop-hot-path additions (per-pass γ/β tensors on attn+mlp) need ≥900s smoke
+# wallclock; original 050C run on this template hung 18+ min in loop-activation autotune.
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
 mkdir -p /tmp/inductor_cache
 STASH="/workspace/.inductor_cache_${SHA}_050C"
 
 if [ ! -d "$STASH" ]; then
-  echo "[launch] No stash found — running smoke/prewarm (10 min) to compile graphs..."
+  echo "[launch] No stash found — running smoke/prewarm (15 min cap) to compile graphs..."
   SMOKE_LOG="${RUNDIR}/smoke.log"
-  MAX_WALLCLOCK_SECONDS=600 PREQUANT_ONLY=1 RUN_ID="050C-smoke" \
+  MAX_WALLCLOCK_SECONDS=900 PREQUANT_ONLY=1 RUN_ID="050C-smoke" \
     torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
     >> "$SMOKE_LOG" 2>&1
   if ! grep -q "layer_loop:enabled" "$SMOKE_LOG"; then
