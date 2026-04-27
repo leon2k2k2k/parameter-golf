@@ -1274,7 +1274,7 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False, resid_mix_override=None):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False, resid_mix_override=None, lora_delta_up=None, lora_delta_down=None):
         mix = (resid_mix_override if resid_mix_override is not None else self.resid_mix).to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         if not skip_attn:
@@ -1287,9 +1287,15 @@ class Block(nn.Module):
             x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
         else:
             x_out = x_in
-        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
-            None, None, :
-        ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        x_normed = self.mlp_norm(x_out) * self.ln_scale_factor
+        mlp_out = self.mlp(x_normed, up_w, down_w)
+        if lora_delta_up is not None:
+            # 047C: activation-side LoRA — base MLP uses original parameter (cache hit).
+            # F.linear(x, delta_up) K=512, F.linear(h, delta_down) K=2048 — both fine for Triton.
+            x_flat = x_normed.reshape(-1, x_normed.shape[-1])
+            h_lora = self.mlp._activate(F.linear(x_flat, lora_delta_up.to(x_flat.dtype)))
+            mlp_out = mlp_out + F.linear(h_lora, lora_delta_down.to(x_flat.dtype)).reshape_as(mlp_out)
+        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
         return x_out
 
 class GPT(nn.Module):
@@ -1840,11 +1846,13 @@ class GPT(nn.Module):
         carry = {} if enc_alpha_info is not None else None
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            # Spec 047C: per-pass LoRA delta on mlp_up/mlp_down for layers in band.
-            if self._enc_ffn_lora_info is not None and self.looping_active:
-                up_w, down_w = self._apply_loop_ffn_lora(
-                    self._enc_ffn_lora_info[step_idx], up_w, down_w, _lora_deltas
-                )
+            # Spec 047C: activation-side LoRA — extract per-(pass,layer) delta slices.
+            _enc_ldu, _enc_ldd = None, None
+            if self._enc_ffn_lora_info is not None and self.looping_active and _lora_deltas is not None:
+                _enc_info = self._enc_ffn_lora_info[step_idx]
+                if _enc_info is not None:
+                    _ep, _el = _enc_info
+                    _enc_ldu, _enc_ldd = _lora_deltas[0][_ep, _el], _lora_deltas[1][_ep, _el]
             # Spec 045A: inject per-pass iter embed at entry of each loop-window pass.
             if self.loop_iter_embeds is not None and self.looping_active:
                 _einfo = self._enc_iter_embed_info[step_idx]
@@ -1860,7 +1868,7 @@ class GPT(nn.Module):
                 if _rmix_enc_info is not None:
                     _rp_i, _rl_i = _rmix_enc_info
                     _rmix_enc = self.loop_resid_mixes[_rp_i, _rl_i]
-            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_enc)
+            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_enc, lora_delta_up=_enc_ldu, lora_delta_down=_enc_ldd)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -1899,12 +1907,13 @@ class GPT(nn.Module):
             dec_alpha_info = None
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            # Spec 047C: per-pass LoRA delta on mlp_up/mlp_down for layers in band.
-            # Outside band, lora_info is None → helper is a no-op.
-            if self._dec_ffn_lora_info is not None and self.looping_active:
-                up_w, down_w = self._apply_loop_ffn_lora(
-                    self._dec_ffn_lora_info[skip_idx], up_w, down_w, _lora_deltas
-                )
+            # Spec 047C: activation-side LoRA — extract per-(pass,layer) delta slices.
+            _dec_ldu, _dec_ldd = None, None
+            if self._dec_ffn_lora_info is not None and self.looping_active and _lora_deltas is not None:
+                _dec_info = self._dec_ffn_lora_info[skip_idx]
+                if _dec_info is not None:
+                    _dp, _dl = _dec_info
+                    _dec_ldu, _dec_ldd = _lora_deltas[0][_dp, _dl], _lora_deltas[1][_dp, _dl]
             if i >= psl and psl > 0:
                 if lane0 is None:
                     lane0 = x
@@ -1947,7 +1956,7 @@ class GPT(nn.Module):
                     if _rmix_dec_info is not None:
                         _rp_i_d, _rl_i_d = _rmix_dec_info
                         _rmix_dec = self.loop_resid_mixes[_rp_i_d, _rl_i_d]
-                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_dec)
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_dec, lora_delta_up=_dec_ldu, lora_delta_down=_dec_ldd)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     beta = self.recur_beta[local_idx].to(x_new.dtype)
