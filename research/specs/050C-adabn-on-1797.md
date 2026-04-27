@@ -1,7 +1,7 @@
 # Spec 050C — Per-pass AdaLN on 1797 baseline (isolated)
 
 **Date:** 2026-04-27
-**Branch:** `exp/050C-adabn-on-1797` @ `be60216`
+**Branch:** `exp/050C-adabn-on-1797` @ `cd74fcc`
 **Launch script:** `tmp_exec/launch_050C_adabn.sh`
 
 ## Hypothesis
@@ -30,13 +30,14 @@ LOOP_ADABN=1
 
 ## Code changes
 
-Branch: `exp/050C-adabn-on-1797` @ `be60216`
+Branch: `exp/050C-adabn-on-1797` @ `cd74fcc`
 Train script: `records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py`
 
 - `_adabn_apply(x, γ, β)`: standalone `γ*x+β` function before Block class
 - `Block.forward`: optional `pass_γ_attn`, `pass_β_attn`, `pass_γ_mlp`, `pass_β_mlp` kwargs; applied after attn/mlp scaling before residual add
 - `GPT.__init__`: `loop_adabn_γ/β_attn/mlp` params `[passes, loop_layers, hidden]`; ones/zeros init
-- `_forward_hidden` enc/dec loops: builds `**_adabn_kw` dict per step, passes to block calls
+- `GPT.__init__`: registers `_adabn_γ_id`/`_adabn_β_id` identity buffers (ones/zeros, shape [hidden])
+- `_forward_hidden` enc/dec loops: always passes explicit `pass_γ/β_attn/mlp` kwargs — learned tensors for loop-layer steps, identity buffers for non-loop steps; no `**dict` expansion; single `Block.forward` compiled graph variant throughout (no mid-run recompile at loop activation)
 
 ## Hardware ladder
 
