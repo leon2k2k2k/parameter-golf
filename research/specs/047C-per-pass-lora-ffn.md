@@ -2,9 +2,9 @@
 
 **Slug:** `per-pass-lora-ffn`
 **Created:** 2026-04-27
-**Status:** READY
+**Status:** READY (updated 2026-04-27 — ENABLE_LOOPING_AT fixed)
 **Branch:** `exp/047C-per-pass-lora-ffn` (forked from `exp/045-loop-layer-improvements` @ `ece7b76`)
-**Commit:** `0826944` (activation-side LoRA fix; 70013c5 = launch SHA update)
+**Commit:** `d9d6bcb` (ENABLE_LOOPING_AT=0.0 fix; prior: 0826944 = activation-side LoRA)
 **Links to:** `research/ideas/per-pass-lora-ffn.md`
 
 ## Hypothesis
@@ -146,24 +146,30 @@ the throughput hit; full prewarm is wasted on a non-submission run.
 
 ## Launch plan
 
-Two scripts on the worktree (`exp/047C-per-pass-lora-ffn` @ `e2f7a3d`):
+Two scripts on the worktree (`exp/047C-per-pass-lora-ffn` @ `d9d6bcb`):
 
-- `tmp_exec/launch_047C_smoke.sh` — 200 steps, 180s wallclock, ~$0.30. Exercises
-  the LoRA path past loop-activation (frac=0.35 of 180s ≈ 63s).
+- `tmp_exec/launch_047C_smoke.sh` — 200 steps, 180s wallclock, ~$0.30. Loop active
+  from step 1 (ENABLE_LOOPING_AT=0.0) — all 200 steps exercise the LoRA path.
 - `tmp_exec/launch_047C.sh` — full screen, ~22 min, ~$2.30. Restores fc54262
   cache, sets `TRITON_AUTOTUNE_NUM_RUNS=1`, background-stashes to
-  `/workspace/.inductor_cache_5cf60f9` after 10 min for promotion-path warm start.
+  `/workspace/.inductor_cache_d9d6bcb` after 10 min for promotion-path warm start.
+
+**Root cause of prior hang fixed:** `ENABLE_LOOPING_AT` changed from `0.35` to `0.0`.
+With 0.35, the loop-active graph was cold at the mid-training transition (~step 2300),
+causing a hang during backward-pass Triton autotune. With 0.0, loop is active from
+step 1 — autotune happens immediately (before training budget is consumed) and
+there is no mid-training graph switch.
 
 **Smoke gate before full screen:**
 1. No NaN / divergence
-2. step_time pre-loop within 10% of baseline (≥4.30M tok/s on 4×H100)
+2. step_time within 10% of baseline (≥4.30M tok/s on 4×H100)
 3. Loss at step 0 matches AC-fix-rerun within rounding (LoRA delta = 0 at init)
+4. LoRA grads non-zero from step 1 (grep "loop_ffn" in train.log)
 
 **Compile watch during full run:**
-- Expected: 10–30s step_time spike when looping flips on at frac=0.35
-  (~step 1750). Some inductor recompile on the cold LoRA subgraph paths.
-- KILL if step_time > 5× baseline for >10 steps post-spike — graph is mis-
-  cached; need a proper prewarm before retrying.
+- Expected: short (<30s) compile pause at step 1 while loop-active graph autotuned.
+- No mid-run compile spike expected (loop never transitions).
+- KILL if step_time > 5× baseline for >50 steps — graph is mis-cached.
 
 ## Failure-case branches
 

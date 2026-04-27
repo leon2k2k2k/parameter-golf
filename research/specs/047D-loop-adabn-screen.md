@@ -2,9 +2,9 @@
 
 **Slug:** `loop-adabn-screen`  
 **Created:** 2026-04-27  
-**Status:** READY  
+**Status:** READY (fix3 — remove allow_in_graph, 2026-04-27)
 **Branch:** `exp/047D-loop-adabn`  
-**Commit:** `eea2c67`  
+**Commit:** `7b38f8d` (fix3: remove allow_in_graph + launch script; prior: 40a59db = fix2)
 **Links to:** `research/ideas/loop-ffn-expressivity.md`
 
 ## Hypothesis
@@ -44,6 +44,13 @@ scaled_attn = γ_attn[p, li] * scaled_attn + β_attn[p, li]
 scaled_mlp = mlp_scale * mlp_out
 scaled_mlp = γ_mlp[p, li] * scaled_mlp + β_mlp[p, li]
 ```
+
+## Fix history
+
+- **eea2c67** (attempt 1+2): hung at backward pass of loop-active graph — NCCL/autograd deadlock.
+- **ba41fc8** (fix1: dynamo.disable): same hang — disable on a staticmethod crashes inside compiled model.forward.
+- **40a59db** (fix2: allow_in_graph module-level fn): completed cleanly but val_bpb=1.06520 ≈ baseline. Root cause: allow_in_graph marks the function opaque, blocking autograd from computing gradients to γ/β. They stayed at init forever.
+- **ac6598b / 7b38f8d** (fix3: remove allow_in_graph + ENABLE_LOOPING_AT=0.0): plain elementwise ops are natively traceable. Also loop-active from step 1 to avoid mid-training hang.
 
 ## Baseline
 
