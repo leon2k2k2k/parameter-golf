@@ -1132,7 +1132,7 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, lora_delta_up=None, lora_delta_down=None):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, lora_delta_up=None):
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(
@@ -1143,13 +1143,16 @@ class Block(nn.Module):
         )
         x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
         x_normed = self.mlp_norm(x_out) * self.ln_scale_factor
-        mlp_out = self.mlp(x_normed, up_w, down_w)
-        if lora_delta_up is not None:
-            # 050B: activation-side LoRA — delta = A@B pre-materialized outside compile.
-            # F.linear(x, delta_up) K=dim, F.linear(h, delta_down) K=hidden — both Triton-safe.
+        if lora_delta_up is not None and not getattr(self.mlp, "_calib", False):
+            # 050D: inject delta_up BEFORE activation so gradient flows through activate'(W_up @ x)
+            # rather than activate'(0) = 0. Inlines self.mlp() to intercept h_pre.
+            # Falls back to self.mlp() when _calib=True so GPTQ forward hooks fire normally.
             x_flat = x_normed.reshape(-1, x_normed.shape[-1])
-            h_lora = self.mlp._activate(F.linear(x_flat, lora_delta_up.to(x_flat.dtype)))
-            mlp_out = mlp_out + F.linear(h_lora, lora_delta_down.to(x_flat.dtype)).reshape_as(mlp_out)
+            h_pre = F.linear(x_flat, up_w.to(x_flat.dtype)) + F.linear(x_flat, lora_delta_up.to(x_flat.dtype))
+            h_act = self.mlp._activate(h_pre)
+            mlp_out = F.linear(h_act, down_w.to(x_flat.dtype)).reshape_as(x_normed)
+        else:
+            mlp_out = self.mlp(x_normed, up_w, down_w)
         x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
         return x_out
 
@@ -1265,7 +1268,8 @@ class GPT(nn.Module):
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
             self.loop_iter_embeds = None
-        # 050B: per-pass FFN LoRA. B=0-init → delta=0 at step 0, byte-identical to baseline.
+        # 050D: per-pass FFN up-LoRA injected BEFORE activation. Only up-projection LoRA
+        # (no down LoRA): gradient flows through activate'(W_up @ x) != 0 from step 0.
         self.loop_ffn_lora_rank = int(h.loop_ffn_lora_rank) if h.num_loops > 0 else 0
         if self.loop_ffn_lora_rank > 0:
             num_passes_l = h.num_loops + 1
@@ -1277,12 +1281,6 @@ class GPT(nn.Module):
             )
             self.loop_ffn_up_lora_B = nn.Parameter(
                 torch.zeros(num_passes_l, num_looped_l, r_l, h.model_dim, dtype=torch.float32)
-            )
-            self.loop_ffn_down_lora_A = nn.Parameter(
-                torch.empty(num_passes_l, num_looped_l, h.model_dim, r_l, dtype=torch.float32)
-            )
-            self.loop_ffn_down_lora_B = nn.Parameter(
-                torch.zeros(num_passes_l, num_looped_l, r_l, hidden_dim_l, dtype=torch.float32)
             )
             _pct: dict = {}
             self._enc_ffn_lora_info = []
@@ -1302,8 +1300,6 @@ class GPT(nn.Module):
         else:
             self.loop_ffn_up_lora_A = None
             self.loop_ffn_up_lora_B = None
-            self.loop_ffn_down_lora_A = None
-            self.loop_ffn_down_lora_B = None
             self._enc_ffn_lora_info = None
             self._dec_ffn_lora_info = None
         self.num_skip_weights = min(
@@ -1356,9 +1352,7 @@ class GPT(nn.Module):
             self.mlp_down_bank.data[i].mul_(proj_scale)
         if self.loop_ffn_lora_rank > 0:
             nn.init.kaiming_uniform_(self.loop_ffn_up_lora_A.data, a=math.sqrt(5))
-            nn.init.kaiming_uniform_(self.loop_ffn_down_lora_A.data, a=math.sqrt(5))
             nn.init.zeros_(self.loop_ffn_up_lora_B.data)
-            nn.init.zeros_(self.loop_ffn_down_lora_B.data)
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 if getattr(module, "_zero_init", False):
@@ -1376,21 +1370,16 @@ class GPT(nn.Module):
         ``lora_deltas`` kwarg of forward()/forward_logits()/_forward_hidden(). Never
         invoke from compiled code — fullgraph=True can't inline a function that
         contains its own narrow-K bmms (allow_in_graph also fails — Triton still
-        autotraces). Returns (delta_up, delta_down) or None."""
+        autotraces). Returns delta_up tensor [P, L, hidden, dim] or None."""
         if self.loop_ffn_up_lora_A is None:
             return None
         A_u, B_u = self.loop_ffn_up_lora_A, self.loop_ffn_up_lora_B
-        A_d, B_d = self.loop_ffn_down_lora_A, self.loop_ffn_down_lora_B
         P, L = A_u.shape[:2]
         delta_up = torch.bmm(
             A_u.reshape(P * L, A_u.shape[2], A_u.shape[3]),
             B_u.reshape(P * L, B_u.shape[2], B_u.shape[3]),
         ).reshape(P, L, A_u.shape[2], B_u.shape[3])
-        delta_down = torch.bmm(
-            A_d.reshape(P * L, A_d.shape[2], A_d.shape[3]),
-            B_d.reshape(P * L, B_d.shape[2], B_d.shape[3]),
-        ).reshape(P, L, A_d.shape[2], B_d.shape[3])
-        return delta_up, delta_down
+        return delta_up
 
     def _bank_weights(self, i):
         n = self.num_layers
@@ -1439,7 +1428,7 @@ class GPT(nn.Module):
     def _forward_hidden(self, input_ids, cu_seqlens=None, max_seqlen=0, lora_deltas=None):
         """Run the encoder/decoder stack to the final RMSNorm; returns pre-projection hidden.
         Shared by eval (softcap+projection via forward_logits) and train (fused CE path).
-        ``lora_deltas`` is the eager-computed (delta_up, delta_down) tuple from
+        ``lora_deltas`` is the eager-computed delta_up tensor [P, L, hidden, dim] from
         _compute_lora_deltas(); pass None to skip per-pass FFN LoRA injection."""
         x = self.tok_emb(input_ids)
         # SmearGate (PR #1667) with BOS leak fix (PR #1855).
@@ -1475,17 +1464,17 @@ class GPT(nn.Module):
                 _p = self._enc_iter_embed_info[step_idx]
                 if _p is not None:
                     x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
-            if self._enc_ffn_lora_info is not None:
+            if self._enc_ffn_lora_info is not None and self.looping_active:
                 _enc_info = self._enc_ffn_lora_info[step_idx]
                 if _enc_info is not None:
                     _ep, _el = _enc_info
-                    _enc_ldu, _enc_ldd = _lora_deltas[0][_ep, _el], _lora_deltas[1][_ep, _el]
+                    _enc_ldu = _lora_deltas[_ep, _el]
                 else:
-                    _enc_ldu, _enc_ldd = None, None
+                    _enc_ldu = None
             else:
-                _enc_ldu, _enc_ldd = None, None
+                _enc_ldu = None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_enc_ldu, lora_delta_down=_enc_ldd)
+            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_enc_ldu)
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
@@ -1495,15 +1484,15 @@ class GPT(nn.Module):
                 _p = self._dec_iter_embed_info[skip_idx]
                 if _p is not None:
                     x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
-            if self._dec_ffn_lora_info is not None:
+            if self._dec_ffn_lora_info is not None and self.looping_active:
                 _dec_info = self._dec_ffn_lora_info[skip_idx]
                 if _dec_info is not None:
                     _dp, _dl = _dec_info
-                    _dec_ldu, _dec_ldd = _lora_deltas[0][_dp, _dl], _lora_deltas[1][_dp, _dl]
+                    _dec_ldu = _lora_deltas[_dp, _dl]
                 else:
-                    _dec_ldu, _dec_ldd = None, None
+                    _dec_ldu = None
             else:
-                _dec_ldu, _dec_ldd = None, None
+                _dec_ldu = None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -1532,7 +1521,7 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_dec_ldu, lora_delta_down=_dec_ldd)
+                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_dec_ldu)
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
@@ -3534,14 +3523,12 @@ def train_model(h, device, val_data):
             )
             if h.loop_ffn_lora_rank > 0 and h.rank == 0:
                 _B_up = base_model.loop_ffn_up_lora_B
-                _B_dn = base_model.loop_ffn_down_lora_B
                 _A_up = base_model.loop_ffn_up_lora_A
-                _A_dn = base_model.loop_ffn_down_lora_A
+                _delta = base_model._compute_lora_deltas()
                 log(
-                    f"lora_norms: B_up={_B_up.norm().item():.5f} B_dn={_B_dn.norm().item():.5f}"
-                    f" A_up={_A_up.norm().item():.3f} A_dn={_A_dn.norm().item():.3f}"
-                    f" delta_up={(_A_up@_B_up).norm().item():.5f}"
-                    f" delta_dn={(_A_dn@_B_dn).norm().item():.5f}"
+                    f"lora_norms: B_up={_B_up.norm().item():.5f}"
+                    f" A_up={_A_up.norm().item():.3f}"
+                    f" delta_up={_delta.norm().item():.5f}"
                 )
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
