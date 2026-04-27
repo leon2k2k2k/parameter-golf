@@ -8,7 +8,7 @@
 # Accept: bpb <= 1.067. Kill: > 1.072.
 set -euo pipefail
 
-SHA="1163f75"
+SHA="787f672"
 ARM="050B-lora"
 RUNDIR="/workspace/runs/050B-lora-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
