@@ -3,8 +3,8 @@
 **Slug:** `loop-kv-shrink-screen`  
 **Created:** 2026-04-27  
 **Status:** READY  
-**Branch:** `exp/048-loop-attn-shrink`  
-**Commit:** `7d49b72`
+**Branch:** `exp/047B-loop-kv-shrink`  
+**Commit:** `02977b7`
 
 ## Hypothesis
 
@@ -88,7 +88,7 @@ Single seed (42) for screen.
 
 - Train/val: standard fineweb10B SP8192 CaseOps paths
 - Checkpoint: none (train from scratch)
-- Code: `exp/048-loop-attn-shrink` @ `7d49b72`
+- Code: `exp/047B-loop-kv-shrink` @ `02977b7`
 
 ## Checkpoints to emit
 

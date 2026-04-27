@@ -9,7 +9,7 @@
 # Accept: pre-quant bpb ≤ 1.06679 (+0.002). Kill: > 1.06979 (+0.005)
 set -euo pipefail
 
-SHA="7d49b72"
+SHA="02977b7"
 ARM="047B-loop-kv2"
 RUNDIR="/workspace/runs/047B-loop-kv-shrink-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py"
