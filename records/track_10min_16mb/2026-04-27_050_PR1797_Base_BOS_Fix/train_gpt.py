@@ -1363,10 +1363,13 @@ class GPT(nn.Module):
                 ):
                     nn.init.orthogonal_(module.weight, gain=1.0)
 
-    @torch._dynamo.disable
     def _compute_lora_deltas(self):
-        """Materialize A@B in eager (cuBLAS). Disabled from dynamo so narrow-K rank
-        matmuls never enter Triton autotune. Returns (delta_up, delta_down) or None."""
+        """Materialize A@B in eager (cuBLAS). Called by the training loop and eval
+        callers OUTSIDE the compiled graph; results are passed in via the
+        ``lora_deltas`` kwarg of forward()/forward_logits()/_forward_hidden(). Never
+        invoke from compiled code — fullgraph=True can't inline a function that
+        contains its own narrow-K bmms (allow_in_graph also fails — Triton still
+        autotraces). Returns (delta_up, delta_down) or None."""
         if self.loop_ffn_up_lora_A is None:
             return None
         A_u, B_u = self.loop_ffn_up_lora_A, self.loop_ffn_up_lora_B
@@ -1426,9 +1429,11 @@ class GPT(nn.Module):
             return lane0
         return 0.5 * (lane0 + lane1)
 
-    def _forward_hidden(self, input_ids, cu_seqlens=None, max_seqlen=0):
+    def _forward_hidden(self, input_ids, cu_seqlens=None, max_seqlen=0, lora_deltas=None):
         """Run the encoder/decoder stack to the final RMSNorm; returns pre-projection hidden.
-        Shared by eval (softcap+projection via forward_logits) and train (fused CE path)."""
+        Shared by eval (softcap+projection via forward_logits) and train (fused CE path).
+        ``lora_deltas`` is the eager-computed (delta_up, delta_down) tuple from
+        _compute_lora_deltas(); pass None to skip per-pass FFN LoRA injection."""
         x = self.tok_emb(input_ids)
         # SmearGate (PR #1667) with BOS leak fix (PR #1855).
         # Inline gate compute with .contiguous() on the slice fed to the projection so
@@ -1457,7 +1462,7 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        _lora_deltas = self._compute_lora_deltas() if (self.looping_active and self.loop_ffn_lora_rank > 0) else None
+        _lora_deltas = lora_deltas
         for step_idx, i in enumerate(enc_iter):
             if self.looping_active and self.loop_iter_embeds is not None:
                 _p = self._enc_iter_embed_info[step_idx]
@@ -1525,13 +1530,13 @@ class GPT(nn.Module):
             return F.linear(hidden, self.tok_emb.weight)
         return self.lm_head(hidden)
 
-    def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0):
-        hidden = self._forward_hidden(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0, lora_deltas=None):
+        hidden = self._forward_hidden(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_deltas=lora_deltas)
         logits_proj = self._project_logits(hidden)
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
 
-    def forward(self, input_ids, target_ids, cu_seqlens=None, max_seqlen=0):
-        hidden = self._forward_hidden(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    def forward(self, input_ids, target_ids, cu_seqlens=None, max_seqlen=0, lora_deltas=None):
+        hidden = self._forward_hidden(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_deltas=lora_deltas)
         logits_proj = self._project_logits(hidden)
         flat_targets = target_ids.reshape(-1)
         # Fused softcapped-CE kernel (training path only). Applies softcap inside the
@@ -2268,10 +2273,17 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
             hook_module.register_forward_hook(make_output_hook("tok_emb.weight"))
         )
     model.eval()
+    # Per-pass FFN LoRA: pre-fold deltas in eager (see _compute_lora_deltas
+    # docstring). collect_hessians runs on the eager base_model directly.
+    _lora_deltas = (
+        model._compute_lora_deltas()
+        if (model.looping_active and model.loop_ffn_lora_rank > 0)
+        else None
+    )
     with torch.no_grad():
         for _ in range(n_calibration_batches):
             x, _ = train_loader.next_batch(h.train_batch_tokens, h.grad_accum_steps)
-            model.forward_logits(x)
+            model.forward_logits(x, lora_deltas=_lora_deltas)
     for hook in hooks:
         hook.remove()
     for i, block in enumerate(model.blocks):
@@ -2695,6 +2707,20 @@ def eval_val(h, device, val_data, model, forward_logits_fn=None):
         else forward_logits_fn
     )
     model.eval()
+    # Resolve the eager GPT instance through DDP / torch.compile wrappers so we
+    # can pre-fold the per-pass FFN LoRA deltas in eager. _compute_lora_deltas
+    # MUST NOT be called from inside the compiled graph — see the docstring
+    # there. Returns None when LoRA disabled or pre-loop activation.
+    _eager_gpt = model
+    if hasattr(_eager_gpt, "module"):
+        _eager_gpt = _eager_gpt.module
+    if hasattr(_eager_gpt, "_orig_mod"):
+        _eager_gpt = _eager_gpt._orig_mod
+    _lora_deltas = (
+        _eager_gpt._compute_lora_deltas()
+        if (_eager_gpt.looping_active and _eager_gpt.loop_ffn_lora_rank > 0)
+        else None
+    )
     global BOS_ID
     if BOS_ID is None:
         BOS_ID = 1
@@ -2714,7 +2740,7 @@ def eval_val(h, device, val_data, model, forward_logits_fn=None):
             )
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 logits = run_forward_logits(
-                    x[None], cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+                    x[None], cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_deltas=_lora_deltas
                 ).detach()
             per_token_loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)).float(),
@@ -3321,8 +3347,17 @@ def train_model(h, device, val_data):
             x, y, cu_seqlens, _max_seqlen = train_loader.next_batch(
                 h.train_batch_tokens, h.grad_accum_steps
             )
+            # Per-pass FFN LoRA: pre-fold A@B in eager so narrow-K rank matmuls
+            # stay out of the compiled graph (fullgraph=True can't inline a
+            # @dynamo.disable'd helper, and allow_in_graph still triggers Triton
+            # autotrace). Returns None when LoRA disabled or pre-loop activation.
+            _lora_deltas = (
+                base_model._compute_lora_deltas()
+                if (base_model.looping_active and base_model.loop_ffn_lora_rank > 0)
+                else None
+            )
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                loss = model(x, y, cu_seqlens=cu_seqlens, max_seqlen=h.train_seq_len)
+                loss = model(x, y, cu_seqlens=cu_seqlens, max_seqlen=h.train_seq_len, lora_deltas=_lora_deltas)
             train_loss += loss.detach()
             (loss / h.grad_accum_steps).backward()
         train_loss /= h.grad_accum_steps
@@ -3364,6 +3399,15 @@ def train_model(h, device, val_data):
         )
         log(f"warmup_cu_buckets:{','.join(str(b) for b in warmup_cu_buckets)} iters_each:{warmup_cu_iters}")
         def _run_cu_bucket_warmup():
+            # Pre-fold per-pass FFN LoRA in eager so the warmup compiles the same
+            # graph signature (lora_deltas=tensor) that real training will hit
+            # post-loop-activation. Without this the compile cache misses when
+            # step_fn first passes a tensor, causing a 10+ min mid-run recompile.
+            _lora_deltas = (
+                base_model._compute_lora_deltas()
+                if (base_model.looping_active and base_model.loop_ffn_lora_rank > 0)
+                else None
+            )
             for bucket_len in warmup_cu_buckets:
                 boundaries = list(range(0, x.size(1), max(h.train_seq_len, 1)))
                 if boundaries[-1] != x.size(1):
@@ -3373,7 +3417,7 @@ def train_model(h, device, val_data):
                 for _ in range(warmup_cu_iters):
                     optimizers.zero_grad_all()
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                        wloss = model(x, y, cu_seqlens=cu, max_seqlen=h.train_seq_len)
+                        wloss = model(x, y, cu_seqlens=cu, max_seqlen=h.train_seq_len, lora_deltas=_lora_deltas)
                     (wloss / h.grad_accum_steps).backward()
             optimizers.zero_grad_all()
         _run_cu_bucket_warmup()
