@@ -3275,6 +3275,7 @@ def train_model(h, device, val_data):
     training_time_ms = 0.0
     stop_after_step = None
     torch.cuda.synchronize()
+    _dynamo_compiles_at_t0 = torch._dynamo.utils.counters["stats"].get("calls_captured", 0)
     t0 = time.perf_counter()
     step = 0
     while True:
@@ -3315,6 +3316,10 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
+        _dynamo_now = torch._dynamo.utils.counters["stats"].get("calls_captured", 0)
+        if _dynamo_now > _dynamo_compiles_at_t0:
+            log(f"MID_RUN_RECOMPILE_DETECTED: calls_captured {_dynamo_compiles_at_t0}->{_dynamo_now} step:{step} — aborting")
+            raise RuntimeError(f"Mid-run torch.compile at step {step}. Fix always-tensor pattern or remove mid-run _run_cu_bucket_warmup.")
         train_loss = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
