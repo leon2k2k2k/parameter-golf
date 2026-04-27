@@ -1227,12 +1227,11 @@ class MLP(nn.Module):
         return F.linear(hidden, down_w.to(x.dtype))
 
 
-@torch._dynamo.allow_in_graph
 def _adabn_apply(x, γ, β):
-    # Spec 047D: per-pass (γ, β) scale+shift on a residual contribution.
-    # Module-level + allow_in_graph: dynamo includes this as an opaque graph node so
-    # inductor never Triton-compiles the backward over these repeated parameter slices.
-    # @dynamo.disable on a method crashes inside compiled model.forward.
+    # Spec 047D fix3: plain elementwise ops — no dynamo decorator.
+    # Prior fix2 used @allow_in_graph which prevented gradient flow to γ/β
+    # (dynamo treated the function as opaque, bypassing autograd for the params).
+    # Plain ops (γ*x + β) are natively traceable by dynamo; gradients flow normally.
     return γ.to(dtype=x.dtype)[None, None, :] * x + β.to(dtype=x.dtype)[None, None, :]
 
 
