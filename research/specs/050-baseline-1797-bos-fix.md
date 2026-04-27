@@ -1,4 +1,4 @@
-# Spec 050 — Baseline migration to PR #1797 + BOS fix
+# Spec 050 — Baseline migration to PR #1797 + BOS fix + 2 hparam lifts
 
 **Date:** 2026-04-27
 **Type:** Baseline migration (lands directly on `research` per CLAUDE.md exception).
@@ -37,28 +37,24 @@ Inherited from #1797:
 
 Added in this spec (from #1855):
 - **SmearGate BOS-fix** — masks the previous-token term wherever the current position is BOS, applied symmetrically in `_forward_hidden` and `forward_ttt`. Fixes a real cross-document leak in packed val streams.
+- **`BETA2` default 0.95 → 0.99** — AdamW β2 for non-Muon parameters (gates, LayerNorms). Smoother variance estimate, more stable training. Greedy-validated by codemath3000.
+- **`SPARSE_ATTN_GATE_SCALE` default 1.0 → 0.5** — multiplicative scale on sparse attn-output gate output. Softer gating, less aggressive selectivity early in training. Greedy-validated by codemath3000.
 
-NOT inherited from #1855 (deferred for cleaner attribution):
-- 9-hparam greedy bundle (WARMDOWN_FRAC=0.85, BETA2=0.99, MLP_CLIP=11.5, EMBED_CLIP=14.0, SPARSE_ATTN_GATE_SCALE=0.5, TTT_LORA_RANK=80, TTT_WD=0.5, TTT_BETA2=0.99, PHASED_TTT_PREFIX_DOCS=2500). Each can be re-introduced as a separate spec if needed.
-- lrzip+ZPAQ per-group serializer.
+NOT inherited from #1855 (deferred):
+- `WARMDOWN_FRAC=0.85` — still on default 0.75. Moves loop-activation timing relative to LR floor; defer until 047 family settles.
+- 6 post-training hparams (`MLP_CLIP_SIGMAS`, `EMBED_CLIP_SIGMAS`, `TTT_BETA2`, `TTT_WEIGHT_DECAY`, `TTT_LORA_RANK`, `PHASED_TTT_PREFIX_DOCS`) — these are post-training only; can be lifted as a bundled spec 053 once 050 is verified.
+- lrzip+ZPAQ per-group serializer — separate spec 054.
 
 ## Code changes
 
 - **Branch:** none — lands directly on `research` (baseline-migration exception per CLAUDE.md).
 - **New directory:** `records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/`
 - **Source:** PR #1797's `2026-04-24_PR1787Base_Smear_LQERAsym_PhasedTTT_1.06157/` directory, copied verbatim.
-- **Patch:** BOS-fix applied to `train_gpt.py` at two sites (line numbers approximate, post-copy):
+- **Patches in `train_gpt.py`:**
+
+**(1) BOS-fix at two sites** (`_forward_hidden` ~L1336–1337 and `forward_ttt` ~L1435–1436):
 
 ```diff
--        # SmearGate (PR #1667). Inline gate compute with .contiguous() on the slice fed
--        # to the projection so torch.compile fullgraph is happy. lam=0 + W=0 -> identity
--        # at init. This block runs unconditionally on the smear path; the cat keeps
--        # position 0 untouched so causality holds.
-+        # SmearGate (PR #1667) with BOS leak fix (PR #1855).
-+        # Inline gate compute with .contiguous() on the slice fed to the projection so
-+        # torch.compile fullgraph is happy. lam=0 + W=0 -> identity at init.
-+        # The not_bos mask zeros the previous-token term wherever the current token is
-+        # BOS — fixes cross-document leak in packed val streams.
          if self.smear_gate_enabled:
              sl = self.smear_lambda.to(dtype=x.dtype)
              gate_in = x[:, 1:, : self.smear_window].contiguous()
@@ -68,7 +64,17 @@ NOT inherited from #1855 (deferred for cleaner attribution):
 +            x = torch.cat([x[:, :1], x[:, 1:] + g * x[:, :-1] * not_bos], dim=1)
 ```
 
-Same patch in `forward_ttt`.
+**(2) Default hparam bumps** (line 280, line 360):
+
+```diff
+-    beta2 = float(os.environ.get("BETA2", 0.95))
++    beta2 = float(os.environ.get("BETA2", 0.99))  # 050: bumped 0.95 -> 0.99 (PR #1855)
+...
+-    sparse_attn_gate_scale = float(os.environ.get("SPARSE_ATTN_GATE_SCALE", 1.0))
++    sparse_attn_gate_scale = float(os.environ.get("SPARSE_ATTN_GATE_SCALE", 0.5))  # 050: bumped 1.0 -> 0.5 (PR #1855)
+```
+
+Both env vars still overridable at runtime if needed for ablation.
 
 ## Hardware ladder
 

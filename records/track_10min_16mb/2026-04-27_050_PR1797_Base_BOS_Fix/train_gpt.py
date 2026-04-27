@@ -277,7 +277,7 @@ class Hyperparameters:
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 1500))
     muon_row_normalize = bool(int(os.environ.get("MUON_ROW_NORMALIZE", "1")))
     beta1 = float(os.environ.get("BETA1", 0.9))
-    beta2 = float(os.environ.get("BETA2", 0.95))
+    beta2 = float(os.environ.get("BETA2", 0.99))  # 050: bumped 0.95 -> 0.99 (PR #1855)
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-08))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
@@ -357,7 +357,7 @@ class Hyperparameters:
     # Mutually exclusive with ATTN_OUT_GATE_ENABLED and GATED_ATTN_ENABLED.
     sparse_attn_gate_enabled = bool(int(os.environ.get("SPARSE_ATTN_GATE_ENABLED", "0")))
     sparse_attn_gate_init_std = float(os.environ.get("SPARSE_ATTN_GATE_INIT_STD", 0.0))
-    sparse_attn_gate_scale = float(os.environ.get("SPARSE_ATTN_GATE_SCALE", 1.0))
+    sparse_attn_gate_scale = float(os.environ.get("SPARSE_ATTN_GATE_SCALE", 0.5))  # 050: bumped 1.0 -> 0.5 (PR #1855)
     # LQER asymmetric rank-k correction on top-K quant-error tensors (PR #1530 v2 port).
     # Computes SVD of E = W_fp - W_quant, packs top-r A,B as INT2/INT4 (asym) or INTk (sym).
     lqer_enabled = bool(int(os.environ.get("LQER_ENABLED", "1")))
