@@ -82,7 +82,7 @@ if ! grep -q "loop_rewarm" "$SMOKE_LOG"; then
 fi
 # Check that training continued past loop activation (prior hang showed no steps after rewarm)
 POST_LOOP_STEPS=$(grep "train_loss:" "$SMOKE_LOG" | awk -F'/' '{print $1}' | tail -1 | tr -d ' ')
-LOOP_STEP=$(grep "layer_loop:enabled" "$SMOKE_LOG" | grep -o 'step:[0-9]*' | grep -o '[0-9]*')
+LOOP_STEP=$(grep "layer_loop:enabled" "$SMOKE_LOG" | tail -1 | grep -o 'step:[0-9]*' | grep -o '[0-9]*')
 if [ -n "$POST_LOOP_STEPS" ] && [ -n "$LOOP_STEP" ] && [ "$POST_LOOP_STEPS" -gt "$LOOP_STEP" ]; then
   echo "[launch] Smoke PASSED: loop activated at step ${LOOP_STEP}, training continued to step ${POST_LOOP_STEPS}."
 else
