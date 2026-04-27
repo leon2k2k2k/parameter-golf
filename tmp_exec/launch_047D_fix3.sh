@@ -11,7 +11,7 @@
 # Accept if val_bpb ≤ 1.06479.
 set -euo pipefail
 
-SHA="PLACEHOLDER_FIX3_SHA"
+SHA="ac6598b"
 ARM="047D-fix3"
 RUNDIR="/workspace/runs/047D-loop-adabn-screen/fix3_seed_42"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py"
