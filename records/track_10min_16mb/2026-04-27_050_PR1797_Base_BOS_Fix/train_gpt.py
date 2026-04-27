@@ -3410,11 +3410,7 @@ def train_model(h, device, val_data):
             # graph signature (lora_deltas=tensor) that real training will hit
             # post-loop-activation. Without this the compile cache misses when
             # step_fn first passes a tensor, causing a 10+ min mid-run recompile.
-            _lora_deltas = (
-                base_model._compute_lora_deltas()
-                if (base_model.looping_active and base_model.loop_ffn_lora_rank > 0)
-                else None
-            )
+            # Recompute per backward — the bmm's autograd graph is freed by .backward().
             for bucket_len in warmup_cu_buckets:
                 boundaries = list(range(0, x.size(1), max(h.train_seq_len, 1)))
                 if boundaries[-1] != x.size(1):
@@ -3422,6 +3418,11 @@ def train_model(h, device, val_data):
                 cu = torch.full((bucket_len,), x.size(1), dtype=torch.int32, device=device)
                 cu[: len(boundaries)] = torch.tensor(boundaries, dtype=torch.int32, device=device)
                 for _ in range(warmup_cu_iters):
+                    _lora_deltas = (
+                        base_model._compute_lora_deltas()
+                        if (base_model.looping_active and base_model.loop_ffn_lora_rank > 0)
+                        else None
+                    )
                     optimizers.zero_grad_all()
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                         wloss = model(x, y, cu_seqlens=cu, max_seqlen=h.train_seq_len, lora_deltas=_lora_deltas)
