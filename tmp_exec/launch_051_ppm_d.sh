@@ -8,7 +8,7 @@
 # fresh pod before Phase 1 (real training). No separate prewarm pod needed.
 set -euo pipefail
 
-SHA="cb3079a"
+SHA="cfdc0c4"
 ARM="051-ppm-d"
 RUNDIR="/workspace/runs/051-perpass-mlp-untied-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
@@ -55,14 +55,14 @@ export EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 GPTQ_CALIBRATION_BATCHES=16 GPTQ_RESE
 export SEED=42 PHASED_TTT_NUM_PHASES=3 TTT_ENABLED=0
 
 # ── Phase 0: inline prewarm ───────────────────────────────────────────────
-# ENABLE_LOOPING_AT=0.05 → loop activates at step ~25, forcing inductor to
+# ENABLE_LOOPING_AT=0.01 → loop activates at step ~25, forcing inductor to
 # compile the new [1024,512] half-width MLP kernels before Phase 1 starts.
 # MAX_WALLCLOCK_SECONDS=900 gives 15 min — enough for full cold autotune.
 # Exits normally; kernels land in /tmp/inductor_cache for Phase 1 to reuse.
 CACHE_SIZE_BEFORE=$(du -sh /tmp/inductor_cache 2>/dev/null | cut -f1 || echo "0")
 echo "[launch] Phase 0: inline prewarm (cold compile [1024,512] kernels)"
 echo "[launch] Cache before: ${CACHE_SIZE_BEFORE}"
-export ENABLE_LOOPING_AT=0.05
+export ENABLE_LOOPING_AT=0.01
 export MAX_WALLCLOCK_SECONDS=900
 export RUN_ID="051-ppm-d-prewarm"
 torchrun --standalone --nproc_per_node=4 \
