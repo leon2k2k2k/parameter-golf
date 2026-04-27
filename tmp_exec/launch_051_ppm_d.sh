@@ -8,7 +8,7 @@
 # fresh pod before Phase 1 (real training). No separate prewarm pod needed.
 set -euo pipefail
 
-SHA="6e6dd1e"
+SHA="c91c0db"
 ARM="051-ppm-d"
 RUNDIR="/workspace/runs/051-perpass-mlp-untied-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
