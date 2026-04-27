@@ -31,3 +31,7 @@ runs/**/train.log
 # - runs/**/loss_curve.csv
 # - runs/**/notes.md
 # - runs/**/checkpoints.md
+
+
+# Cached raw NLL arrays from val-analysis runs (multi-hundred MB; reproducible from the model)
+testing/outputs/**/*.npz
