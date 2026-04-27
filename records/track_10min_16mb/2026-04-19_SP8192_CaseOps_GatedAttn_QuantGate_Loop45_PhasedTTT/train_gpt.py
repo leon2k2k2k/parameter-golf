@@ -2989,9 +2989,11 @@ def _decompress(data, compressor):
     return raw
 
 
-def _unbank_state_dict(state_dict, num_layers):
+def _unbank_state_dict(state_dict, num_layers, loop_start=-1, loop_end=-1):
     sd = {}
     n = num_layers
+    has_loop_kv = "loop_kv_bank" in state_dict
+    num_looped = (loop_end - loop_start + 1) if (has_loop_kv and 0 <= loop_start <= loop_end < n) else 0
     for k, v in state_dict.items():
         t = v.detach().cpu() if v is not None else None
         if k == "qo_bank":
@@ -3000,8 +3002,15 @@ def _unbank_state_dict(state_dict, num_layers):
                 sd[f"blocks.{i}.attn.proj.weight"] = t[n + i]
         elif k == "kv_bank":
             for i in range(n):
+                if num_looped > 0 and loop_start <= i <= loop_end:
+                    continue  # loop layer K/V live in loop_kv_bank
                 sd[f"blocks.{i}.attn.c_k.weight"] = t[i]
                 sd[f"blocks.{i}.attn.c_v.weight"] = t[n + i]
+        elif k == "loop_kv_bank":
+            for local in range(num_looped):
+                layer_i = loop_start + local
+                sd[f"blocks.{layer_i}.attn.c_k.weight"] = t[local]
+                sd[f"blocks.{layer_i}.attn.c_v.weight"] = t[num_looped + local]
         elif k == "mlp_up_bank":
             for i in range(n):
                 sd[f"blocks.{i}.mlp.fc.weight"] = t[i]
@@ -3014,16 +3023,25 @@ def _unbank_state_dict(state_dict, num_layers):
     return sd
 
 
-def _rebank_state_dict(flat_sd, num_layers, model_dim, kv_dim, hidden_dim):
+def _rebank_state_dict(flat_sd, num_layers, model_dim, kv_dim, hidden_dim, loop_start=-1, loop_end=-1, loop_kv_dim=0):
     sd = {}
     n = num_layers
+    num_looped = (loop_end - loop_start + 1) if (loop_kv_dim > 0 and 0 <= loop_start <= loop_end < n) else 0
     sd["qo_bank"] = torch.zeros(2 * n, model_dim, model_dim)
     sd["kv_bank"] = torch.zeros(2 * n, kv_dim, model_dim)
+    if num_looped > 0:
+        sd["loop_kv_bank"] = torch.zeros(2 * num_looped, loop_kv_dim, model_dim)
     for i in range(n):
         sd["qo_bank"][i] = flat_sd[f"blocks.{i}.attn.c_q.weight"]
         sd["qo_bank"][n + i] = flat_sd[f"blocks.{i}.attn.proj.weight"]
-        sd["kv_bank"][i] = flat_sd[f"blocks.{i}.attn.c_k.weight"]
-        sd["kv_bank"][n + i] = flat_sd[f"blocks.{i}.attn.c_v.weight"]
+        if num_looped > 0 and loop_start <= i <= loop_end:
+            local = i - loop_start
+            sd["loop_kv_bank"][local] = flat_sd[f"blocks.{i}.attn.c_k.weight"]
+            sd["loop_kv_bank"][num_looped + local] = flat_sd[f"blocks.{i}.attn.c_v.weight"]
+            # kv_bank loop rows stay zero (never used at runtime)
+        else:
+            sd["kv_bank"][i] = flat_sd[f"blocks.{i}.attn.c_k.weight"]
+            sd["kv_bank"][n + i] = flat_sd[f"blocks.{i}.attn.c_v.weight"]
     sd["mlp_up_bank"] = torch.zeros(n, hidden_dim, model_dim)
     sd["mlp_down_bank"] = torch.zeros(n, model_dim, hidden_dim)
     for i in range(n):
@@ -3274,7 +3292,9 @@ def serialize(h, base_model, code):
     if h.is_main_process:
         log(f"Code size (uncompressed): {code_bytes_uncompressed} bytes")
         log(f"Code size (compressed): {code_bytes} bytes")
-    sd_cpu = _unbank_state_dict(base_model.state_dict(), h.num_layers)
+    _lkv_start = h.loop_start if getattr(h, "loop_layer_num_kv_heads", 0) > 0 and h.num_loops > 0 else -1
+    _lkv_end = h.loop_end if _lkv_start >= 0 else -1
+    sd_cpu = _unbank_state_dict(base_model.state_dict(), h.num_layers, loop_start=_lkv_start, loop_end=_lkv_end)
     device = torch.device("cuda", h.local_rank)
     t0 = time.perf_counter()
     calib_loader = ShuffledSequenceLoader(h, device)
@@ -3310,7 +3330,9 @@ def serialize(h, base_model, code):
 def deserialize(h, device):
     eval_model = GPT(h).to(device).bfloat16()
     restore_fp32_params(eval_model)
-    flat_template = _unbank_state_dict(eval_model.state_dict(), h.num_layers)
+    _lkv_start = h.loop_start if getattr(h, "loop_layer_num_kv_heads", 0) > 0 and h.num_loops > 0 else -1
+    _lkv_end = h.loop_end if _lkv_start >= 0 else -1
+    flat_template = _unbank_state_dict(eval_model.state_dict(), h.num_layers, loop_start=_lkv_start, loop_end=_lkv_end)
     with open(h.quantized_model_path, "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(
@@ -3319,8 +3341,9 @@ def deserialize(h, device):
     deq_flat = dequantize_mixed(quant_state["w"], quant_state["m"], flat_template)
     head_dim = h.model_dim // h.num_heads
     kv_dim = h.num_kv_heads * head_dim
+    loop_kv_dim = h.loop_layer_num_kv_heads * head_dim if getattr(h, "loop_layer_num_kv_heads", 0) > 0 and h.num_loops > 0 else 0
     hidden_dim = int(h.mlp_mult * h.model_dim)
-    deq_state = _rebank_state_dict(deq_flat, h.num_layers, h.model_dim, kv_dim, hidden_dim)
+    deq_state = _rebank_state_dict(deq_flat, h.num_layers, h.model_dim, kv_dim, hidden_dim, loop_start=_lkv_start, loop_end=_lkv_end, loop_kv_dim=loop_kv_dim)
     eval_model.load_state_dict(deq_state, strict=True)
     # Slope warmdown sync: if a slope switch was configured, the trained
     # (and quantized) weights were optimized for slope=h.slope_warmdown after
