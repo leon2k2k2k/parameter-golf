@@ -3408,18 +3408,16 @@ def train_model(h, device, val_data):
         for blk in base_model.blocks:
             blk.attn.rotary(num_tokens_local, device, torch.bfloat16)
         cu_bucket_size = train_loader.cu_bucket_size
-        warmup_cu_buckets = tuple(cu_bucket_size * i for i in range(1, 5))
-        warmup_cu_iters = 3
+        warmup_cu_buckets = tuple(cu_bucket_size * i for i in range(1, 9))
+        warmup_cu_iters = 2
         x, y, cu_seqlens, _ = train_loader.next_batch(
             h.train_batch_tokens, h.grad_accum_steps
         )
         log(f"warmup_cu_buckets:{','.join(str(b) for b in warmup_cu_buckets)} iters_each:{warmup_cu_iters}")
         def _run_cu_bucket_warmup():
-            # Pre-fold per-pass FFN LoRA in eager so the warmup compiles the same
-            # graph signature (lora_deltas=tensor) that real training will hit
-            # post-loop-activation. Without this the compile cache misses when
-            # step_fn first passes a tensor, causing a 10+ min mid-run recompile.
-            # Recompute per backward — the bmm's autograd graph is freed by .backward().
+            # Pre-compile all cu_seqlens bucket variants so no new graph is traced
+            # mid-training. warmup_cu_buckets covers 8 sizes (up to 512 documents)
+            # to handle any realistic batch document count at loop activation.
             for bucket_len in warmup_cu_buckets:
                 boundaries = list(range(0, x.size(1), max(h.train_seq_len, 1)))
                 if boundaries[-1] != x.size(1):
