@@ -1,6 +1,6 @@
 #!/bin/bash
 # Spec 050B — Per-pass FFN LoRA on 1797 baseline (050A + LOOP_FFN_LORA_RANK=2)
-# always-tensor fix (a785c91): identity zero buffers for non-loop steps, single
+# always-tensor fix (a680014): identity zero buffers for non-loop steps, single
 # Block.forward graph variant, no mid-run recompile at loop activation.
 # Step 1: 200s sanity smoke at ENABLE_LOOPING_AT=0.05 — loop fires at ~10s,
 #   verifies post-rewarm training runs (prior hang was post-rewarm).
@@ -8,7 +8,7 @@
 # Accept: bpb <= 1.067. Kill: > 1.072.
 set -euo pipefail
 
-SHA="a785c91"
+SHA="a680014"
 ARM="050B-lora"
 RUNDIR="/workspace/runs/050B-lora-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
