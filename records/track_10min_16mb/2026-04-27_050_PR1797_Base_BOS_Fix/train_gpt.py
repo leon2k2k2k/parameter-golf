@@ -1299,10 +1299,6 @@ class GPT(nn.Module):
                     self._dec_ffn_lora_info.append((pi, idx - h.loop_start))
                 else:
                     self._dec_ffn_lora_info.append(None)
-            # Identity zero deltas for non-loop-layer steps — always pass real tensors so
-            # Block.forward has one compiled graph variant (never None→Tensor switch mid-run).
-            self.register_buffer('_lora_delta_up_id', torch.zeros(hidden_dim_l, h.model_dim))
-            self.register_buffer('_lora_delta_down_id', torch.zeros(h.model_dim, hidden_dim_l))
         else:
             self.loop_ffn_up_lora_A = None
             self.loop_ffn_up_lora_B = None
@@ -1485,7 +1481,7 @@ class GPT(nn.Module):
                     _ep, _el = _enc_info
                     _enc_ldu, _enc_ldd = _lora_deltas[0][_ep, _el], _lora_deltas[1][_ep, _el]
                 else:
-                    _enc_ldu, _enc_ldd = self._lora_delta_up_id, self._lora_delta_down_id
+                    _enc_ldu, _enc_ldd = None, None
             else:
                 _enc_ldu, _enc_ldd = None, None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
@@ -1505,7 +1501,7 @@ class GPT(nn.Module):
                     _dp, _dl = _dec_info
                     _dec_ldu, _dec_ldd = _lora_deltas[0][_dp, _dl], _lora_deltas[1][_dp, _dl]
                 else:
-                    _dec_ldu, _dec_ldd = self._lora_delta_up_id, self._lora_delta_down_id
+                    _dec_ldu, _dec_ldd = None, None
             else:
                 _dec_ldu, _dec_ldd = None, None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
