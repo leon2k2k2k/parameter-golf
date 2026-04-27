@@ -19,9 +19,9 @@
 # invoking this script, OR see launch_047C_smoke.sh.
 set -euo pipefail
 
-SHA="5cf60f9"
+SHA="94faf52"
 ARM="047C"
-RUNDIR="/workspace/runs/047C-per-pass-lora-ffn/seed_314"
+RUNDIR="/workspace/runs/047C-per-pass-lora-ffn/seed_42"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py"
 
 # ── 1. Git setup (all git ops here — none after this block) ───────────────
@@ -80,7 +80,7 @@ export RECUR_ALPHA_ENABLED=1 RECUR_DIAG_P2P_COS=0 SMEAR_GATE_ENABLED=1
 export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENABLED=1 LQER_ASYM_GROUP=64
 export SPINQUANT_ENABLED=0 SPINQUANT_SEED=42 SPINQUANT_SITES='attn_in,attn_proj_in,mlp_in,mlp_proj_in'
 export MLP_OUTER_ACTIVATION=leaky_relu_square NEGATIVE_SLOPE=0.5 SLOPE_WARMDOWN=-1.0
-export SEED=314 MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-1200}"
+export SEED=42 MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-1200}"
 export PHASED_TTT_ENABLED=3 PHASED_TTT_NUM_PHASES=3
 export RUN_ID="047C-per-pass-lora-ffn"
 
