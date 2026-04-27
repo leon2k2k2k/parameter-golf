@@ -4,7 +4,7 @@
 **Created:** 2026-04-27
 **Status:** READY
 **Branch:** `exp/047C-per-pass-lora-ffn` (same code as 047C — only config differs)
-**Commit:** `d9d6bcb` (ENABLE_LOOPING_AT=0.0 fix)
+**Commit:** `92ce3b7` (re-warmup at loop activation + ENABLE_LOOPING_AT=0.35)
 **Links to:** `research/ideas/per-pass-lora-ffn.md`, `research/specs/047C-per-pass-lora-ffn.md`
 
 ## Hypothesis
@@ -42,13 +42,13 @@ then-linear LR, PHASED_TTT_NUM_PHASES=1). Two motivations:
 
 ## Code changes
 
-**No new code.** Uses `exp/047C-per-pass-lora-ffn` @ `d9d6bcb` — same LoRA implementation.
+**No new code.** Uses `exp/047C-per-pass-lora-ffn` @ `92ce3b7` — same LoRA implementation.
 
 **Config diff vs 039bL:**
 
 ```bash
 LOOP_FFN_LORA_RANK=2             # new; default 0
-ENABLE_LOOPING_AT=0.0            # changed from 0.35 (prevents mid-run hang)
+ENABLE_LOOPING_AT="${ENABLE_LOOPING_AT:-0.35}"  # standard; re-warmup handles hang
 ```
 
 **039bL config to inherit (the differences from 045 armAC-fix):**
@@ -84,7 +84,7 @@ Single seed: **42** (matches 039bL).
 
 - Data: `/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/...`
 - Tokenizer: fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model
-- Code: `exp/047C-per-pass-lora-ffn` @ `d9d6bcb`
+- Code: `exp/047C-per-pass-lora-ffn` @ `92ce3b7`
 - Hotstart: none (train from scratch like 039bL)
 
 Paths identical across JP and NE-1 per `[JP and NE-1 volume layout]`.
@@ -116,7 +116,7 @@ Retention: under `runs/047E-lora-ffn-on-039bL-base/seed_42/`.
 ## Open questions for interview
 
 1. **LR schedule compatibility.** `LR_SCHEDULE_MODE=floor_then_linear` is a 039b feature. Confirm
-   the `d9d6bcb` code supports `SECOND_HALF_FLOOR_LR`. If not, fall back to cosine (standard).
+   the `92ce3b7` code supports `SECOND_HALF_FLOOR_LR`. If not, fall back to cosine (standard).
 2. **Hotstart checkpoint.** 039bL had no hotstart; start from scratch.
 3. **Cache reuse.** fc54262 cache has loop-active non-LoRA kernels. LoRA activation path is new →
    expect short autotune at step 1. TRITON_AUTOTUNE_NUM_RUNS=1 bounds cost.

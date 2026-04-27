@@ -4,7 +4,7 @@
 **Created:** 2026-04-27
 **Status:** READY
 **Branch:** `exp/047D-loop-adabn` (same code as 047D fix3 — only config differs)
-**Commit:** `7b38f8d` (fix3: remove allow_in_graph + SHA update)
+**Commit:** `06634a5` (fix4: re-warmup at loop activation + ENABLE_LOOPING_AT=0.35)
 **Links to:** `research/ideas/loop-ffn-expressivity.md`, `research/specs/047D-loop-adabn-screen.md`
 
 ## Hypothesis
@@ -40,13 +40,13 @@
 
 ## Code changes
 
-**No new code.** Uses `exp/047D-loop-adabn` @ `7b38f8d` — fix3 code (no allow_in_graph).
+**No new code.** Uses `exp/047D-loop-adabn` @ `06634a5` — fix4 code (no allow_in_graph, re-warmup).
 
 **Config diff vs 039bL:**
 
 ```bash
 LOOP_ADABN=1                     # new
-ENABLE_LOOPING_AT=0.0            # changed from 0.35 (prevents mid-run hang)
+ENABLE_LOOPING_AT="${ENABLE_LOOPING_AT:-0.35}"  # standard; re-warmup handles hang
 ```
 
 **039bL config to inherit:**
@@ -83,7 +83,7 @@ Single seed: **42** (matches 039bL).
 
 - Data: `/workspace/parameter-golf/data/datasets/fineweb10B_sp8192_caseops/...`
 - Tokenizer: fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model
-- Code: `exp/047D-loop-adabn` @ `7b38f8d`
+- Code: `exp/047D-loop-adabn` @ `06634a5`
 - Hotstart: none (train from scratch)
 
 ## Checkpoints to emit
@@ -114,7 +114,7 @@ Retention: under `runs/047F-adabn-on-039bL-base/seed_42/`.
 
 ## Open questions for interview
 
-1. **LR schedule compatibility.** Verify `d9d6bcb` / `7b38f8d` code on `exp/047D-loop-adabn`
+1. **LR schedule compatibility.** Verify `06634a5` code on `exp/047D-loop-adabn`
    supports `LR_SCHEDULE_MODE=floor_then_linear` and `SECOND_HALF_FLOOR_LR`. If not, use cosine.
 2. **Fix3 cache.** If `/workspace/.inductor_cache_40a59db_adabn` is on volume and fix3's forward
    graph matches, restore it. Otherwise cold-start (budget 900s autotune).
