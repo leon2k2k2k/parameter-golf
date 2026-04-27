@@ -1,14 +1,15 @@
 #!/bin/bash
 # Spec 051 — PPM-D: enc/dec MLP bank split on loop layers 3-5
-# Zero param cost MLP untying: enc visits use first half, dec visits use second half.
+# MLP untying: enc visits use mlp_up/down_bank_enc, dec visits use mlp_up/down_bank_dec.
+# Separate nn.Parameters (shape [n_loop, h2, dim]) — no runtime slicing in compiled graph.
 # Compare to 050A baseline pre-quant EMA bpb 1.06484.
 # Accept: bpb <= 1.064. Kill: > 1.068.
 #
-# Self-contained: Phase 0 (inline prewarm) compiles new [1024,512] kernels on any
-# fresh pod before Phase 1 (real training). No separate prewarm pod needed.
+# Self-contained: Phase 0 (inline prewarm) compiles kernels on any fresh pod
+# before Phase 1 (real training). No separate prewarm pod needed.
 set -euo pipefail
 
-SHA="cfdc0c4"
+SHA="ffc96b8"
 ARM="051-ppm-d"
 RUNDIR="/workspace/runs/051-perpass-mlp-untied-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
@@ -55,14 +56,14 @@ export EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 GPTQ_CALIBRATION_BATCHES=16 GPTQ_RESE
 export SEED=42 PHASED_TTT_NUM_PHASES=3 TTT_ENABLED=0
 
 # ── Phase 0: inline prewarm ───────────────────────────────────────────────
-# ENABLE_LOOPING_AT=0.01 → loop activates at step ~25, forcing inductor to
+# ENABLE_LOOPING_AT=0.05 → loop activates at step ~25, forcing inductor to
 # compile the new [1024,512] half-width MLP kernels before Phase 1 starts.
 # MAX_WALLCLOCK_SECONDS=900 gives 15 min — enough for full cold autotune.
 # Exits normally; kernels land in /tmp/inductor_cache for Phase 1 to reuse.
 CACHE_SIZE_BEFORE=$(du -sh /tmp/inductor_cache 2>/dev/null | cut -f1 || echo "0")
 echo "[launch] Phase 0: inline prewarm (cold compile [1024,512] kernels)"
 echo "[launch] Cache before: ${CACHE_SIZE_BEFORE}"
-export ENABLE_LOOPING_AT=0.01
+export ENABLE_LOOPING_AT=0.05
 export MAX_WALLCLOCK_SECONDS=900
 export RUN_ID="051-ppm-d-prewarm"
 torchrun --standalone --nproc_per_node=4 \
