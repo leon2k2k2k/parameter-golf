@@ -7,7 +7,7 @@
 # Accept: pre-quant bpb ≤ 1.06479. Kill: > 1.06679
 set -euo pipefail
 
-SHA="ba41fc8"
+SHA="40a59db"
 ARM="047D-loop-adabn"
 RUNDIR="/workspace/runs/047D-loop-adabn-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py"
@@ -58,7 +58,7 @@ export LOOP_SCALE_INIT=recip
 # ── 5. Inductor cache ─────────────────────────────────────────────────────
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
 mkdir -p /tmp/inductor_cache
-STASH="/workspace/.inductor_cache_ba41fc8_adabn"
+STASH="/workspace/.inductor_cache_40a59db_adabn"
 
 if [ ! -d "$STASH" ]; then
   echo "[launch] No stash — running inline prewarm (~15 min)..."
