@@ -2,9 +2,9 @@
 
 **Slug:** `loop-adabn-screen`  
 **Created:** 2026-04-27  
-**Status:** READY (fix3 — remove allow_in_graph, 2026-04-27)
+**Status:** READY (fix4 — re-warmup at loop activation, 2026-04-27)
 **Branch:** `exp/047D-loop-adabn`  
-**Commit:** `7b38f8d` (fix3: remove allow_in_graph + launch script; prior: 40a59db = fix2)
+**Commit:** `06634a5` (fix4: re-warmup + ENABLE_LOOPING_AT=0.35; prior: 7b38f8d = fix3)
 **Links to:** `research/ideas/loop-ffn-expressivity.md`
 
 ## Hypothesis
@@ -51,6 +51,7 @@ scaled_mlp = γ_mlp[p, li] * scaled_mlp + β_mlp[p, li]
 - **ba41fc8** (fix1: dynamo.disable): same hang — disable on a staticmethod crashes inside compiled model.forward.
 - **40a59db** (fix2: allow_in_graph module-level fn): completed cleanly but val_bpb=1.06520 ≈ baseline. Root cause: allow_in_graph marks the function opaque, blocking autograd from computing gradients to γ/β. They stayed at init forever.
 - **ac6598b / 7b38f8d** (fix3: remove allow_in_graph + ENABLE_LOOPING_AT=0.0): plain elementwise ops are natively traceable. Also loop-active from step 1 to avoid mid-training hang.
+- **f1370e7 / 06634a5** (fix4: re-warmup at loop activation + revert to ENABLE_LOOPING_AT=0.35): ported same fix as 047C `f474ad5` — `_run_cu_bucket_warmup()` called when looping_active flips to True prevents evicted-graph hang without needing 0.0. Now at 0.35 for clean baseline parity.
 
 ## Baseline
 
