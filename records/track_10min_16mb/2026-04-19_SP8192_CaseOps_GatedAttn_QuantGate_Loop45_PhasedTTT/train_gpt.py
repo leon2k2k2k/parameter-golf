@@ -1231,6 +1231,17 @@ class MLP(nn.Module):
         return F.linear(hidden, down_w.to(x.dtype))
 
 
+@torch._dynamo.allow_in_graph
+def _loop_ffn_lora_apply(up_A, up_B, down_A, down_B, p, i, up_w, down_w):
+    # Spec 047C: compute LoRA delta A@B and add to weight slices.
+    # Module-level + allow_in_graph: dynamo includes this as an opaque graph node so
+    # inductor never tries to Triton-autotune the rank-2 matmul (runs via cuBLAS instead).
+    # @dynamo.disable on an instance method crashes inside compiled model.forward.
+    delta_up   = up_A[p, i]   @ up_B[p, i]
+    delta_down = down_A[p, i] @ down_B[p, i]
+    return up_w + delta_up.to(up_w.dtype), down_w + delta_down.to(down_w.dtype)
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -1733,19 +1744,15 @@ class GPT(nn.Module):
             self.mlp_down_bank[i],
         )
 
-    @torch._dynamo.disable
     def _apply_loop_ffn_lora(self, info, up_w, down_w):
-        # Spec 047C: if LoRA enabled and (info=(pass_idx, layer_in_band) is in band),
-        # return (up_w + ΔU, down_w + ΔD) where Δ = A @ B. Otherwise no-op.
-        # Decorated @torch._dynamo.disable: rank-2 matmul shapes (e.g. (2048,2)@(2,512))
-        # trigger an infinite Triton autotune hang inside compiled graphs. Running eager
-        # here costs ~microseconds (9 tiny matmuls per forward at r=2) — negligible.
         if self.loop_ffn_up_lora_A is None or info is None:
             return up_w, down_w
         p, i = info
-        delta_up = self.loop_ffn_up_lora_A[p, i] @ self.loop_ffn_up_lora_B[p, i]
-        delta_down = self.loop_ffn_down_lora_A[p, i] @ self.loop_ffn_down_lora_B[p, i]
-        return up_w + delta_up.to(up_w.dtype), down_w + delta_down.to(down_w.dtype)
+        return _loop_ffn_lora_apply(
+            self.loop_ffn_up_lora_A, self.loop_ffn_up_lora_B,
+            self.loop_ffn_down_lora_A, self.loop_ffn_down_lora_B,
+            p, i, up_w, down_w,
+        )
 
     def _parallel_block(
         self, block_idx, lane0, lane1, x0,
