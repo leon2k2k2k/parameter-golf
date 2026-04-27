@@ -382,6 +382,11 @@ class Hyperparameters:
     #    layer order (e.g. [3,4,5] forward then [5,4,3] on last pass). U-Net-style
     #    palindrome — coarse routing forward, correction flows back up same weights.
     loop_reverse_last_pass = bool(int(os.environ.get("LOOP_REVERSE_LAST_PASS", "0")))
+    # 047C — Per-pass FFN LoRA. Adds (A, B) low-rank delta to mlp_up/mlp_down for every
+    # (pass, layer) inside the loop band. Init B=0 → step 0 byte-identical to baseline.
+    # 0 = disabled. Lit basis: ALBERT (1909.11942) Table 4 (FFN-tying is what hurts) +
+    # Relaxed Recursive (2410.20672) (per-iter LoRA recovers tying gap).
+    loop_ffn_lora_rank = int(os.environ.get("LOOP_FFN_LORA_RANK", "0"))
     # Gated Attention (Qwen, NeurIPS 2025 Best Paper, arXiv:2505.06708;
     # qiuzh20/gated_attention). Per-head sigmoid gate on SDPA output, BEFORE
     # out_proj. Gate input = full block input x (paper's headwise G1 variant
@@ -1596,6 +1601,52 @@ class GPT(nn.Module):
             self._enc_resid_mix_info = None
             self._dec_resid_mix_info = None
 
+        # Spec 047C — Per-pass FFN LoRA. Each (pass p, layer-in-band i) gets its own
+        # rank-r delta on mlp_up and mlp_down, applied as effective_W = W + A @ B in
+        # the forward pass before the existing fused MLP kernel. B is zero-init so the
+        # initial delta is exactly 0 (baseline byte-identical at step 0).
+        self.loop_ffn_lora_rank = int(h.loop_ffn_lora_rank) if h.num_loops > 0 else 0
+        if self.loop_ffn_lora_rank > 0:
+            num_passes_l = h.num_loops + 1
+            num_looped_l = h.loop_end - h.loop_start + 1
+            r_l = self.loop_ffn_lora_rank
+            self.loop_ffn_up_lora_A = nn.Parameter(
+                torch.empty(num_passes_l, num_looped_l, hidden_dim, r_l, dtype=torch.float32)
+            )
+            self.loop_ffn_up_lora_B = nn.Parameter(
+                torch.zeros(num_passes_l, num_looped_l, r_l, h.model_dim, dtype=torch.float32)
+            )
+            self.loop_ffn_down_lora_A = nn.Parameter(
+                torch.empty(num_passes_l, num_looped_l, h.model_dim, r_l, dtype=torch.float32)
+            )
+            self.loop_ffn_down_lora_B = nn.Parameter(
+                torch.zeros(num_passes_l, num_looped_l, r_l, hidden_dim, dtype=torch.float32)
+            )
+            _pct_lora: dict = {}
+            self._enc_ffn_lora_info = []
+            for idx in self.encoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pct_lora.get(idx, 0)
+                    _pct_lora[idx] = pi + 1
+                    self._enc_ffn_lora_info.append((pi, idx - h.loop_start))
+                else:
+                    self._enc_ffn_lora_info.append(None)
+            self._dec_ffn_lora_info = []
+            for idx in self.decoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pct_lora.get(idx, 0)
+                    _pct_lora[idx] = pi + 1
+                    self._dec_ffn_lora_info.append((pi, idx - h.loop_start))
+                else:
+                    self._dec_ffn_lora_info.append(None)
+        else:
+            self.loop_ffn_up_lora_A = None
+            self.loop_ffn_up_lora_B = None
+            self.loop_ffn_down_lora_A = None
+            self.loop_ffn_down_lora_B = None
+            self._enc_ffn_lora_info = None
+            self._dec_ffn_lora_info = None
+
         # Spec 045C — Residual 1/L init for looped layers. Applied after _init_weights.
         self._loop_scale_init = h.loop_scale_init
         # Spec 045G — Gradient-side 1/L: store for use in _init_weights hook registration.
@@ -1618,6 +1669,14 @@ class GPT(nn.Module):
             nn.init.orthogonal_(self.mlp_up_bank.data[i], gain=1.0)
             nn.init.zeros_(self.mlp_down_bank.data[i])
             self.mlp_down_bank.data[i].mul_(proj_scale)
+        # Spec 047C — LoRA init: A ~ kaiming-uniform (small), B = 0. With B=0 the
+        # initial delta A @ B = 0 exactly, preserving baseline behavior at step 0.
+        if self.loop_ffn_lora_rank > 0:
+            nn.init.kaiming_uniform_(self.loop_ffn_up_lora_A.data, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.loop_ffn_down_lora_A.data, a=math.sqrt(5))
+            # B is already zero-init from torch.zeros() in __init__; no-op here for clarity.
+            nn.init.zeros_(self.loop_ffn_up_lora_B.data)
+            nn.init.zeros_(self.loop_ffn_down_lora_B.data)
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 if getattr(module, "_zero_init", False):
@@ -1673,6 +1732,16 @@ class GPT(nn.Module):
             self.mlp_up_bank[i],
             self.mlp_down_bank[i],
         )
+
+    def _apply_loop_ffn_lora(self, info, up_w, down_w):
+        # Spec 047C: if LoRA enabled and (info=(pass_idx, layer_in_band) is in band),
+        # return (up_w + ΔU, down_w + ΔD) where Δ = A @ B. Otherwise no-op.
+        if self.loop_ffn_up_lora_A is None or info is None:
+            return up_w, down_w
+        p, i = info
+        delta_up = self.loop_ffn_up_lora_A[p, i] @ self.loop_ffn_up_lora_B[p, i]
+        delta_down = self.loop_ffn_down_lora_A[p, i] @ self.loop_ffn_down_lora_B[p, i]
+        return up_w + delta_up.to(up_w.dtype), down_w + delta_down.to(down_w.dtype)
 
     def _parallel_block(
         self, block_idx, lane0, lane1, x0,
@@ -1749,6 +1818,11 @@ class GPT(nn.Module):
         carry = {} if enc_alpha_info is not None else None
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            # Spec 047C: per-pass LoRA delta on mlp_up/mlp_down for layers in band.
+            if self._enc_ffn_lora_info is not None and self.looping_active:
+                up_w, down_w = self._apply_loop_ffn_lora(
+                    self._enc_ffn_lora_info[step_idx], up_w, down_w
+                )
             # Spec 045A: inject per-pass iter embed at entry of each loop-window pass.
             if self.loop_iter_embeds is not None and self.looping_active:
                 _einfo = self._enc_iter_embed_info[step_idx]
@@ -1803,6 +1877,12 @@ class GPT(nn.Module):
             dec_alpha_info = None
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            # Spec 047C: per-pass LoRA delta on mlp_up/mlp_down for layers in band.
+            # Outside band, lora_info is None → helper is a no-op.
+            if self._dec_ffn_lora_info is not None and self.looping_active:
+                up_w, down_w = self._apply_loop_ffn_lora(
+                    self._dec_ffn_lora_info[skip_idx], up_w, down_w
+                )
             if i >= psl and psl > 0:
                 if lane0 is None:
                     lane0 = x
@@ -1939,6 +2019,11 @@ class GPT(nn.Module):
         slot = 0
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            # Spec 047C: per-pass LoRA delta on mlp_up/mlp_down for layers in band.
+            if self._enc_ffn_lora_info is not None and self.looping_active:
+                up_w, down_w = self._apply_loop_ffn_lora(
+                    self._enc_ffn_lora_info[step_idx], up_w, down_w
+                )
             if self.loop_iter_embeds is not None and self.looping_active:
                 _einfo = self._enc_iter_embed_info[step_idx]
                 if _einfo is not None:
@@ -1973,6 +2058,12 @@ class GPT(nn.Module):
         )
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            # Spec 047C: per-pass LoRA delta on mlp_up/mlp_down for layers in band.
+            # Outside band, lora_info is None → helper is a no-op.
+            if self._dec_ffn_lora_info is not None and self.looping_active:
+                up_w, down_w = self._apply_loop_ffn_lora(
+                    self._dec_ffn_lora_info[skip_idx], up_w, down_w
+                )
             if i >= psl and psl > 0:
                 if lane0 is None:
                     lane0 = x
@@ -2489,6 +2580,17 @@ class Optimizers:
         # Spec 045H: loop_resid_mixes is also a GPT-root Parameter.
         if getattr(base_model, "loop_resid_mixes", None) is not None and base_model.loop_resid_mixes.requires_grad:
             scalar_params.append(base_model.loop_resid_mixes)
+        # Spec 047C: per-pass FFN LoRA factors. 4 GPT-root Parameters with extreme
+        # aspect ratio at small r (e.g. (9, 2048, 2)). Routing to scalar AdamW is
+        # more numerically stable than Muon's NS5 on (~2048 × 2) matrices, and
+        # matches the LoRA-paper Adam baseline. Total ~92K params at r=2 — small.
+        for _name in (
+            "loop_ffn_up_lora_A", "loop_ffn_up_lora_B",
+            "loop_ffn_down_lora_A", "loop_ffn_down_lora_B",
+        ):
+            _p = getattr(base_model, _name, None)
+            if _p is not None and _p.requires_grad:
+                scalar_params.append(_p)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
