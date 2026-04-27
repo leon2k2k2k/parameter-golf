@@ -16,7 +16,11 @@ WORKTREE=$(bash /workspace/parameter-golf/tmp_exec/setup_worktree.sh "$SHA" "$AR
 # ── 2. Deps ───────────────────────────────────────────────────────────────
 pip install brotli python-minifier sentencepiece --break-system-packages -q
 
-# ── 3. Output dir ─────────────────────────────────────────────────────────
+# ── 3. Inductor cache restore (REQUIRED — new [1024,512] kernel shapes) ──
+export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
+bash /workspace/parameter-golf/tmp_exec/restore_cache_local.sh 6e6dd1e
+
+# ── 4. Output dir ─────────────────────────────────────────────────────────
 mkdir -p "$RUNDIR"
 
 # ── 4. Config — identical to 050A ────────────────────────────────────────
@@ -55,10 +59,6 @@ export LQER_ENABLED=1 LQER_RANK=4 LQER_TOP_K=3 LQER_FACTOR_BITS=4 LQER_ASYM_ENAB
 export MATRIX_BITS=6 MATRIX_CLIP_SIGMAS=12.85 ATTN_CLIP_SIGMAS=13.0 MLP_CLIP_SIGMAS=12.0
 export EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 GPTQ_CALIBRATION_BATCHES=16 GPTQ_RESERVE_SECONDS=4
 export SEED=42 PHASED_TTT_NUM_PHASES=3
-
-# ── 5. Inductor cache ─────────────────────────────────────────────────────
-export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
-mkdir -p /tmp/inductor_cache
 
 # ── 6. Screen run (20 min) ────────────────────────────────────────────────
 export MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0
