@@ -261,6 +261,8 @@ class Hyperparameters:
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
+    loop_scale_init = os.environ.get("LOOP_SCALE_INIT", "ones")
+    loop_iter_embeds = bool(int(os.environ.get("LOOP_ITER_EMBEDS", "0")))
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
@@ -1214,9 +1216,41 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            # 050A Lever C: 1/(num_loops+1) init for attn_scale/mlp_scale on loop layers.
+            if h.loop_scale_init == "recip":
+                scale = 1.0 / (h.num_loops + 1)
+                for li in range(h.loop_start, h.loop_end + 1):
+                    self.blocks[li].attn_scale.data.fill_(scale)
+                    self.blocks[li].mlp_scale.data.fill_(scale)
+            # 050A Lever A: per-pass iteration embeddings [num_passes, model_dim].
+            # Zero-init → transparent at step 0. Injected at entry of each loop pass.
+            self.loop_iter_embeds = None
+            if h.loop_iter_embeds:
+                num_passes = h.num_loops + 1
+                self.loop_iter_embeds = nn.Parameter(
+                    torch.zeros(num_passes, h.model_dim, dtype=torch.float32)
+                )
+                _loop_start = h.loop_start
+                enc_pass_info, pass_cnt = [], -1
+                for idx in self.encoder_indices:
+                    if idx == _loop_start:
+                        pass_cnt += 1
+                        enc_pass_info.append(pass_cnt)
+                    else:
+                        enc_pass_info.append(None)
+                self._enc_iter_embed_info = enc_pass_info
+                dec_pass_info, pass_cnt = [], -1
+                for idx in self.decoder_indices:
+                    if idx == _loop_start:
+                        pass_cnt += 1
+                        dec_pass_info.append(pass_cnt)
+                    else:
+                        dec_pass_info.append(None)
+                self._dec_iter_embed_info = dec_pass_info
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.loop_iter_embeds = None
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1351,7 +1385,11 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._enc_iter_embed_info[step_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             skips.append(x)
@@ -1359,6 +1397,10 @@ class GPT(nn.Module):
         lane0 = None
         lane1 = None
         for skip_idx, i in enumerate(dec_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._dec_iter_embed_info[skip_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -1453,7 +1495,11 @@ class GPT(nn.Module):
             )
         )
         slot = 0
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._enc_iter_embed_info[step_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             slot += 1
@@ -1462,6 +1508,10 @@ class GPT(nn.Module):
         lane0 = None
         lane1 = None
         for skip_idx, i in enumerate(dec_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._dec_iter_embed_info[skip_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -1927,6 +1977,8 @@ class Optimizers:
         if getattr(base_model, "smear_gate_enabled", False):
             scalar_params.append(base_model.smear_gate.weight)
             scalar_params.append(base_model.smear_lambda)
+        if getattr(base_model, "loop_iter_embeds", None) is not None:
+            scalar_params.append(base_model.loop_iter_embeds)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
@@ -3315,6 +3367,8 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
+            _run_cu_bucket_warmup()
+            log("loop_rewarm: loop-active compiled graph re-warmed across all cu_seqlens buckets")
         train_loss = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
