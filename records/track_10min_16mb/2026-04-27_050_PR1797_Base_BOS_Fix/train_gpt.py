@@ -3477,6 +3477,8 @@ def train_model(h, device, val_data):
     training_time_ms = 0.0
     stop_after_step = None
     torch.cuda.synchronize()
+    # Snapshot dynamo compile counter — any increase after t0 means mid-run recompile = dead run.
+    _dynamo_compiles_at_t0 = torch._dynamo.utils.counters["stats"].get("calls_captured", 0)
     t0 = time.perf_counter()
     step = 0
     while True:
@@ -3517,6 +3519,10 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
+        _dynamo_compiles_now = torch._dynamo.utils.counters["stats"].get("calls_captured", 0)
+        if _dynamo_compiles_now > _dynamo_compiles_at_t0:
+            log(f"MID_RUN_RECOMPILE_DETECTED: calls_captured {_dynamo_compiles_at_t0} -> {_dynamo_compiles_now} at step {step} — aborting, run is dead")
+            raise RuntimeError(f"Mid-run torch.compile recompile at step {step} — graph signature changed post-warmup. Fix always-tensor pattern.")
         train_loss = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
