@@ -19,7 +19,7 @@
 # invoking this script, OR see launch_047C_smoke.sh.
 set -euo pipefail
 
-SHA="94faf52"
+SHA="8858b28"
 ARM="047C"
 RUNDIR="/workspace/runs/047C-per-pass-lora-ffn/seed_42"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-19_SP8192_CaseOps_GatedAttn_QuantGate_Loop45_PhasedTTT/train_gpt.py"
