@@ -75,7 +75,11 @@ On receiving spec number `NNN`:
 - [ ] Hotstart checkpoint exists and is readable (if spec specifies one).
 - [ ] `git rev-parse HEAD` on the pod matches the commit hash in the spec. Use `git stash push -u -m "pod-local"` to clear any uncommitted pod-local edits that might block `checkout`.
 - [ ] Enough free disk on `/workspace/` for expected checkpoints (9 × ~300 MB = ~2.7 GB for the standard phase-boundary set).
-- [ ] `TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache` set on the launch env, and `mkdir -p /workspace/.torch_inductor_cache` on the volume beforehand. Persists the torch.compile cache across pod cycles; reruns of the same commit skip ~80% of the ~5min compile (saves 3-4min wallclock). Graph-hash-keyed so it's safe — different commits just don't reuse each other's entries.
+- [ ] **Inductor cache restored from volume.** Do NOT point `TORCHINDUCTOR_CACHE_DIR` at `/workspace/` or `/runpod/` — NFS FUSE causes Triton compile workers to race and die with "Stale file handle". The cache must live in `/tmp/`.
+  - Check if a stash exists for this spec's commit: `bash tmp_exec/restore_cache_local.sh <commit-sha>` (runs on pod — no SSH needed; rsync from `/workspace/.inductor_cache_<sha>` → `/tmp/inductor_cache/`).
+  - If the restore exits 0: set `export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache` in the launch env. Do **NOT** set `TRITON_AUTOTUNE_NUM_RUNS=1` — that flag costs ~6% throughput at 4×H100 (~250 training steps in a 20-min run).
+  - If restore exits 1 (cache missing): **STOP. Do not launch.** Report to user — research must run `bash tmp_exec/prewarm_any.sh <sha> <stage1-env> [...]` on a fresh pod (~25 min, ~$6-8), then `cache_stash.sh`. Launching cold risks mid-run recompile and NCCL deadlock (see spec 045 incident).
+  - Verify tok/s ≥ 4,300,000 at step 100 on the first arm before committing to a full 20-min run.
 
 If any check fails and it's an **environment** issue (missing dep, path typo), fix it and re-check. If it's a **logic** issue (wrong commit, bad config), stop and hand back to research.
 
@@ -285,32 +289,6 @@ A 60-second SSH poll loop parsing `tail -n 400` of the pod's `train.log`, postin
 ### Polling cadence during active runs — 30 seconds
 
 **During any live training run (smoke, screen, or submission): poll the pod's `train.log` every 30 seconds.** This is the user's expected cadence and takes precedence over the default self-pacing. ScheduleWakeup's 60s floor means using a tight Bash `until` loop that `sleep 30` and re-SSH-tail. Do not drift to 1-min, 2-min, 5-min poll intervals unless the user explicitly says to slow down — the short cadence is load-bearing for the user's ability to intercept bugs early.
-
-### Monitoring — interview the user upfront
-
-**Before every run (smoke, screen, or submission), explicitly ask the user what to monitor.** The spec has stop-early criteria; the user has domain-specific signals they care about live (α trajectory shape, tok/s drift, matched-step Δ vs baseline, specific log markers, diagnostic lines). Silent-inference has failed before — be explicit.
-
-Ask as an `AskUserQuestion` during the spec interview, alongside smoke/screen and failure-case questions. Defaults to offer:
-- NaN / inf detection
-- Step-rate / tok/s drift
-- Step-matched Δ vs the spec's baseline (per `feedback_step_matched_comparison.md`)
-- `stopping_early` detection + trigger post-run cleanup
-- Anything spec-specific named in the free-text "Other" slot
-
-During the run, report on exactly those signals at each 30s poll tick — no more, no less. Don't add signals the user didn't ask for; don't drop the ones they did.
-
-**Preferred tick format (user requested, spec 016 onward — "all in one"):** combine the matched-step train_loss comparison table (baseline1/baseline2/current/Δ) and the spec-specific diagnostic table (e.g. α trajectory for recur-alpha specs) in one composite update per poll tick. Example:
-
-```
-┌──────┬────────────┬────────────┬────────────┬─────────┐
-│ step │ 008 train  │ 015 train  │ 016 train  │  Δ vs015│
-├──────┼────────────┼────────────┼────────────┼─────────┤
-│ 2500 │  2.5580    │  2.5572    │  <live>    │ <Δ>     │
-└──────┴────────────┴────────────┴────────────┴─────────┘
-
-recur_alpha (016): [[α21_3, α21_4, α21_5], [α22_3, α22_4, α22_5]]
-  step 2500: [[1.02, 1.15, 1.37], [0.85, 0.76, 0.75]]
-```
 
 ### Progress updates — side-by-side vs baseline
 
