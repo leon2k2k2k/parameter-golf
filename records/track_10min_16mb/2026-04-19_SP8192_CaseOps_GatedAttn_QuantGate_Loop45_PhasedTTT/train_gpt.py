@@ -363,6 +363,7 @@ class Hyperparameters:
     #    entry, zero-init so step 0 is byte-identical to baseline. Motivated by
     #    Xu & Sato ICML 2025 — closes approximation gap in naive weight-tied loops.
     loop_iter_embeds = bool(int(os.environ.get("LOOP_ITER_EMBEDS", "0")))
+    loop_adabn = bool(int(os.environ.get("LOOP_ADABN", "0")))
     # B. MLP-only loop: on loop passes >= mlp_only_from_pass, skip attention and
     #    run only MLP. Attention runs once (pass 0); MLP refines further.
     #    0 = disabled (full block every pass, byte-identical to baseline).
@@ -1269,7 +1270,7 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False, resid_mix_override=None):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False, resid_mix_override=None, pass_γ_attn=None, pass_β_attn=None, pass_γ_mlp=None, pass_β_mlp=None):
         mix = (resid_mix_override if resid_mix_override is not None else self.resid_mix).to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         if not skip_attn:
@@ -1279,12 +1280,16 @@ class Block(nn.Module):
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-            x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
+            _scaled_attn = self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
+            if pass_γ_attn is not None:
+                _scaled_attn = pass_γ_attn.to(dtype=x_in.dtype)[None, None, :] * _scaled_attn + pass_β_attn.to(dtype=x_in.dtype)[None, None, :]
+            x_out = x_in + _scaled_attn
         else:
             x_out = x_in
-        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
-            None, None, :
-        ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        _scaled_mlp = self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        if pass_γ_mlp is not None:
+            _scaled_mlp = pass_γ_mlp.to(dtype=x_out.dtype)[None, None, :] * _scaled_mlp + pass_β_mlp.to(dtype=x_out.dtype)[None, None, :]
+        x_out = x_out + _scaled_mlp
         return x_out
 
 class GPT(nn.Module):
@@ -1537,6 +1542,37 @@ class GPT(nn.Module):
             self._enc_iter_embed_info = None
             self._dec_iter_embed_info = None
 
+        # Spec 047D — Per-pass AdaLN conditioning on loop layers.
+        # (γ_attn, β_attn) scale+shift the attn residual; (γ_mlp, β_mlp) the MLP residual.
+        # Init γ=1, β=0 → byte-identical to baseline. Replaces loop_iter_embeds role.
+        self.loop_adabn_enabled = bool(h.loop_adabn) and h.num_loops > 0
+        if self.loop_adabn_enabled:
+            _adabn_passes = h.num_loops + 1
+            _adabn_looped = h.loop_end - h.loop_start + 1
+            self.loop_adabn_γ_attn = nn.Parameter(torch.ones(_adabn_passes, _adabn_looped, h.model_dim))
+            self.loop_adabn_β_attn = nn.Parameter(torch.zeros(_adabn_passes, _adabn_looped, h.model_dim))
+            self.loop_adabn_γ_mlp  = nn.Parameter(torch.ones(_adabn_passes, _adabn_looped, h.model_dim))
+            self.loop_adabn_β_mlp  = nn.Parameter(torch.zeros(_adabn_passes, _adabn_looped, h.model_dim))
+            _av = {}
+            self._enc_adabn_info = []
+            for _idx in self.encoder_indices:
+                _pi = _av.get(_idx, 0); _av[_idx] = _pi + 1
+                if h.loop_start <= _idx <= h.loop_end:
+                    self._enc_adabn_info.append((_pi, _idx - h.loop_start))
+                else:
+                    self._enc_adabn_info.append(None)
+            self._dec_adabn_info = []
+            for _idx in self.decoder_indices:
+                _pi = _av.get(_idx, 0); _av[_idx] = _pi + 1
+                if h.loop_start <= _idx <= h.loop_end:
+                    self._dec_adabn_info.append((_pi, _idx - h.loop_start))
+                else:
+                    self._dec_adabn_info.append(None)
+        else:
+            self.loop_adabn_γ_attn = self.loop_adabn_β_attn = None
+            self.loop_adabn_γ_mlp  = self.loop_adabn_β_mlp  = None
+            self._enc_adabn_info = self._dec_adabn_info = None
+
         # Spec 045B — MLP-only loop. Skip attention on loop passes >= mlp_only_from_pass.
         # 0 = disabled. 1 = skip attn on passes 1+ (full block only on pass 0).
         # Precomputed skip_attn lists parallel to enc/dec indices.
@@ -1764,7 +1800,11 @@ class GPT(nn.Module):
                 if _rmix_enc_info is not None:
                     _rp_i, _rl_i = _rmix_enc_info
                     _rmix_enc = self.loop_resid_mixes[_rp_i, _rl_i]
-            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_enc)
+            _adabn_enc_kw = {}
+            if self.loop_adabn_γ_attn is not None and self.looping_active and self._enc_adabn_info[step_idx] is not None:
+                _ap, _al = self._enc_adabn_info[step_idx]
+                _adabn_enc_kw = dict(pass_γ_attn=self.loop_adabn_γ_attn[_ap, _al], pass_β_attn=self.loop_adabn_β_attn[_ap, _al], pass_γ_mlp=self.loop_adabn_γ_mlp[_ap, _al], pass_β_mlp=self.loop_adabn_β_mlp[_ap, _al])
+            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_enc, **_adabn_enc_kw)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
                 beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -1845,7 +1885,11 @@ class GPT(nn.Module):
                     if _rmix_dec_info is not None:
                         _rp_i_d, _rl_i_d = _rmix_dec_info
                         _rmix_dec = self.loop_resid_mixes[_rp_i_d, _rl_i_d]
-                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_dec)
+                _adabn_dec_kw = {}
+                if self.loop_adabn_γ_attn is not None and self.looping_active and self._dec_adabn_info[skip_idx] is not None:
+                    _ap, _al = self._dec_adabn_info[skip_idx]
+                    _adabn_dec_kw = dict(pass_γ_attn=self.loop_adabn_γ_attn[_ap, _al], pass_β_attn=self.loop_adabn_β_attn[_ap, _al], pass_γ_mlp=self.loop_adabn_γ_mlp[_ap, _al], pass_β_mlp=self.loop_adabn_β_mlp[_ap, _al])
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, skip_attn=_skip_attn, resid_mix_override=_rmix_dec, **_adabn_dec_kw)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
                     beta = self.recur_beta[local_idx].to(x_new.dtype)
@@ -2489,6 +2533,11 @@ class Optimizers:
         # Spec 045H: loop_resid_mixes is also a GPT-root Parameter.
         if getattr(base_model, "loop_resid_mixes", None) is not None and base_model.loop_resid_mixes.requires_grad:
             scalar_params.append(base_model.loop_resid_mixes)
+        # Spec 047D: loop_adabn conditioning tensors (GPT-root, not in .blocks).
+        for _adn in ["loop_adabn_γ_attn", "loop_adabn_β_attn", "loop_adabn_γ_mlp", "loop_adabn_β_mlp"]:
+            _p = getattr(base_model, _adn, None)
+            if _p is not None and _p.requires_grad:
+                scalar_params.append(_p)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
@@ -2594,6 +2643,10 @@ def restore_fp32_params(model):
         model.kv_bank.data = model.kv_bank.data.float()
     model.mlp_up_bank.data = model.mlp_up_bank.data.float()
     model.mlp_down_bank.data = model.mlp_down_bank.data.float()
+    for _adn in ["loop_adabn_γ_attn", "loop_adabn_β_attn", "loop_adabn_γ_mlp", "loop_adabn_β_mlp"]:
+        _p = getattr(model, _adn, None)
+        if _p is not None:
+            _p.data = _p.data.float()
 
 
 def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
