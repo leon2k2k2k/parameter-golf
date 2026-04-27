@@ -4,7 +4,7 @@
 **Created:** 2026-04-27
 **Status:** READY
 **Branch:** `exp/047C-per-pass-lora-ffn` (forked from `exp/045-loop-layer-improvements` @ `ece7b76`)
-**Commit:** `e2f7a3d` (5cf60f9 = code change; e2f7a3d adds `tmp_exec/launch_047C.sh` + `launch_047C_smoke.sh`)
+**Commit:** `7ff5057` (1cc73b9 = pre-fold LoRA fix; 7ff5057 updates launch SHA)
 **Links to:** `research/ideas/per-pass-lora-ffn.md`
 
 ## Hypothesis
