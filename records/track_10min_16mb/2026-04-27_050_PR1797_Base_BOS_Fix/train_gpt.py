@@ -1299,6 +1299,10 @@ class GPT(nn.Module):
                     self._dec_ffn_lora_info.append((pi, idx - h.loop_start))
                 else:
                     self._dec_ffn_lora_info.append(None)
+            # Identity zero deltas for non-loop-layer steps — always pass real tensors so
+            # Block.forward has one compiled graph variant (never None→Tensor switch mid-run).
+            self.register_buffer('_lora_delta_up_id', torch.zeros(hidden_dim_l, h.model_dim))
+            self.register_buffer('_lora_delta_down_id', torch.zeros(h.model_dim, hidden_dim_l))
         else:
             self.loop_ffn_up_lora_A = None
             self.loop_ffn_up_lora_B = None
@@ -1475,12 +1479,15 @@ class GPT(nn.Module):
                 _p = self._enc_iter_embed_info[step_idx]
                 if _p is not None:
                     x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
-            _enc_ldu, _enc_ldd = None, None
-            if _lora_deltas is not None and self._enc_ffn_lora_info is not None:
+            if self._enc_ffn_lora_info is not None:
                 _enc_info = self._enc_ffn_lora_info[step_idx]
                 if _enc_info is not None:
                     _ep, _el = _enc_info
                     _enc_ldu, _enc_ldd = _lora_deltas[0][_ep, _el], _lora_deltas[1][_ep, _el]
+                else:
+                    _enc_ldu, _enc_ldd = self._lora_delta_up_id, self._lora_delta_down_id
+            else:
+                _enc_ldu, _enc_ldd = None, None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_enc_ldu, lora_delta_down=_enc_ldd)
             skips.append(x)
@@ -1492,12 +1499,15 @@ class GPT(nn.Module):
                 _p = self._dec_iter_embed_info[skip_idx]
                 if _p is not None:
                     x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
-            _dec_ldu, _dec_ldd = None, None
-            if _lora_deltas is not None and self._dec_ffn_lora_info is not None:
+            if self._dec_ffn_lora_info is not None:
                 _dec_info = self._dec_ffn_lora_info[skip_idx]
                 if _dec_info is not None:
                     _dp, _dl = _dec_info
                     _dec_ldu, _dec_ldd = _lora_deltas[0][_dp, _dl], _lora_deltas[1][_dp, _dl]
+                else:
+                    _dec_ldu, _dec_ldd = self._lora_delta_up_id, self._lora_delta_down_id
+            else:
+                _dec_ldu, _dec_ldd = None, None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -2284,7 +2294,7 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
     # docstring). collect_hessians runs on the eager base_model directly.
     _lora_deltas = (
         model._compute_lora_deltas()
-        if (model.looping_active and model.loop_ffn_lora_rank > 0)
+        if (model.loop_ffn_lora_rank > 0)
         else None
     )
     with torch.no_grad():
@@ -2725,7 +2735,7 @@ def eval_val(h, device, val_data, model, forward_logits_fn=None):
         _eager_gpt = _eager_gpt._orig_mod
     _lora_deltas = (
         _eager_gpt._compute_lora_deltas()
-        if (_eager_gpt.looping_active and _eager_gpt.loop_ffn_lora_rank > 0)
+        if (_eager_gpt.loop_ffn_lora_rank > 0)
         else None
     )
     global BOS_ID
@@ -3355,12 +3365,12 @@ def train_model(h, device, val_data):
                 h.train_batch_tokens, h.grad_accum_steps
             )
             # Per-pass FFN LoRA: pre-fold A@B in eager so narrow-K rank matmuls
-            # stay out of the compiled graph (fullgraph=True can't inline a
-            # @dynamo.disable'd helper, and allow_in_graph still triggers Triton
-            # autotrace). Returns None when LoRA disabled or pre-loop activation.
+            # stay out of the compiled graph. Always computed when rank>0 so
+            # Block.forward always gets real tensors — single compiled graph variant,
+            # no None→Tensor switch at loop activation.
             _lora_deltas = (
                 base_model._compute_lora_deltas()
-                if (base_model.looping_active and base_model.loop_ffn_lora_rank > 0)
+                if (base_model.loop_ffn_lora_rank > 0)
                 else None
             )
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
@@ -3420,7 +3430,7 @@ def train_model(h, device, val_data):
                 for _ in range(warmup_cu_iters):
                     _lora_deltas = (
                         base_model._compute_lora_deltas()
-                        if (base_model.looping_active and base_model.loop_ffn_lora_rank > 0)
+                        if (base_model.loop_ffn_lora_rank > 0)
                         else None
                     )
                     optimizers.zero_grad_all()
