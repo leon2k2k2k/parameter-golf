@@ -1,14 +1,15 @@
 #!/bin/bash
 # Spec 051 — PPM-D: enc/dec MLP bank split on loop layers 3-5
-# Zero param cost MLP untying: enc visits use first half, dec visits use second half.
+# MLP untying: enc visits use mlp_up/down_bank_enc, dec visits use mlp_up/down_bank_dec.
+# Separate nn.Parameters (shape [n_loop, h2, dim]) — no runtime slicing in compiled graph.
 # Compare to 050A baseline pre-quant EMA bpb 1.06484.
 # Accept: bpb <= 1.064. Kill: > 1.068.
 #
-# Self-contained: Phase 0 (inline prewarm) compiles new [1024,512] kernels on any
-# fresh pod before Phase 1 (real training). No separate prewarm pod needed.
+# Self-contained: Phase 0 (inline prewarm) compiles kernels on any fresh pod
+# before Phase 1 (real training). No separate prewarm pod needed.
 set -euo pipefail
 
-SHA="6e6dd1e"
+SHA="ffc96b8"
 ARM="051-ppm-d"
 RUNDIR="/workspace/runs/051-perpass-mlp-untied-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
