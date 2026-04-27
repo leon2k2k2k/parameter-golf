@@ -1224,6 +1224,10 @@ class GPT(nn.Module):
             for i in range(max(0, h.num_layers - h.xsa_last_n), h.num_layers):
                 self.blocks[i].attn.use_xsa = True
         self.looping_active = False
+        # 051 PPM-D: enc/dec MLP split needs these at forward time
+        self._loop_layer_start = h.loop_start
+        self._loop_layer_end = h.loop_end
+        self._loop_mlp_hidden_half = int(h.mlp_mult * h.model_dim) // 2
         if h.num_loops > 0:
             loop_seg = list(range(h.loop_start, h.loop_end + 1))
             all_indices = list(range(h.loop_start))
@@ -1474,6 +1478,11 @@ class GPT(nn.Module):
             else:
                 _enc_ldu = None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            if self.looping_active and self._loop_layer_start <= i <= self._loop_layer_end:
+                # 051 PPM-D: enc visits use first half of mlp banks (enc specialization)
+                h2 = self._loop_mlp_hidden_half
+                up_w = up_w[:h2, :]
+                down_w = down_w[:, :h2].contiguous()
             x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_enc_ldu)
             skips.append(x)
         psl = self.parallel_start_layer
@@ -1494,6 +1503,11 @@ class GPT(nn.Module):
             else:
                 _dec_ldu = None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            if self.looping_active and self._loop_layer_start <= i <= self._loop_layer_end:
+                # 051 PPM-D: dec visits use second half of mlp banks (dec specialization)
+                h2 = self._loop_mlp_hidden_half
+                up_w = up_w[h2:, :]
+                down_w = down_w[:, h2:].contiguous()
             if i >= psl and psl > 0:
                 if lane0 is None:
                     lane0 = x
