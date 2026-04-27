@@ -1270,6 +1270,15 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
+    @staticmethod
+    @torch._dynamo.disable
+    def _apply_adabn(x, γ, β):
+        # Spec 047D: apply per-pass (γ, β) scale+shift to a residual contribution.
+        # @dynamo.disable: γ/β are slices of a shared Parameter used 3× per forward;
+        # compiled backward over repeated parameter views caused NCCL deadlock on 4×H100.
+        # Running eager here costs ~microseconds per call — negligible.
+        return γ.to(dtype=x.dtype)[None, None, :] * x + β.to(dtype=x.dtype)[None, None, :]
+
     def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, skip_attn=False, resid_mix_override=None, pass_γ_attn=None, pass_β_attn=None, pass_γ_mlp=None, pass_β_mlp=None):
         mix = (resid_mix_override if resid_mix_override is not None else self.resid_mix).to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
@@ -1282,13 +1291,13 @@ class Block(nn.Module):
             )
             _scaled_attn = self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
             if pass_γ_attn is not None:
-                _scaled_attn = pass_γ_attn.to(dtype=x_in.dtype)[None, None, :] * _scaled_attn + pass_β_attn.to(dtype=x_in.dtype)[None, None, :]
+                _scaled_attn = Block._apply_adabn(_scaled_attn, pass_γ_attn, pass_β_attn)
             x_out = x_in + _scaled_attn
         else:
             x_out = x_in
         _scaled_mlp = self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
         if pass_γ_mlp is not None:
-            _scaled_mlp = pass_γ_mlp.to(dtype=x_out.dtype)[None, None, :] * _scaled_mlp + pass_β_mlp.to(dtype=x_out.dtype)[None, None, :]
+            _scaled_mlp = Block._apply_adabn(_scaled_mlp, pass_γ_mlp, pass_β_mlp)
         x_out = x_out + _scaled_mlp
         return x_out
 
