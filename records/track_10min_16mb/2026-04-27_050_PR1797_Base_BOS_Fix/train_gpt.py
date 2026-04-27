@@ -1076,6 +1076,13 @@ class MLP(nn.Module):
         super().__init__()
         self.use_fused = True
 
+    @staticmethod
+    def _activate(h):
+        # leaky_relu²(0.5) — matches the eager path of forward(); used by 050B's
+        # per-pass FFN LoRA branch so the activation is shared between base MLP
+        # and the LoRA delta path.
+        return F.leaky_relu(h, negative_slope=0.5).square()
+
     def forward(self, x, up_w, down_w):
         if self.training and self.use_fused:
             return FusedLeakyReLUSquareMLP(x, up_w.to(x.dtype), down_w.to(x.dtype))
