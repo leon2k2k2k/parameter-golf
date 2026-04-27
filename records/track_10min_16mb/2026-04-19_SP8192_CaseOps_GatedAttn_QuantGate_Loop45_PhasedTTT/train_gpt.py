@@ -4369,6 +4369,13 @@ def train_model(h, device, val_data):
                         for _pi in range(h.num_loops + 1):
                             base_model.loop_resid_mixes.data[_pi, _li - h.loop_start].copy_(_src)
                 log("loop_resid_mixes: seeded from block.resid_mix at loop activation")
+            # Re-warm the loop-active compiled graph. After many pre-loop steps the
+            # loop-active graph gets evicted from torch.compile's in-memory LRU cache.
+            # Calling _run_cu_bucket_warmup() here with looping_active=True ensures
+            # all 4 bucket-shape variants are freshly compiled (cache hit from disk,
+            # no full autotune) before the first real loop-active training step.
+            _run_cu_bucket_warmup()
+            log("loop_rewarm: loop-active compiled graph re-warmed across all cu_seqlens buckets")
         if (
             h.loop_depth_upgrade_at > 0
             and base_model.looping_active
