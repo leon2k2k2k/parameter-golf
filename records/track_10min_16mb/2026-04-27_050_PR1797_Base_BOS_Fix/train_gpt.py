@@ -1290,6 +1290,11 @@ class GPT(nn.Module):
             self.loop_adabn_γ_attn = self.loop_adabn_β_attn = None
             self.loop_adabn_γ_mlp  = self.loop_adabn_β_mlp  = None
             self._enc_adabn_info = self._dec_adabn_info = None
+        if self.loop_adabn_enabled:
+            # Identity tensors for non-loop-layer steps — always pass real tensors so
+            # Block.forward has one compiled graph variant (never None→Tensor switch mid-run).
+            self.register_buffer('_adabn_γ_id', torch.ones(h.model_dim))
+            self.register_buffer('_adabn_β_id', torch.zeros(h.model_dim))
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1429,12 +1434,21 @@ class GPT(nn.Module):
                 _p = self._enc_iter_embed_info[step_idx]
                 if _p is not None:
                     x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
-            _adabn_enc_kw = {}
-            if self.loop_adabn_γ_attn is not None and self.looping_active and self._enc_adabn_info[step_idx] is not None:
+            if self.loop_adabn_enabled and self._enc_adabn_info[step_idx] is not None:
                 _ap, _al = self._enc_adabn_info[step_idx]
-                _adabn_enc_kw = dict(pass_γ_attn=self.loop_adabn_γ_attn[_ap, _al], pass_β_attn=self.loop_adabn_β_attn[_ap, _al], pass_γ_mlp=self.loop_adabn_γ_mlp[_ap, _al], pass_β_mlp=self.loop_adabn_β_mlp[_ap, _al])
+                _γ_attn = self.loop_adabn_γ_attn[_ap, _al]
+                _β_attn = self.loop_adabn_β_attn[_ap, _al]
+                _γ_mlp  = self.loop_adabn_γ_mlp[_ap, _al]
+                _β_mlp  = self.loop_adabn_β_mlp[_ap, _al]
+            elif self.loop_adabn_enabled:
+                _γ_attn = self._adabn_γ_id
+                _β_attn = self._adabn_β_id
+                _γ_mlp  = self._adabn_γ_id
+                _β_mlp  = self._adabn_β_id
+            else:
+                _γ_attn = _β_attn = _γ_mlp = _β_mlp = None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, **_adabn_enc_kw)
+            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, pass_γ_attn=_γ_attn, pass_β_attn=_β_attn, pass_γ_mlp=_γ_mlp, pass_β_mlp=_β_mlp)
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
@@ -1444,10 +1458,19 @@ class GPT(nn.Module):
                 _p = self._dec_iter_embed_info[skip_idx]
                 if _p is not None:
                     x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
-            _adabn_dec_kw = {}
-            if self.loop_adabn_γ_attn is not None and self.looping_active and self._dec_adabn_info[skip_idx] is not None:
+            if self.loop_adabn_enabled and self._dec_adabn_info[skip_idx] is not None:
                 _ap, _al = self._dec_adabn_info[skip_idx]
-                _adabn_dec_kw = dict(pass_γ_attn=self.loop_adabn_γ_attn[_ap, _al], pass_β_attn=self.loop_adabn_β_attn[_ap, _al], pass_γ_mlp=self.loop_adabn_γ_mlp[_ap, _al], pass_β_mlp=self.loop_adabn_β_mlp[_ap, _al])
+                _γ_attn = self.loop_adabn_γ_attn[_ap, _al]
+                _β_attn = self.loop_adabn_β_attn[_ap, _al]
+                _γ_mlp  = self.loop_adabn_γ_mlp[_ap, _al]
+                _β_mlp  = self.loop_adabn_β_mlp[_ap, _al]
+            elif self.loop_adabn_enabled:
+                _γ_attn = self._adabn_γ_id
+                _β_attn = self._adabn_β_id
+                _γ_mlp  = self._adabn_γ_id
+                _β_mlp  = self._adabn_β_id
+            else:
+                _γ_attn = _β_attn = _γ_mlp = _β_mlp = None
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -1476,7 +1499,7 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, **_adabn_dec_kw)
+                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, pass_γ_attn=_γ_attn, pass_β_attn=_β_attn, pass_γ_mlp=_γ_mlp, pass_β_mlp=_β_mlp)
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
