@@ -240,6 +240,7 @@ class Hyperparameters:
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 11))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
+    loop_layer_num_kv_heads = int(os.environ.get("LOOP_LAYER_NUM_KV_HEADS", 0))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
     negative_slope = float(os.environ.get("NEGATIVE_SLOPE", 0.5))
@@ -1304,6 +1305,15 @@ class GPT(nn.Module):
         hidden_dim = int(h.mlp_mult * h.model_dim)
         self.qo_bank = nn.Parameter(torch.empty(2 * h.num_layers, h.model_dim, h.model_dim))
         self.kv_bank = nn.Parameter(torch.empty(2 * h.num_layers, kv_dim, h.model_dim))
+        if h.loop_layer_num_kv_heads > 0 and h.num_loops > 0:
+            _loop_kv_dim = h.loop_layer_num_kv_heads * head_dim
+            self._loop_kv_num_looped = h.loop_end - h.loop_start + 1
+            self._loop_layer_num_kv_heads = h.loop_layer_num_kv_heads
+            self.loop_kv_bank = nn.Parameter(torch.empty(2 * self._loop_kv_num_looped, _loop_kv_dim, h.model_dim))
+        else:
+            self._loop_kv_num_looped = 0
+            self._loop_layer_num_kv_heads = 0
+            self.loop_kv_bank = None
         self.mlp_up_bank = nn.Parameter(torch.empty(h.num_layers, hidden_dim, h.model_dim))
         self.mlp_down_bank = nn.Parameter(torch.empty(h.num_layers, h.model_dim, hidden_dim))
         self.num_encoder_layers = h.num_layers // 2
@@ -1346,6 +1356,9 @@ class GPT(nn.Module):
                     rope_dims=h.rope_dims,
                     yarn=h.rope_yarn,
                 )
+        if self.loop_kv_bank is not None:
+            for _li in range(h.loop_start, h.loop_end + 1):
+                self.blocks[_li].attn.num_kv_heads = self._loop_layer_num_kv_heads
         self.final_norm = RMSNorm()
         self.lm_head = (
             None
@@ -1614,6 +1627,10 @@ class GPT(nn.Module):
             self.qo_bank.data[n + i].mul_(proj_scale)
             nn.init.orthogonal_(self.kv_bank.data[i], gain=1.0)
             nn.init.orthogonal_(self.kv_bank.data[n + i], gain=1.0)
+        if self.loop_kv_bank is not None:
+            for i in range(self._loop_kv_num_looped):
+                nn.init.orthogonal_(self.loop_kv_bank.data[i], gain=1.0)
+                nn.init.orthogonal_(self.loop_kv_bank.data[self._loop_kv_num_looped + i], gain=1.0)
         for i in range(n):
             nn.init.orthogonal_(self.mlp_up_bank.data[i], gain=1.0)
             nn.init.zeros_(self.mlp_down_bank.data[i])
@@ -1657,6 +1674,9 @@ class GPT(nn.Module):
 
             self.qo_bank.register_hook(_make_bank_hook(loop_rows + loop_rows_n, _gs))
             self.kv_bank.register_hook(_make_bank_hook(loop_rows + loop_rows_n, _gs))
+            if self.loop_kv_bank is not None:
+                _all_lkv = list(range(2 * self._loop_kv_num_looped))
+                self.loop_kv_bank.register_hook(_make_bank_hook(_all_lkv, _gs))
             self.mlp_up_bank.register_hook(_make_bank_hook(loop_rows, _gs))
             self.mlp_down_bank.register_hook(_make_bank_hook(loop_rows, _gs))
             for li in range(self.loop_start, self.loop_end + 1):
@@ -1665,10 +1685,17 @@ class GPT(nn.Module):
 
     def _bank_weights(self, i):
         n = self.num_layers
+        if self.loop_kv_bank is not None and self.loop_start <= i <= self.loop_end:
+            local = i - self.loop_start
+            k_w = self.loop_kv_bank[local]
+            v_w = self.loop_kv_bank[self._loop_kv_num_looped + local]
+        else:
+            k_w = self.kv_bank[i]
+            v_w = self.kv_bank[n + i]
         return (
             self.qo_bank[i],
-            self.kv_bank[i],
-            self.kv_bank[n + i],
+            k_w,
+            v_w,
             self.qo_bank[n + i],
             self.mlp_up_bank[i],
             self.mlp_down_bank[i],
@@ -2451,6 +2478,8 @@ class Optimizers:
             base_model.mlp_up_bank,
             base_model.mlp_down_bank,
         ]
+        if getattr(base_model, "loop_kv_bank", None) is not None:
+            matrix_params.append(base_model.loop_kv_bank)
         block_named_params = list(base_model.blocks.named_parameters())
         scalar_params = [
             p
@@ -2592,6 +2621,8 @@ def restore_fp32_params(model):
     if hasattr(model, "qo_bank") and model.qo_bank is not None:
         model.qo_bank.data = model.qo_bank.data.float()
         model.kv_bank.data = model.kv_bank.data.float()
+    if hasattr(model, "loop_kv_bank") and model.loop_kv_bank is not None:
+        model.loop_kv_bank.data = model.loop_kv_bank.data.float()
     model.mlp_up_bank.data = model.mlp_up_bank.data.float()
     model.mlp_down_bank.data = model.mlp_down_bank.data.float()
 
