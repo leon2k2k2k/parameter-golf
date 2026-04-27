@@ -1,6 +1,8 @@
 #!/bin/bash
 # Spec 050C2 — Per-pass AdaLN with ENABLE_LOOPING_AT=0.25 (vs 0.35 in 050C)
 # Same cd74fcc code as 050C. Earlier activation gives AdaLN ~50% more post-loop steps.
+# No smoke needed: always-tensor fix means startup loop_warmup compiles both graph
+# variants at init — loop activation at step ~1250 is a pure cache hit.
 # Accept: bpb <= 1.067. Kill: > 1.072.
 set -euo pipefail
 
@@ -54,31 +56,15 @@ export MATRIX_BITS=6 MATRIX_CLIP_SIGMAS=12.85 ATTN_CLIP_SIGMAS=13.0 MLP_CLIP_SIG
 export EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 GPTQ_CALIBRATION_BATCHES=16 GPTQ_RESERVE_SECONDS=4
 export SEED=42 PHASED_TTT_NUM_PHASES=3
 
-# ── 5. Inductor cache — reuse 050C stash (same code, same graph variants) ─
+# ── 5. Inductor cache ─────────────────────────────────────────────────────
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
 mkdir -p /tmp/inductor_cache
-STASH="/workspace/.inductor_cache_${SHA}_050C"
-
-if [ -d "$STASH" ]; then
-  rsync -a "${STASH}/" /tmp/inductor_cache/
-  echo "[launch] Cache restored from 050C stash (${STASH}): $(du -sh /tmp/inductor_cache | cut -f1)"
-else
-  echo "[launch] No 050C stash found — running smoke to compile graphs..."
-  SMOKE_LOG="${RUNDIR}/smoke.log"
-  MAX_WALLCLOCK_SECONDS=300 ENABLE_LOOPING_AT=0.05 PREQUANT_ONLY=1 RUN_ID="050C2-smoke" \
-    torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
-    >> "$SMOKE_LOG" 2>&1
-  grep -q "layer_loop:enabled" "$SMOKE_LOG" && echo "[launch] Smoke OK: loop activated." \
-    || echo "[launch] WARNING: loop activation not seen — check ${SMOKE_LOG}"
-  rsync -a /tmp/inductor_cache/ "$STASH/" &
-  echo "[launch] Stashing cache to ${STASH} in background (PID $!)"
-fi
 
 # ── 6. Screen run (20 min) ────────────────────────────────────────────────
 export MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0
 export RUN_ID="050C2-adabn-early"
 
-echo "[launch] Starting screen — AdaLN ENABLE_LOOPING_AT=0.25 vs 050C (0.35)"
+echo "[launch] Starting screen — AdaLN ENABLE_LOOPING_AT=0.25 (loop activates ~step 1250)"
 echo "[launch] Accept: pre-quant EMA bpb <= 1.067 | Kill: > 1.072"
 torchrun --standalone --nproc_per_node=4 \
   "${WORKTREE}/${TRAIN_SCRIPT}" \

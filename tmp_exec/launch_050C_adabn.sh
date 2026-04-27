@@ -1,8 +1,8 @@
 #!/bin/bash
 # Spec 050C — Per-pass AdaLN (gamma/beta) on 1797 baseline
 # LOOP_ADABN=1 only — isolating AdaLN vs 050 base (no LOOP_ITER_EMBEDS, no LOOP_SCALE_INIT=recip).
-# Plain elementwise ops — natively traceable by dynamo, no @allow_in_graph needed.
-# Compare to 050 baseline pre-quant EMA bpb ~1.067.
+# No smoke needed: always-tensor fix (cd74fcc) means startup loop_warmup compiles both
+# graph variants at init — loop activation is a pure cache hit, no mid-run recompile.
 # Accept: bpb <= 1.067. Kill: > 1.072.
 set -euo pipefail
 
@@ -33,7 +33,7 @@ export MLP_MULT=4 TIE_EMBEDDINGS=1 LOGIT_SOFTCAP=30 ROPE_BASE=10000 ROPE_DIMS=16
 export ROPE_TRAIN_SEQ_LEN=2048 ROPE_YARN=0 LN_SCALE=1 QK_GAIN_INIT=5.0
 # Loop — AdaLN only (no recip-init, no iter-embeds — isolate AdaLN signal)
 export NUM_LOOPS=2 LOOP_START=3 LOOP_END=5 ENABLE_LOOPING_AT=0.35
-export LOOP_ADABN=1             # per-pass (gamma, beta) on attn + MLP residual branches
+export LOOP_ADABN=1
 export PARALLEL_START_LAYER=8 PARALLEL_FINAL_LANE=mean
 # Optimizer
 export MIN_LR=0.1 EMBED_LR=0.6 TIED_EMBED_LR=0.03 TIED_EMBED_INIT_STD=0.005
@@ -56,46 +56,9 @@ export MATRIX_BITS=6 MATRIX_CLIP_SIGMAS=12.85 ATTN_CLIP_SIGMAS=13.0 MLP_CLIP_SIG
 export EMBED_BITS=7 EMBED_CLIP_SIGMAS=15.0 GPTQ_CALIBRATION_BATCHES=16 GPTQ_RESERVE_SECONDS=4
 export SEED=42 PHASED_TTT_NUM_PHASES=3
 
-# ── 5. Inductor cache — inline smoke/prewarm ──────────────────────────────
-# 050C has two new graph variants at loop activation:
-#   - block.forward with pass_gamma_attn=None (pre-loop)
-#   - block.forward with pass_gamma_attn=<tensor> (post-loop)
-# Smoke reaches loop activation at 0.35*900=315s and compiles both.
-# Wallclock bumped from 600 to 900 — per memory feedback_prewarm_wallclock_for_loop_changes,
-# AdaLN's loop-hot-path additions (per-pass γ/β tensors on attn+mlp) need ≥900s smoke
-# wallclock; original 050C run on this template hung 18+ min in loop-activation autotune.
+# ── 5. Inductor cache ─────────────────────────────────────────────────────
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache
 mkdir -p /tmp/inductor_cache
-STASH="/workspace/.inductor_cache_${SHA}_050C"
-
-if [ ! -d "$STASH" ]; then
-  echo "[launch] No stash found — running smoke/prewarm (5 min cap, early loop activation) to compile graphs..."
-  SMOKE_LOG="${RUNDIR}/smoke.log"
-  # Smoke-only overrides: 300s wallclock + ENABLE_LOOPING_AT=0.05 → loop fires at ~15s,
-  # leaving ~4-5 min budget for loop-active compile + sanity training. cd74fcc's single
-  # Block.forward graph variant means the loop activation hits the cached graph from
-  # init warmup — no mid-run recompile. Screen run inherits the exported ENABLE_LOOPING_AT=0.35.
-  MAX_WALLCLOCK_SECONDS=300 ENABLE_LOOPING_AT=0.05 PREQUANT_ONLY=1 RUN_ID="050C-smoke" \
-    torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
-    >> "$SMOKE_LOG" 2>&1
-  if ! grep -q "layer_loop:enabled" "$SMOKE_LOG"; then
-    echo "[launch] WARNING: loop activation not seen in smoke log — check ${SMOKE_LOG}"
-  else
-    echo "[launch] Smoke OK: loop activated cleanly."
-  fi
-  if ! grep -q "loop_rewarm" "$SMOKE_LOG"; then
-    echo "[launch] WARNING: re-warmup log line not seen — check smoke log"
-  else
-    echo "[launch] Re-warmup triggered OK."
-  fi
-  TOK=$(grep "^100/20000 train_loss" "$SMOKE_LOG" | tail -1 | grep -o 'tok/s: [0-9]*' | grep -o '[0-9]*' || true)
-  echo "[launch] Smoke tok/s at step 100: ${TOK:-UNKNOWN}"
-  rsync -a /tmp/inductor_cache/ "$STASH/" &
-  echo "[launch] Stashing cache to ${STASH} in background (PID $!) — screen starting now"
-else
-  rsync -a "${STASH}/" /tmp/inductor_cache/
-  echo "[launch] Cache restored from ${STASH}: $(du -sh /tmp/inductor_cache | cut -f1)"
-fi
 
 # ── 6. Screen run (20 min) ────────────────────────────────────────────────
 export MAX_WALLCLOCK_SECONDS=1200 TTT_ENABLED=0
