@@ -1,12 +1,14 @@
 #!/bin/bash
 # Spec 050B — Per-pass FFN LoRA on 1797 baseline (050A + LOOP_FFN_LORA_RANK=2)
 # Tests activation-side rank-2 LoRA on MLP up/down projections.
-# _compute_lora_deltas() has @dynamo.disable — no narrow-K Triton hang.
+# _compute_lora_deltas() materialized in eager OUTSIDE compile, threaded through
+# forward()/forward_logits() via lora_deltas kwarg (b6305c8 hit dynamo Skip-inlining
+# error under fullgraph=True; fix at 67b16ed).
 # Compare to 050 baseline pre-quant EMA bpb ~1.067.
 # Accept: bpb <= 1.067. Kill: > 1.072.
 set -euo pipefail
 
-SHA="b6305c8"
+SHA="67b16ed"
 ARM="050B-lora"
 RUNDIR="/workspace/runs/050B-lora-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
