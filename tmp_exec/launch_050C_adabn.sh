@@ -6,7 +6,7 @@
 # Accept: bpb <= 1.067. Kill: > 1.072.
 set -euo pipefail
 
-SHA="be60216"
+SHA="cd74fcc"
 ARM="050C-adabn"
 RUNDIR="/workspace/runs/050C-adabn-screen"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
@@ -69,9 +69,13 @@ mkdir -p /tmp/inductor_cache
 STASH="/workspace/.inductor_cache_${SHA}_050C"
 
 if [ ! -d "$STASH" ]; then
-  echo "[launch] No stash found — running smoke/prewarm (15 min cap) to compile graphs..."
+  echo "[launch] No stash found — running smoke/prewarm (5 min cap, early loop activation) to compile graphs..."
   SMOKE_LOG="${RUNDIR}/smoke.log"
-  MAX_WALLCLOCK_SECONDS=900 PREQUANT_ONLY=1 RUN_ID="050C-smoke" \
+  # Smoke-only overrides: 300s wallclock + ENABLE_LOOPING_AT=0.05 → loop fires at ~15s,
+  # leaving ~4-5 min budget for loop-active compile + sanity training. cd74fcc's single
+  # Block.forward graph variant means the loop activation hits the cached graph from
+  # init warmup — no mid-run recompile. Screen run inherits the exported ENABLE_LOOPING_AT=0.35.
+  MAX_WALLCLOCK_SECONDS=300 ENABLE_LOOPING_AT=0.05 PREQUANT_ONLY=1 RUN_ID="050C-smoke" \
     torchrun --standalone --nproc_per_node=4 "${WORKTREE}/${TRAIN_SCRIPT}" \
     >> "$SMOKE_LOG" 2>&1
   if ! grep -q "layer_loop:enabled" "$SMOKE_LOG"; then
