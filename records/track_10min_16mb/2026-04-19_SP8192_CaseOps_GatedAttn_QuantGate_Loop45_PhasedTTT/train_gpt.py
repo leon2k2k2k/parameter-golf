@@ -1231,17 +1231,6 @@ class MLP(nn.Module):
         return F.linear(hidden, down_w.to(x.dtype))
 
 
-@torch._dynamo.allow_in_graph
-def _loop_ffn_lora_apply(up_A, up_B, down_A, down_B, p, i, up_w, down_w):
-    # Spec 047C: compute LoRA delta A@B and add to weight slices.
-    # Module-level + allow_in_graph: dynamo includes this as an opaque graph node so
-    # inductor never tries to Triton-autotune the rank-2 matmul (runs via cuBLAS instead).
-    # @dynamo.disable on an instance method crashes inside compiled model.forward.
-    delta_up   = up_A[p, i]   @ up_B[p, i]
-    delta_down = down_A[p, i] @ down_B[p, i]
-    return up_w + delta_up.to(up_w.dtype), down_w + delta_down.to(down_w.dtype)
-
-
 class Block(nn.Module):
     def __init__(
         self,
@@ -1744,15 +1733,37 @@ class GPT(nn.Module):
             self.mlp_down_bank[i],
         )
 
-    def _apply_loop_ffn_lora(self, info, up_w, down_w):
+    def _compute_lora_deltas(self):
+        """Materialize A@B in pure eager (cuBLAS). Never called inside torch.compile.
+        Rank-2 inner dim would cause Triton autotune infinite hang if seen by inductor."""
+        if self.loop_ffn_up_lora_A is None:
+            return None
+        A_u, B_u = self.loop_ffn_up_lora_A, self.loop_ffn_up_lora_B
+        A_d, B_d = self.loop_ffn_down_lora_A, self.loop_ffn_down_lora_B
+        P, L = A_u.shape[:2]
+        delta_up = torch.bmm(
+            A_u.reshape(P * L, A_u.shape[2], A_u.shape[3]),
+            B_u.reshape(P * L, B_u.shape[2], B_u.shape[3]),
+        ).reshape(P, L, A_u.shape[2], B_u.shape[3])
+        delta_down = torch.bmm(
+            A_d.reshape(P * L, A_d.shape[2], A_d.shape[3]),
+            B_d.reshape(P * L, B_d.shape[2], B_d.shape[3]),
+        ).reshape(P, L, A_d.shape[2], B_d.shape[3])
+        return delta_up, delta_down
+
+    def _apply_loop_ffn_lora(self, info, up_w, down_w, _lora_deltas=None):
         if self.loop_ffn_up_lora_A is None or info is None:
             return up_w, down_w
         p, i = info
-        return _loop_ffn_lora_apply(
-            self.loop_ffn_up_lora_A, self.loop_ffn_up_lora_B,
-            self.loop_ffn_down_lora_A, self.loop_ffn_down_lora_B,
-            p, i, up_w, down_w,
-        )
+        if _lora_deltas is not None:
+            delta_up, delta_down = _lora_deltas
+            return (up_w + delta_up[p, i].to(up_w.dtype),
+                    down_w + delta_down[p, i].to(down_w.dtype))
+        # Eager fallback: forward_ttt path, not inside torch.compile.
+        A_u, B_u = self.loop_ffn_up_lora_A, self.loop_ffn_up_lora_B
+        A_d, B_d = self.loop_ffn_down_lora_A, self.loop_ffn_down_lora_B
+        return (up_w + (A_u[p, i] @ B_u[p, i]).to(up_w.dtype),
+                down_w + (A_d[p, i] @ B_d[p, i]).to(down_w.dtype))
 
     def _parallel_block(
         self, block_idx, lane0, lane1, x0,
@@ -1787,7 +1798,7 @@ class GPT(nn.Module):
             return lane0
         return 0.5 * (lane0 + lane1)
 
-    def _forward_hidden(self, input_ids, cu_seqlens=None, max_seqlen=0):
+    def _forward_hidden(self, input_ids, cu_seqlens=None, max_seqlen=0, _lora_deltas=None):
         x = self.tok_emb(input_ids)
         # SmearGate (PR #1667). Inline gate compute with .contiguous() on the slice fed
         # to the projection so torch.compile fullgraph is happy. lam=0 + W=0 -> identity
@@ -1832,7 +1843,7 @@ class GPT(nn.Module):
             # Spec 047C: per-pass LoRA delta on mlp_up/mlp_down for layers in band.
             if self._enc_ffn_lora_info is not None and self.looping_active:
                 up_w, down_w = self._apply_loop_ffn_lora(
-                    self._enc_ffn_lora_info[step_idx], up_w, down_w
+                    self._enc_ffn_lora_info[step_idx], up_w, down_w, _lora_deltas
                 )
             # Spec 045A: inject per-pass iter embed at entry of each loop-window pass.
             if self.loop_iter_embeds is not None and self.looping_active:
@@ -1892,7 +1903,7 @@ class GPT(nn.Module):
             # Outside band, lora_info is None → helper is a no-op.
             if self._dec_ffn_lora_info is not None and self.looping_active:
                 up_w, down_w = self._apply_loop_ffn_lora(
-                    self._dec_ffn_lora_info[skip_idx], up_w, down_w
+                    self._dec_ffn_lora_info[skip_idx], up_w, down_w, _lora_deltas
                 )
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -1967,15 +1978,15 @@ class GPT(nn.Module):
             return F.linear(hidden, self.tok_emb.weight)
         return self.lm_head(hidden)
 
-    def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0):
+    def forward_logits(self, input_ids, cu_seqlens=None, max_seqlen=0, _lora_deltas=None):
         hidden = self._forward_hidden(
-            input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+            input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, _lora_deltas=_lora_deltas
         )
         logits_proj = self._project_logits(hidden)
         return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
 
-    def forward(self, input_ids, target_ids, cu_seqlens=None, max_seqlen=0):
-        hidden = self._forward_hidden(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    def forward(self, input_ids, target_ids, cu_seqlens=None, max_seqlen=0, _lora_deltas=None):
+        hidden = self._forward_hidden(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, _lora_deltas=_lora_deltas)
         logits_proj = self._project_logits(hidden)
         flat_targets = target_ids.reshape(-1)
         if self.fused_ce_enabled:
@@ -4084,6 +4095,11 @@ def train_model(h, device, val_data):
         base_model.forward_logits, dynamic=False, fullgraph=True
     )
     model = compiled_model
+    # 047C: wrap compiled_forward_logits so eval_val always passes pre-folded
+    # LoRA deltas. Deltas are computed in eager (cuBLAS) to avoid rank-2 Triton hang.
+    def _fwd_logits_with_lora(input_ids, cu_seqlens=None, max_seqlen=0):
+        ld = base_model._compute_lora_deltas()
+        return compiled_forward_logits(input_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, _lora_deltas=ld)
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
     log(f"mlp_activation_specs:{base_model.layer_mlp_activation_specs}")
     log(
@@ -4129,8 +4145,9 @@ def train_model(h, device, val_data):
             x, y, cu_seqlens, _max_seqlen = train_loader.next_batch(
                 h.train_batch_tokens, h.grad_accum_steps
             )
+            _lora_deltas = base_model._compute_lora_deltas()
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                loss = model(x, y, cu_seqlens=cu_seqlens, max_seqlen=h.train_seq_len)
+                loss = model(x, y, cu_seqlens=cu_seqlens, max_seqlen=h.train_seq_len, _lora_deltas=_lora_deltas)
             train_loss += loss.detach()
             (loss / h.grad_accum_steps).backward()
         train_loss /= h.grad_accum_steps
@@ -4185,8 +4202,9 @@ def train_model(h, device, val_data):
                 cu[: len(boundaries)] = torch.tensor(boundaries, dtype=torch.int32, device=device)
                 for _ in range(warmup_cu_iters):
                     optimizers.zero_grad_all()
+                    _lora_deltas = base_model._compute_lora_deltas()
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                        wloss = model(x, y, cu_seqlens=cu, max_seqlen=h.train_seq_len)
+                        wloss = model(x, y, cu_seqlens=cu, max_seqlen=h.train_seq_len, _lora_deltas=_lora_deltas)
                     (wloss / h.grad_accum_steps).backward()
             optimizers.zero_grad_all()
         _run_cu_bucket_warmup()
@@ -4201,8 +4219,9 @@ def train_model(h, device, val_data):
             # now instead of causing a multi-minute pause at frac=enable_looping_at.
             # Forward+backward only (no optimizer step) to avoid memory pressure.
             optimizers.zero_grad_all()
+            _lora_deltas = base_model._compute_lora_deltas()
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                wloss = model(x, y, cu_seqlens=cu_seqlens, max_seqlen=h.train_seq_len)
+                wloss = model(x, y, cu_seqlens=cu_seqlens, max_seqlen=h.train_seq_len, _lora_deltas=_lora_deltas)
             (wloss / h.grad_accum_steps).backward()
             optimizers.zero_grad_all()
             torch.cuda.empty_cache()
@@ -4217,7 +4236,7 @@ def train_model(h, device, val_data):
                             boundaries.append(x.size(1))
                         cu = torch.full((bucket_len,), x.size(1), dtype=torch.int32, device=device)
                         cu[: len(boundaries)] = torch.tensor(boundaries, dtype=torch.int32, device=device)
-                        compiled_forward_logits(x, cu_seqlens=cu, max_seqlen=h.train_seq_len)
+                        _fwd_logits_with_lora(x, cu_seqlens=cu, max_seqlen=h.train_seq_len)
             base_model.train()
         # forward_logits is compiled separately from forward; pre-warm at the
         # base slope so the first val_loss eval doesn't trigger a cold compile.
@@ -4307,7 +4326,7 @@ def train_model(h, device, val_data):
             torch.cuda.synchronize()
             training_time_ms += 1e3 * (time.perf_counter() - t0)
             val_loss, val_bpb = eval_val(
-                h, device, val_data, model, compiled_forward_logits
+                h, device, val_data, model, _fwd_logits_with_lora
             )
             log(
                 f"{step}/{h.iterations} val_loss: {val_loss:.4f} val_bpb: {val_bpb:.4f}"
@@ -4425,7 +4444,7 @@ def train_model(h, device, val_data):
         name: t.to(dtype=current_state[name].dtype) for (name, t) in ema_state.items()
     }
     base_model.load_state_dict(avg_state, strict=True)
-    return base_model, compiled_model, compiled_forward_logits
+    return base_model, compiled_model, _fwd_logits_with_lora
 
 
 def train_and_eval(h, device):
