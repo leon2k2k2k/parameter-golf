@@ -3532,6 +3532,17 @@ def train_model(h, device, val_data):
             log(
                 f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_training_time_ms/60000:.1f}m tok/s: {tok_per_sec:.0f}"
             )
+            if h.loop_ffn_lora_rank > 0 and h.rank == 0:
+                _B_up = base_model.loop_ffn_up_lora_B
+                _B_dn = base_model.loop_ffn_down_lora_B
+                _A_up = base_model.loop_ffn_up_lora_A
+                _A_dn = base_model.loop_ffn_down_lora_A
+                log(
+                    f"lora_norms: B_up={_B_up.norm().item():.5f} B_dn={_B_dn.norm().item():.5f}"
+                    f" A_up={_A_up.norm().item():.3f} A_dn={_A_dn.norm().item():.3f}"
+                    f" delta_up={(_A_up@_B_up).norm().item():.5f}"
+                    f" delta_dn={(_A_dn@_B_dn).norm().item():.5f}"
+                )
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
         )
