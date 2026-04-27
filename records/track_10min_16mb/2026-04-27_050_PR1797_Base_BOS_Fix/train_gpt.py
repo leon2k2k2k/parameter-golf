@@ -261,6 +261,9 @@ class Hyperparameters:
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
+    loop_scale_init = os.environ.get("LOOP_SCALE_INIT", "ones")
+    loop_iter_embeds = bool(int(os.environ.get("LOOP_ITER_EMBEDS", "0")))
+    loop_ffn_lora_rank = int(os.environ.get("LOOP_FFN_LORA_RANK", "0"))
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
@@ -1122,7 +1125,7 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, lora_delta_up=None, lora_delta_down=None):
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(
@@ -1132,9 +1135,15 @@ class Block(nn.Module):
             max_seqlen=max_seqlen,
         )
         x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
-        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
-            None, None, :
-        ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        x_normed = self.mlp_norm(x_out) * self.ln_scale_factor
+        mlp_out = self.mlp(x_normed, up_w, down_w)
+        if lora_delta_up is not None:
+            # 050B: activation-side LoRA — delta = A@B pre-materialized outside compile.
+            # F.linear(x, delta_up) K=dim, F.linear(h, delta_down) K=hidden — both Triton-safe.
+            x_flat = x_normed.reshape(-1, x_normed.shape[-1])
+            h_lora = self.mlp._activate(F.linear(x_flat, lora_delta_up.to(x_flat.dtype)))
+            mlp_out = mlp_out + F.linear(h_lora, lora_delta_down.to(x_flat.dtype)).reshape_as(mlp_out)
+        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
         return x_out
 
 class GPT(nn.Module):
@@ -1214,9 +1223,82 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            # 050A Lever C: 1/(num_loops+1) init for attn_scale/mlp_scale on loop layers.
+            if h.loop_scale_init == "recip":
+                scale = 1.0 / (h.num_loops + 1)
+                for li in range(h.loop_start, h.loop_end + 1):
+                    self.blocks[li].attn_scale.data.fill_(scale)
+                    self.blocks[li].mlp_scale.data.fill_(scale)
+            # 050A Lever A: per-pass iteration embeddings [num_passes, model_dim].
+            # Zero-init → transparent at step 0. Injected at entry of each loop pass.
+            self.loop_iter_embeds = None
+            if h.loop_iter_embeds:
+                num_passes = h.num_loops + 1
+                self.loop_iter_embeds = nn.Parameter(
+                    torch.zeros(num_passes, h.model_dim, dtype=torch.float32)
+                )
+                _loop_start = h.loop_start
+                enc_pass_info, pass_cnt = [], -1
+                for idx in self.encoder_indices:
+                    if idx == _loop_start:
+                        pass_cnt += 1
+                        enc_pass_info.append(pass_cnt)
+                    else:
+                        enc_pass_info.append(None)
+                self._enc_iter_embed_info = enc_pass_info
+                dec_pass_info, pass_cnt = [], -1
+                for idx in self.decoder_indices:
+                    if idx == _loop_start:
+                        pass_cnt += 1
+                        dec_pass_info.append(pass_cnt)
+                    else:
+                        dec_pass_info.append(None)
+                self._dec_iter_embed_info = dec_pass_info
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.loop_iter_embeds = None
+        # 050B: per-pass FFN LoRA. B=0-init → delta=0 at step 0, byte-identical to baseline.
+        self.loop_ffn_lora_rank = int(h.loop_ffn_lora_rank) if h.num_loops > 0 else 0
+        if self.loop_ffn_lora_rank > 0:
+            num_passes_l = h.num_loops + 1
+            num_looped_l = h.loop_end - h.loop_start + 1
+            hidden_dim_l = int(h.mlp_mult * h.model_dim)
+            r_l = self.loop_ffn_lora_rank
+            self.loop_ffn_up_lora_A = nn.Parameter(
+                torch.empty(num_passes_l, num_looped_l, hidden_dim_l, r_l, dtype=torch.float32)
+            )
+            self.loop_ffn_up_lora_B = nn.Parameter(
+                torch.zeros(num_passes_l, num_looped_l, r_l, h.model_dim, dtype=torch.float32)
+            )
+            self.loop_ffn_down_lora_A = nn.Parameter(
+                torch.empty(num_passes_l, num_looped_l, h.model_dim, r_l, dtype=torch.float32)
+            )
+            self.loop_ffn_down_lora_B = nn.Parameter(
+                torch.zeros(num_passes_l, num_looped_l, r_l, hidden_dim_l, dtype=torch.float32)
+            )
+            _pct: dict = {}
+            self._enc_ffn_lora_info = []
+            for idx in self.encoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pct.get(idx, 0); _pct[idx] = pi + 1
+                    self._enc_ffn_lora_info.append((pi, idx - h.loop_start))
+                else:
+                    self._enc_ffn_lora_info.append(None)
+            self._dec_ffn_lora_info = []
+            for idx in self.decoder_indices:
+                if h.loop_start <= idx <= h.loop_end:
+                    pi = _pct.get(idx, 0); _pct[idx] = pi + 1
+                    self._dec_ffn_lora_info.append((pi, idx - h.loop_start))
+                else:
+                    self._dec_ffn_lora_info.append(None)
+        else:
+            self.loop_ffn_up_lora_A = None
+            self.loop_ffn_up_lora_B = None
+            self.loop_ffn_down_lora_A = None
+            self.loop_ffn_down_lora_B = None
+            self._enc_ffn_lora_info = None
+            self._dec_ffn_lora_info = None
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1265,6 +1347,11 @@ class GPT(nn.Module):
             nn.init.orthogonal_(self.mlp_up_bank.data[i], gain=1.0)
             nn.init.zeros_(self.mlp_down_bank.data[i])
             self.mlp_down_bank.data[i].mul_(proj_scale)
+        if self.loop_ffn_lora_rank > 0:
+            nn.init.kaiming_uniform_(self.loop_ffn_up_lora_A.data, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.loop_ffn_down_lora_A.data, a=math.sqrt(5))
+            nn.init.zeros_(self.loop_ffn_up_lora_B.data)
+            nn.init.zeros_(self.loop_ffn_down_lora_B.data)
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 if getattr(module, "_zero_init", False):
@@ -1275,6 +1362,25 @@ class GPT(nn.Module):
                     and module.weight.shape[1] >= 64
                 ):
                     nn.init.orthogonal_(module.weight, gain=1.0)
+
+    @torch._dynamo.disable
+    def _compute_lora_deltas(self):
+        """Materialize A@B in eager (cuBLAS). Disabled from dynamo so narrow-K rank
+        matmuls never enter Triton autotune. Returns (delta_up, delta_down) or None."""
+        if self.loop_ffn_up_lora_A is None:
+            return None
+        A_u, B_u = self.loop_ffn_up_lora_A, self.loop_ffn_up_lora_B
+        A_d, B_d = self.loop_ffn_down_lora_A, self.loop_ffn_down_lora_B
+        P, L = A_u.shape[:2]
+        delta_up = torch.bmm(
+            A_u.reshape(P * L, A_u.shape[2], A_u.shape[3]),
+            B_u.reshape(P * L, B_u.shape[2], B_u.shape[3]),
+        ).reshape(P, L, A_u.shape[2], B_u.shape[3])
+        delta_down = torch.bmm(
+            A_d.reshape(P * L, A_d.shape[2], A_d.shape[3]),
+            B_d.reshape(P * L, B_d.shape[2], B_d.shape[3]),
+        ).reshape(P, L, A_d.shape[2], B_d.shape[3])
+        return delta_up, delta_down
 
     def _bank_weights(self, i):
         n = self.num_layers
@@ -1351,14 +1457,35 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        for i in enc_iter:
+        _lora_deltas = self._compute_lora_deltas() if (self.looping_active and self.loop_ffn_lora_rank > 0) else None
+        for step_idx, i in enumerate(enc_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._enc_iter_embed_info[step_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
+            _enc_ldu, _enc_ldd = None, None
+            if _lora_deltas is not None and self._enc_ffn_lora_info is not None:
+                _enc_info = self._enc_ffn_lora_info[step_idx]
+                if _enc_info is not None:
+                    _ep, _el = _enc_info
+                    _enc_ldu, _enc_ldd = _lora_deltas[0][_ep, _el], _lora_deltas[1][_ep, _el]
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_enc_ldu, lora_delta_down=_enc_ldd)
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
         for skip_idx, i in enumerate(dec_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._dec_iter_embed_info[skip_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
+            _dec_ldu, _dec_ldd = None, None
+            if _lora_deltas is not None and self._dec_ffn_lora_info is not None:
+                _dec_info = self._dec_ffn_lora_info[skip_idx]
+                if _dec_info is not None:
+                    _dp, _dl = _dec_info
+                    _dec_ldu, _dec_ldd = _lora_deltas[0][_dp, _dl], _lora_deltas[1][_dp, _dl]
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -1387,7 +1514,7 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, lora_delta_up=_dec_ldu, lora_delta_down=_dec_ldd)
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
@@ -1453,7 +1580,11 @@ class GPT(nn.Module):
             )
         )
         slot = 0
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._enc_iter_embed_info[step_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             slot += 1
@@ -1462,6 +1593,10 @@ class GPT(nn.Module):
         lane0 = None
         lane1 = None
         for skip_idx, i in enumerate(dec_iter):
+            if self.looping_active and self.loop_iter_embeds is not None:
+                _p = self._dec_iter_embed_info[skip_idx]
+                if _p is not None:
+                    x = x + self.loop_iter_embeds[_p].to(dtype=x.dtype)
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
                 if lane0 is None:
@@ -1927,6 +2062,12 @@ class Optimizers:
         if getattr(base_model, "smear_gate_enabled", False):
             scalar_params.append(base_model.smear_gate.weight)
             scalar_params.append(base_model.smear_lambda)
+        if getattr(base_model, "loop_iter_embeds", None) is not None:
+            scalar_params.append(base_model.loop_iter_embeds)
+        for _name in ("loop_ffn_up_lora_A", "loop_ffn_up_lora_B", "loop_ffn_down_lora_A", "loop_ffn_down_lora_B"):
+            _p = getattr(base_model, _name, None)
+            if _p is not None and _p.requires_grad:
+                scalar_params.append(_p)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
@@ -3315,6 +3456,8 @@ def train_model(h, device, val_data):
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
+            _run_cu_bucket_warmup()
+            log("loop_rewarm: loop-active compiled graph re-warmed across all cu_seqlens buckets")
         train_loss = step_fn(step, scale)
         with torch.no_grad():
             for (name, t) in base_model.state_dict().items():
