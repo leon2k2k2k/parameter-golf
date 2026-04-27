@@ -33,19 +33,43 @@ static int edge_inc(Table*t,Ctx*c,uint8_t b){
 }
 static uint64_t mask_for(int K){return K>=8?~0ULL:((1ULL<<(8*K))-1ULL);}
 static inline double lgi(uint32_t x,double*lc,uint32_t lcap){if(lc&&x<lcap){double v=lc[x];if(v>=0.0)return v;v=log((double)x);lc[x]=v;return v;}return log((double)x);}
-static int score_byte(Table*tables,uint32_t*c0,uint32_t*tot0,uint32_t*uniq0,uint32_t*max0,uint64_t*hist,int*wlen,int order,uint8_t b,double nn_logp,double lambda_hi,double lambda_lo,double lhi,double llo,double l1hi,double l1lo,double thr,double*lc,uint32_t lcap,double*mix_nll,double*ppm_nll,double*nn_nll,uint64_t*bytes,uint64_t*gate_high,uint64_t*gate_total){
+
+/* score_byte_with_dump: extension of score_byte that ALSO writes per-byte
+ * info (mix_nll, ppm_nll, nn_nll, conf, gate_high, actual_byte) to dump
+ * arrays at index *dump_idx, then increments dump_idx. If dump arrays are
+ * NULL, behaves identically to score_byte. */
+static int score_byte_with_dump(Table*tables,uint32_t*c0,uint32_t*tot0,uint32_t*uniq0,uint32_t*max0,uint64_t*hist,int*wlen,int order,uint8_t b,double nn_logp,double lambda_hi,double lambda_lo,double lhi,double llo,double l1hi,double l1lo,double thr,double*lc,uint32_t lcap,double*mix_nll,double*ppm_nll,double*nn_nll,uint64_t*bytes,uint64_t*gate_high,uint64_t*gate_total,
+        float*dump_mix,float*dump_ppm,float*dump_nn,float*dump_conf,uint8_t*dump_gate_hi,uint8_t*dump_byte,uint64_t*dump_idx){
     const double uni=log(1.0/256.0);double ppm_log=0.0,conf=0.0,esc=0.0;int found=0,seen=0,maxk=*wlen<order?*wlen:order;uint64_t keys[9];keys[0]=0;for(int K=1;K<=maxk;K++)keys[K]=(*hist)&mask_for(K);
     for(int K=maxk;K>=1;K--){Ctx*c=table_find(&tables[K],keys[K]);if(!c)continue;uint32_t den=c->total+c->unique;if(!den)continue;double denom=(double)den;if(!seen){conf=(double)c->max_count/denom;seen=1;}uint32_t cnt=edge_count(&tables[K],c,b);if(cnt){ppm_log=esc+(lgi(cnt,lc,lcap)-lgi(den,lc,lcap));found=1;break;}if(c->unique>0)esc+=lgi(c->unique,lc,lcap)-lgi(den,lc,lcap);}
     if(!found){uint32_t den0=*tot0+*uniq0;if(den0>0){double denom0=(double)den0;if(!seen){conf=(double)(*max0)/denom0;seen=1;}uint32_t cnt=c0[b];if(cnt){ppm_log=esc+(lgi(cnt,lc,lcap)-lgi(den0,lc,lcap));found=1;}else if(*uniq0>0)esc+=lgi(*uniq0,lc,lcap)-lgi(den0,lc,lcap);}}
     if(!found)ppm_log=esc+uni;
-    double lam=conf>=thr?lambda_lo:lambda_hi;(*gate_total)++;if(conf>=thr)(*gate_high)++;
-    double log_mix;if(lam<=0.0)log_mix=ppm_log;else if(lam>=1.0)log_mix=nn_logp;else{int hi=conf>=thr;double a=(hi?llo:lhi)+nn_logp,c=(hi?l1lo:l1hi)+ppm_log,m=a>c?a:c;log_mix=m+log(exp(a-m)+exp(c-m));}
+    int hi=conf>=thr;double lam=hi?lambda_lo:lambda_hi;(*gate_total)++;if(hi)(*gate_high)++;
+    double log_mix;if(lam<=0.0)log_mix=ppm_log;else if(lam>=1.0)log_mix=nn_logp;else{double a=(hi?llo:lhi)+nn_logp,c=(hi?l1lo:l1hi)+ppm_log,m=a>c?a:c;log_mix=m+log(exp(a-m)+exp(c-m));}
     *mix_nll-=log_mix;*ppm_nll-=ppm_log;*nn_nll-=nn_logp;(*bytes)++;
+    /* PER-BYTE DUMP */
+    if(dump_mix){
+        uint64_t idx=*dump_idx;
+        dump_mix[idx]=(float)(-log_mix);
+        dump_ppm[idx]=(float)(-ppm_log);
+        dump_nn[idx]=(float)(-nn_logp);
+        dump_conf[idx]=(float)conf;
+        dump_gate_hi[idx]=(uint8_t)hi;
+        dump_byte[idx]=b;
+        (*dump_idx)++;
+    }
     uint32_t nc=++c0[b];(*tot0)++;if(nc==1)(*uniq0)++;if(nc>*max0)*max0=nc;
     for(int K=1;K<=maxk;K++){Ctx*c=table_get_or_add(&tables[K],keys[K]);if(!c||edge_inc(&tables[K],c,b))return-1;}
     if(order>0){*hist=((*hist)<<8|b)&mask_for(order);if(*wlen<order)(*wlen)++;}
     return 0;
 }
+
+/* Backward-compat wrapper: calls score_byte_with_dump with NULL dump pointers. */
+static int score_byte(Table*tables,uint32_t*c0,uint32_t*tot0,uint32_t*uniq0,uint32_t*max0,uint64_t*hist,int*wlen,int order,uint8_t b,double nn_logp,double lambda_hi,double lambda_lo,double lhi,double llo,double l1hi,double l1lo,double thr,double*lc,uint32_t lcap,double*mix_nll,double*ppm_nll,double*nn_nll,uint64_t*bytes,uint64_t*gate_high,uint64_t*gate_total){
+    return score_byte_with_dump(tables,c0,tot0,uniq0,max0,hist,wlen,order,b,nn_logp,lambda_hi,lambda_lo,lhi,llo,l1hi,l1lo,thr,lc,lcap,mix_nll,ppm_nll,nn_nll,bytes,gate_high,gate_total,
+        NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+}
+
 int ppm_score(const int64_t*target,const int64_t*prev,const double*nll,int64_t n,const uint8_t*flat,const int32_t*offs,const int32_t*lens,const uint8_t*has_space,const uint8_t*is_boundary,int vocab,int order,double lambda_hi,double lambda_lo,double thr,uint32_t log_cache_size,double*out){
     if(order<0||order>8)return-2;Table tables[9];uint64_t cap=(uint64_t)n*2+1024;for(int k=1;k<=order;k++)if(table_init(&tables[k],cap/(k+1)+1024))return-3;
     double*lc=0;if(log_cache_size>1){lc=(double*)malloc((size_t)log_cache_size*sizeof(double));if(!lc)return-6;for(uint32_t i=0;i<log_cache_size;i++)lc[i]=-1.0;}double lhi=log(lambda_hi),llo=log(lambda_lo),l1hi=log(1.0-lambda_hi),l1lo=log(1.0-lambda_lo);
@@ -54,6 +78,33 @@ int ppm_score(const int64_t*target,const int64_t*prev,const double*nll,int64_t n
     const double log2v=log(2.0);out[0]=bytes?mix_nll/(double)bytes/log2v:0;out[1]=bytes?ppm_nll/(double)bytes/log2v:0;out[2]=bytes?nn_nll/(double)bytes/log2v:0;out[3]=bytes?token_nll/(double)bytes/log2v:0;out[4]=(double)bytes;out[5]=gate_total?(double)gate_high/(double)gate_total:0;
     if(lc)free(lc);for(int k=1;k<=order;k++)table_free(&tables[k]);return 0;
 }
+
+/* ppm_score_dump: single-threaded ppm_score with per-byte data dump.
+ * Caller pre-allocates dump arrays of size >= max possible byte count
+ * (suggest: n_tokens * 17 to be safe). On return, `*dump_n_bytes`
+ * contains actual bytes written. Other behavior identical to ppm_score. */
+int ppm_score_dump(const int64_t*target,const int64_t*prev,const double*nll,int64_t n,const uint8_t*flat,const int32_t*offs,const int32_t*lens,const uint8_t*has_space,const uint8_t*is_boundary,int vocab,int order,double lambda_hi,double lambda_lo,double thr,uint32_t log_cache_size,double*out,
+        float*dump_mix,float*dump_ppm,float*dump_nn,float*dump_conf,uint8_t*dump_gate_hi,uint8_t*dump_byte,uint64_t*dump_n_bytes){
+    if(order<0||order>8)return-2;Table tables[9];uint64_t cap=(uint64_t)n*2+1024;for(int k=1;k<=order;k++)if(table_init(&tables[k],cap/(k+1)+1024))return-3;
+    double*lc=0;if(log_cache_size>1){lc=(double*)malloc((size_t)log_cache_size*sizeof(double));if(!lc)return-6;for(uint32_t i=0;i<log_cache_size;i++)lc[i]=-1.0;}double lhi=log(lambda_hi),llo=log(lambda_lo),l1hi=log(1.0-lambda_hi),l1lo=log(1.0-lambda_lo);
+    uint32_t c0[256];memset(c0,0,sizeof(c0));uint32_t tot0=0,uniq0=0,max0=0;uint64_t hist=0;int wlen=0;double mix_nll=0,ppm_nll=0,nn_nll=0,token_nll=0;uint64_t bytes=0,gate_high=0,gate_total=0;
+    uint64_t dump_idx=0;
+    for(int64_t i=0;i<n;i++){
+        int tid=(int)target[i],pid=(int)prev[i];if(tid<0||tid>=vocab)continue;
+        int len=lens[tid];int inc_space=has_space[tid]&&(pid<0||!is_boundary[pid]);int nb=len+(inc_space?1:0);if(nb<=0)continue;
+        double nn_logp=-nll[i]/(double)nb;token_nll+=nll[i];
+        if(inc_space)if(score_byte_with_dump(tables,c0,&tot0,&uniq0,&max0,&hist,&wlen,order,32,nn_logp,lambda_hi,lambda_lo,lhi,llo,l1hi,l1lo,thr,lc,log_cache_size,&mix_nll,&ppm_nll,&nn_nll,&bytes,&gate_high,&gate_total,
+            dump_mix,dump_ppm,dump_nn,dump_conf,dump_gate_hi,dump_byte,&dump_idx))return-4;
+        const uint8_t*p=flat+offs[tid];
+        for(int j=0;j<len;j++)if(score_byte_with_dump(tables,c0,&tot0,&uniq0,&max0,&hist,&wlen,order,p[j],nn_logp,lambda_hi,lambda_lo,lhi,llo,l1hi,l1lo,thr,lc,log_cache_size,&mix_nll,&ppm_nll,&nn_nll,&bytes,&gate_high,&gate_total,
+            dump_mix,dump_ppm,dump_nn,dump_conf,dump_gate_hi,dump_byte,&dump_idx))return-5;
+    }
+    const double log2v=log(2.0);
+    out[0]=bytes?mix_nll/(double)bytes/log2v:0;out[1]=bytes?ppm_nll/(double)bytes/log2v:0;out[2]=bytes?nn_nll/(double)bytes/log2v:0;out[3]=bytes?token_nll/(double)bytes/log2v:0;out[4]=(double)bytes;out[5]=gate_total?(double)gate_high/(double)gate_total:0;
+    *dump_n_bytes=dump_idx;
+    if(lc)free(lc);for(int k=1;k<=order;k++)table_free(&tables[k]);return 0;
+}
+
 /* OpenMP parallel chunked scorer. Splits the token stream into chunks of
  * size `chunk_tokens`; each chunk gets its own PPM-D state (tables, c0,
  * hist) and is processed sequentially within the chunk. Chunks are
