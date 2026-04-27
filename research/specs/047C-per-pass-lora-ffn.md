@@ -4,8 +4,8 @@
 **Created:** 2026-04-27
 **Status:** READY
 **Branch:** `exp/047C-per-pass-lora-ffn` (forked from `exp/045-loop-layer-improvements` @ `ece7b76`)
-**Commit:** `e2f7a3d` (5cf60f9 = code change; e2f7a3d adds `tmp_exec/launch_047C.sh` + `launch_047C_smoke.sh`)
-**Links to:** `research/ideas/loop-ffn-expressivity.md` (Level 1 in that umbrella idea)
+**Commit:** `0826944` (activation-side LoRA fix; 70013c5 = launch SHA update)
+**Links to:** `research/ideas/per-pass-lora-ffn.md`
 
 ## Hypothesis
 
@@ -55,7 +55,7 @@ This is the matched-rung baseline. Comparison is at training endpoint, post-EMA,
 ## Code changes
 
 **Branch:** `exp/047C-per-pass-lora-ffn` from `exp/045-loop-layer-improvements`.
-**Commit:** TBD (implementation pending).
+**Commit:** `0826944` (activation-side LoRA).
 
 **New parameters** added to `GPT.__init__`:
 ```python
@@ -74,20 +74,26 @@ self.loop_ffn_down_lora_B = nn.Parameter(  # (P, NL, r, hidden_dim)
 **Init (standard LoRA):** A ~ Kaiming-uniform, B = 0 → initial delta is exactly 0,
 training-loss neutral at step 0.
 
-**Forward (in MLP / Block.forward, only when layer ∈ band and pass p):**
+**Forward — activation-side LoRA (compile-safe):**
+
+Weight-side LoRA (`up_w + delta`) changes the kernel identity passed to the
+fused MLP, triggering a full Triton re-autotune at loop activation. Instead,
+deltas are pre-folded in eager (`A@B` via `torch.bmm` before `model.forward`),
+passed as forward() kwargs (guarded by shape/dtype only — no per-step recompile),
+and applied AFTER the base MLP on the activation:
+
 ```python
-# pseudocode for the up projection at (pass=p, layer_in_band=i)
-up_base = mlp_up_bank[layer_idx]                     # (hidden_dim, model_dim)
-up_lora = loop_ffn_up_lora_A[p, i] @ loop_ffn_up_lora_B[p, i]
-                                                     # (hidden_dim, model_dim)
-W_up_eff = up_base + up_lora
-h_up = W_up_eff @ x                                  # ~ same cost as base
-# (same for down)
+# In Block.forward — base MLP uses original nn.Parameter (cache hit)
+mlp_out = self.mlp(x_normed, up_w, down_w)
+if lora_delta_up is not None:
+    x_flat = x_normed.reshape(-1, x_normed.shape[-1])
+    h_lora = self.mlp._activate(F.linear(x_flat, lora_delta_up))
+    mlp_out = mlp_out + F.linear(h_lora, lora_delta_down).reshape_as(mlp_out)
 ```
 
-Implementation note: forward materializes the full delta `A @ B` once per
-(pass, layer), then adds to `up_w`/`down_w` and reuses the existing fused MLP
-kernel. With r=2 this is 9 deltas of size (2048, 512) per forward — small.
+K=512 and K=2048 are standard Triton-friendly shapes — autotuned once, then
+cached. TTT eager path (`forward_ttt`) keeps weight-side LoRA via
+`_apply_loop_ffn_lora` (runs outside `torch.compile`, no Triton concern).
 
 **Optimizer routing — divergence from interview answer.** Spec interview said
 "Muon for matrix params." On implementation, the LoRA matrices have extreme
