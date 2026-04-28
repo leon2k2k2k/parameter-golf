@@ -1122,7 +1122,7 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, ffn_pass_scale=None):
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(
@@ -1132,9 +1132,10 @@ class Block(nn.Module):
             max_seqlen=max_seqlen,
         )
         x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
-        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
-            None, None, :
-        ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        mlp_out = self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        if ffn_pass_scale is not None:
+            mlp_out = ffn_pass_scale.to(dtype=mlp_out.dtype)[None, None, :] * mlp_out
+        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
         return x_out
 
 class GPT(nn.Module):
@@ -1214,9 +1215,39 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            # 052: per-pass FFN output scale — learned [n_passes, n_loop_layers, model_dim], init ones
+            _n_passes = h.num_loops + 1
+            _n_loop = h.loop_end - h.loop_start + 1
+            self.loop_pass_ffn_scale = nn.Parameter(
+                torch.ones(_n_passes, _n_loop, h.model_dim, dtype=torch.float32)
+            )
+            self.register_buffer('_ffn_pass_scale_id', torch.ones(h.model_dim))
+            _ls, _le = h.loop_start, h.loop_end
+            enc_ps_info, pass_cnt = [], -1
+            for idx in self.encoder_indices:
+                if _ls <= idx <= _le:
+                    if idx == _ls:
+                        pass_cnt += 1
+                    enc_ps_info.append((pass_cnt, idx - _ls))
+                else:
+                    enc_ps_info.append(None)
+            self._enc_pass_scale_info = enc_ps_info
+            dec_ps_info = []
+            for idx in self.decoder_indices:
+                if _ls <= idx <= _le:
+                    if idx == _ls:
+                        pass_cnt += 1
+                    dec_ps_info.append((pass_cnt, idx - _ls))
+                else:
+                    dec_ps_info.append(None)
+            self._dec_pass_scale_info = dec_ps_info
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.loop_pass_ffn_scale = None
+            self._enc_pass_scale_info = None
+            self._dec_pass_scale_info = None
+            self.register_buffer('_ffn_pass_scale_id', torch.ones(h.model_dim))
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1290,7 +1321,7 @@ class GPT(nn.Module):
     def _parallel_block(
         self, block_idx, lane0, lane1, x0,
         q_w, k_w, v_w, out_w, up_w, down_w,
-        cu_seqlens=None, max_seqlen=0,
+        cu_seqlens=None, max_seqlen=0, ffn_pass_scale=None,
     ):
         block = self.blocks[block_idx]
         mix = block.resid_mix.to(dtype=lane0.dtype)
@@ -1302,9 +1333,10 @@ class GPT(nn.Module):
         )
         attn_out = block.attn_scale.to(dtype=attn_out.dtype)[None, None, :] * attn_out
         mlp_read = lane1
-        mlp_out = block.mlp_scale.to(dtype=lane1.dtype)[None, None, :] * block.mlp(
-            block.mlp_norm(mlp_read) * block.ln_scale_factor, up_w, down_w
-        )
+        mlp_out = block.mlp(block.mlp_norm(mlp_read) * block.ln_scale_factor, up_w, down_w)
+        if ffn_pass_scale is not None:
+            mlp_out = ffn_pass_scale.to(dtype=mlp_out.dtype)[None, None, :] * mlp_out
+        mlp_out = block.mlp_scale.to(dtype=lane1.dtype)[None, None, :] * mlp_out
         attn_resid = self.parallel_resid_lambdas[block_idx, 0].to(dtype=lane0.dtype)
         attn_post = self.parallel_post_lambdas[block_idx, 0].to(dtype=lane0.dtype)
         mlp_resid = self.parallel_resid_lambdas[block_idx, 1].to(dtype=lane0.dtype)
@@ -1351,15 +1383,25 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            if self._enc_pass_scale_info is not None and self.looping_active:
+                _info = self._enc_pass_scale_info[step_idx]
+                _fscale = self.loop_pass_ffn_scale[_info[0], _info[1]] if _info is not None else self._ffn_pass_scale_id
+            else:
+                _fscale = None
+            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, ffn_pass_scale=_fscale)
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            if self._dec_pass_scale_info is not None and self.looping_active:
+                _info = self._dec_pass_scale_info[skip_idx]
+                _fscale = self.loop_pass_ffn_scale[_info[0], _info[1]] if _info is not None else self._ffn_pass_scale_id
+            else:
+                _fscale = None
             if i >= psl and psl > 0:
                 if lane0 is None:
                     lane0 = x
@@ -1374,7 +1416,7 @@ class GPT(nn.Module):
                         lane0 = lane0 + w * skip
                 lane0, lane1 = self._parallel_block(
                     i, lane0, lane1, x0, q_w, k_w, v_w, out_w, up_w, down_w,
-                    cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
+                    cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, ffn_pass_scale=_fscale,
                 )
             else:
                 if skip_idx < self.num_skip_weights and skips:
@@ -1387,7 +1429,7 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, ffn_pass_scale=_fscale)
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
