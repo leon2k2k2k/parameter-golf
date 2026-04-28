@@ -1,8 +1,13 @@
 # Spec 064 — Bottleneck profiling diagnostic on 060A (no-fork)
 
-**Status:** DIAGNOSTIC — no model changes, no fork, no submission
-artifact. Runs the 060A pinned commit verbatim under an external
-profiler wrapper. Output is a kernel-level trace + analysis report.
+**Status:** FROZEN — diagnostic run, no model changes, no fork, no
+submission artifact. Runs the 060A pinned commit verbatim under an
+external profiler wrapper. Output is a kernel-level trace + analysis
+report.
+
+**Harness committed:** `tmp_exec/launch_064_profile.sh` +
+`tmp_exec/analyze_064_profile.py` (both syntax-checked locally).
+Ready for execution to launch.
 
 **Date:** 2026-04-29
 **Branch:** **NONE** — 060A code is used as-is.
