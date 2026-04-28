@@ -23,7 +23,7 @@ baseline validation + downstream lever signal only.
 | 060A repacked | brotli → pergroup compressor | (same) | 0 | 15,902,118 | LEGAL, 98 KB headroom |
 | 060B | ATTN_CLIP_SIGMAS 13.0→12.5 | 1.07193891 | −0.000182 | 15,962,059 | LEGAL, 38 KB headroom |
 | 060D-half | ATTN_CLIP_SIGMAS 13.0→12.0 | 1.07176948 | −0.000352 | 16,024,916 | OVER cap by 25 KB |
-| 060E | EMBED_CLIP_SIGMAS 14.0→13.0 | (running) | — | — | — |
+| 060E | EMBED_CLIP_SIGMAS 14.0→13.0 | 1.07191140 | −0.000209 | 15,957,730 | LEGAL, 42 KB headroom |
 
 060A also ran TTT (3 phases, 792s eval): post-TTT val_bpb **1.05918371**
 — beats #1855's 3-seed mean (1.06108) by 0.0019.
@@ -79,13 +79,23 @@ right after `load_state_dict`. The training path masked this because
 
 ## Lever economics observed
 
-| lever | one −0.5σ step costs (bytes) | gives (Δ post-quant val_bpb) | bytes / 1e-4 bpb |
-|---|---:|---:|---:|
-| ATTN | +60 KB / step | −0.00018 / step | ~333 KB |
-| EMBED | (060E running) | (060E running) | — |
-| MLP | (untested; likely +150-300 KB / step based on weight share) | — | — |
+| lever | step | bytes cost | Δ post-quant val_bpb | bytes / 1e-4 bpb |
+|---|---|---:|---:|---:|
+| ATTN | −0.5σ (13.0→12.5) | +60 KB | −0.000182 | ~33 KB / 1e-4 |
+| ATTN | −1σ (13.0→12.0) | +123 KB | −0.000352 | ~35 KB / 1e-4 |
+| **EMBED** | **−1σ (14.0→13.0)** | **+55 KB** | **−0.000209** | **~26 KB / 1e-4** ← cheapest |
+| MLP | (untested; weight share suggests +150-300 KB / −0.5σ step) | — | — | — |
 
-Linear in ATTN so far. Need EMBED measurement (060E) to rank levers.
+ATTN is approximately linear in step (60 KB per −0.5σ). EMBED is **more
+byte-efficient than ATTN** (~26 vs ~34 KB per 1e-4 bpb). MLP untested but
+likely the most expensive lever per step (largest weight class).
+
+**Stack predictions** (assume linear additivity of byte costs):
+- 060B + 060E (ATTN −0.5σ + EMBED −1σ): predict +115 KB total → ~16,017 KB.
+  Marginal — coin flip whether it fits. Real cost may be sub-additive due to
+  LQER residual interactions.
+- 060D-half + 060E (ATTN −1σ + EMBED −1σ): predict +178 KB → ~16,080 KB.
+  Likely overshoots.
 
 ## Open issues for research
 
