@@ -142,6 +142,9 @@ def run_ppm_native_pass(h, device, val_data, base_model):
     seq_len = h.eval_seq_len
     total_tokens = val_data.val_tokens.numel() - 1
     total_seqs = total_tokens // seq_len
+    # Per-rank partition (matches 1850's pattern). Each rank scores 1/world_size
+    # of val; rank 0 then gathers via file-based dump and runs PPM on the full
+    # concatenated stream.
     seq_start = total_seqs * h.rank // h.world_size
     seq_end = total_seqs * (h.rank + 1) // h.world_size
     local_count = (seq_end - seq_start) * seq_len
@@ -149,6 +152,8 @@ def run_ppm_native_pass(h, device, val_data, base_model):
     tgt_np = np.empty(local_count, dtype=np.int32)
     prev_np = np.empty(local_count, dtype=np.int32)
     write_i = 0
+    first_pos = -1  # absolute first token-index this rank scores
+    last_pos = -1   # absolute last token-index this rank scores
 
     log(f"ppm_collect:start total_seqs={total_seqs} my_seqs={seq_end-seq_start} tokens={local_count} rank={h.rank}")
     t_collect = time.perf_counter()
@@ -182,8 +187,85 @@ def run_ppm_native_pass(h, device, val_data, base_model):
             nll_np[write_i : write_i + n] = per_token_loss.to(torch.float64).cpu().numpy()
             tgt_np[write_i : write_i + n] = y.cpu().numpy().astype(np.int32, copy=False)
             prev_np[write_i : write_i + n] = x.cpu().numpy().astype(np.int32, copy=False)
+            # Track absolute byte-stream positions for cross-rank gather ordering.
+            # Targets y[k] live at val_tokens index (raw_start + 1 + k), where
+            # k ranges 0..n-1 (n equals per_token_loss.numel()).
+            if first_pos < 0:
+                first_pos = raw_start + 1
+            last_pos = raw_start + n
             write_i += n
-    log(f"ppm_collect:done tokens={write_i} seconds={time.perf_counter()-t_collect:.1f}")
+    log(f"ppm_collect:rank_local_done rank={h.rank} tokens={write_i} "
+        f"first={first_pos} last={last_pos} seconds={time.perf_counter()-t_collect:.1f}")
+
+    # Truncate to actual write_i (last seq may be partial)
+    nll_np = nll_np[:write_i]
+    tgt_np = tgt_np[:write_i]
+    prev_np = prev_np[:write_i]
+
+    # File-based gather (matches 1850's pattern). Avoid large NCCL ops; each
+    # rank dumps its slice to disk; rank 0 reads them all in order.
+    job_id = re.sub(
+        r"[^A-Za-z0-9_.-]+", "_",
+        f"{os.environ.get('RUN_ID', 'run')}_{os.environ.get('MASTER_PORT', '0')}",
+    )
+    ppm_dir = os.path.join(tempfile.gettempdir(), f"pg_ppm_{job_id}")
+    if h.rank == 0:
+        os.makedirs(ppm_dir, exist_ok=True)
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+    rank_path = os.path.join(ppm_dir, f"rank{h.rank}.bin")
+    done_path = os.path.join(ppm_dir, "done")
+    tmp_path = rank_path + f".tmp{os.getpid()}"
+    with open(tmp_path, "wb") as f:
+        np.array([first_pos, last_pos, write_i], dtype=np.int64).tofile(f)
+        nll_np.tofile(f)
+        tgt_np.tofile(f)
+        prev_np.tofile(f)
+    os.replace(tmp_path, rank_path)
+    if h.rank != 0:
+        # Wait for rank 0 to finish PPM scoring; then return so all ranks exit cleanly.
+        while not os.path.exists(done_path):
+            time.sleep(0.5)
+        return
+
+    # Rank 0: read all rank files, validate contiguity, concat in stream order.
+    wait_t = time.perf_counter()
+    paths = [os.path.join(ppm_dir, f"rank{r}.bin") for r in range(h.world_size)]
+    while not all(os.path.exists(p) for p in paths):
+        time.sleep(0.2)
+    parts = []
+    for p in paths:
+        with open(p, "rb") as f:
+            hdr = np.fromfile(f, dtype=np.int64, count=3)
+            n = int(hdr[2])
+            parts.append((
+                int(hdr[0]), int(hdr[1]),
+                np.fromfile(f, dtype=np.float64, count=n),
+                np.fromfile(f, dtype=np.int32, count=n),
+                np.fromfile(f, dtype=np.int32, count=n),
+            ))
+    firsts = np.array([x[0] for x in parts])
+    lasts = np.array([x[1] for x in parts])
+    lens_arr = np.array([len(x[2]) for x in parts])
+    ordr = np.argsort(firsts)
+    expected = -1
+    for i in ordr:
+        if lens_arr[i] == 0:
+            continue
+        if expected < 0:
+            expected = firsts[i]
+        if firsts[i] != expected:
+            raise RuntimeError(
+                f"ppm_collect gap rankfile={i} first={firsts[i]} expected={expected}"
+            )
+        expected = lasts[i] + 1
+    nll_np = np.concatenate([parts[i][2] for i in ordr if lens_arr[i] > 0])
+    tgt_np = np.concatenate([parts[i][3] for i in ordr if lens_arr[i] > 0])
+    prev_np = np.concatenate([parts[i][4] for i in ordr if lens_arr[i] > 0])
+    write_i = len(nll_np)
+    log(f"ppm_collect:gather_done tokens={write_i} "
+        f"wait={time.perf_counter()-wait_t:.1f}s "
+        f"total={time.perf_counter()-t_collect:.1f}s")
 
     lib = _build_native_ppm_lib()
     target_ids = np.ascontiguousarray(tgt_np[:write_i].astype(np.int64))
@@ -259,8 +341,12 @@ def run_ppm_native_pass(h, device, val_data, base_model):
         f"thr={h.ppm_conf_threshold} nn_skip_thr_nats={h.ppm_nn_skip_thr_nats}"
     )
     log(f"ppm_native_submission_val_bpb: {mix_bpb_sidecar:.6f}")
+    # Signal non-zero ranks (still waiting on `done` file) to exit cleanly.
+    try:
+        open(done_path, "w").close()
+    except Exception as _e:
+        log(f"ppm_native: warning: could not write done signal: {_e}")
     return mix_bpb_sidecar
-
 '''
 
 src_text = src_text.replace(
