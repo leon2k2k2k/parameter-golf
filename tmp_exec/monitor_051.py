@@ -9,7 +9,7 @@ os.environ['NO_PROXY'] = 'discord.com'
 os.environ['HTTPS_PROXY'] = ''
 os.environ['HTTP_PROXY'] = ''
 
-DISCORD_TOKEN   = "MTQ3NDQxMDYyODUyNDI4MTg3Nw.Gw6q3X.zZ4XLVCvsK57Wqht3U5dHQTpBedOpw9SfgObzw"
+DISCORD_TOKEN   = os.environ["DISCORD_BOT_TOKEN"]  # set DISCORD_BOT_TOKEN before running
 DISCORD_CHANNEL = "1474618189806833745"
 DISCORD_URL     = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL}/messages"
 
