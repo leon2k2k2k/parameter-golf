@@ -51,6 +51,43 @@ Ran +1 TTT phase (PHASED_TTT_NUM_PHASES 3→4) on top of 060H clip combo (off-sp
 
 Conclusion: extra TTT phase does NOT help when quant noise is already reduced via clip tightening. Likely TTT is at saturation on the cleaner-quantized weights. Pure 060J (+1 phase, no clip change) might still help — that's research's call to spec.
 
+### 060L (per spec): PREFIX_DOCS 2500 → 3000 — saturated
+
+Per official spec: PHASED_TTT_PREFIX_DOCS 2500→3000 on pure 060A clips. Result: post-TTT 1.05918054 vs 060A 1.05918371 — Δ −0.0000032 (basically zero).
+
+Total eval 676s on 4H ≈ 338s on 8H — fits cap.
+
+Conclusion: prefix-doc lever is at saturation at 2500 on this stack. #1855's greedy search found the right point. 3000+ buys nothing.
+
+## Handoff summary — best legal frontier
+
+Three independent levers tested; one wins:
+
+| lever | post-TTT Δ vs 060A | budget cost | verdict |
+|---|---:|---|---|
+| **060H clip combo** (ATTN 12.75 + EMBED 13.0) | **−0.000269** | +85 KB artifact, ~$0 eval time | **WIN** |
+| 060J phases 3→4 on H-clip | +0.000015 (noise) | +85s eval/4H | discard |
+| 060L prefix 2500→3000 (per spec) | −0.0000032 (noise) | +50s eval/4H | discard |
+| 060M epochs (untested) | (predicted −0.001 to −0.003, env-var risk) | TBD | research's call |
+
+**Combined frontier (best 4H result):** post-TTT **1.05891477** at total submission **15,987,688 bytes** (12 KB headroom).
+
+vs #1855 references:
+- vs 3-seed mean (1.06108): **−0.00217**
+- vs seed-42 (1.05989): **−0.00098**
+
+Where the wins came from:
+- ~−0.0019 from "more training steps" (4H × 1196s gets 5084 steps vs 8H × 600s ~4940; same compute, more steps somehow)
+- ~−0.000269 from clip tightening (real, transfers through TTT at 85% rate)
+
+## Recommended action for 8H official run
+
+Apply 060H clip combo: `ATTN_CLIP_SIGMAS=12.75`, `EMBED_CLIP_SIGMAS=13.0` (vs 060A defaults 13.0 / 14.0). Everything else as 060A. Confirm `COMPRESSOR=pergroup`. Predicted post-TTT 1.0608-1.0610 on 8H (3-seed mean), beating #1855's 1.06108.
+
+If research wants to pursue further:
+- 060M (TTT_EPOCHS) is the only untested lever in our shortlist with predicted Δ comparable to or larger than 060H. Worth a single shot.
+- Better permutation than greedy similarity-sort could shave 5-30 KB from artifacts but the optimization step would push serialize past the 8H eval-time budget — probably not worth it.
+
 060A also ran TTT (3 phases, 792s eval): post-TTT val_bpb **1.05918371**
 — beats #1855's 3-seed mean (1.06108) by 0.0019.
 
