@@ -1,109 +1,147 @@
-# Spec 064 — Bottleneck profiling diagnostic on 060A
+# Spec 064 — Bottleneck profiling diagnostic on 060A (no-fork)
 
-**Status:** DIAGNOSTIC — no model changes, no submission artifact.
-Output is a kernel-level trace + analysis report.
+**Status:** DIAGNOSTIC — no model changes, no fork, no submission
+artifact. Runs the 060A pinned commit verbatim under an external
+profiler wrapper. Output is a kernel-level trace + analysis report.
 
 **Date:** 2026-04-29
-**Branch:** `exp/064-profile-bottleneck` (forked from `exp/060-resume-ckpt @ a0a48b7`)
-**Pinned commit:** TBD (after launch-script + profiler harness commit)
-**Parent:** 060A (#1855 port).
+**Branch:** **NONE** — 060A code is used as-is.
+**Pinned commit:** `a0a48b7` (head of `exp/060-resume-ckpt`,
+the 060A baseline).
+**Parent run:** 060A (#1855 port, fresh-init training run).
 
 ## Hypothesis
 
-The training run is compute-bound (100% GPU util, VRAM headroom). The
-33% throughput drop at loop activation (memory:
+The training run is compute-bound (100% GPU util, VRAM headroom).
+The 33% throughput drop at loop activation (memory:
 `project_throughput_step_function`) implies loop-block passes are
-disproportionately expensive per layer — they should add
-`3/total_layers ≈ 33%` more layer-equivalents per step, but they cost
-more than that. Either:
+disproportionately expensive per layer-equivalent. We don't know
+*which kernels* eat that budget. Knowing turns "cheaper loop
+iterations" from a guess into a targeted intervention.
 
-- (A) Attention is the dominant cost and loop layers' attention is
-  not amortizing well (most likely, given recurrent attention does
-  more O(T²) work per token);
-- (B) Kernel launch overhead grows when the loop expands the layer
-  list (more block.forward calls = more launches);
-- (C) Memory-bandwidth bound on loop layers' specific kernels
-  (e.g. RMSNorm + residual writes dominate).
+Three plausible bottlenecks, in roughly decreasing order of prior:
 
-Whichever it is, knowing it changes which architectural lever is
-worth chasing next. Specifically: if (A), the "cheaper loop
-iterations" idea (memory: `project_cheaper_loop_iterations_for_tomorrow`)
-becomes high priority — skip-attn loops or smaller per-pass attention
-would directly attack the bottleneck.
+- **(A) Attention compute** dominates. Recurrent attention does more
+  O(T²) work; this would surface as `flash_attn_func` topping the
+  kernel ranking and growing post-loop.
+- **(B) Kernel launch overhead** grows when the loop expands the
+  layer-index list. More `block.forward` calls = more launches.
+  Surfaces as a long tail of small kernels with launch-gap idle.
+- **(C) Memory-bandwidth bound** on RMSNorm + residual writes; loop
+  passes do these more often per token.
+
+Whichever it is, the followup spec (065/066/067) is decided by the
+ranking.
 
 ## Baseline
 
-060A unchanged. Single seed (42). Full model architecture (do NOT
-swap to small proxy here — the loop step function only manifests at
-real scale, and that's the phenomenon we're diagnosing).
+060A unchanged at commit `a0a48b7`. Single seed (42). Full model
+architecture. **Do NOT swap to a small proxy** — the loop step
+function only manifests at real scale, and that's the phenomenon
+we're diagnosing.
 
 ## Expected output
 
 Not a bpb number. Outputs:
 
-1. `torch.profiler` trace (Chrome-trace JSON) covering 10 steps:
-   5 pre-loop-activation, 5 post-loop-activation.
-2. Per-block forward time table (CSV): block index × pre/post-loop ×
-   mean ms.
-3. Kernel-by-time-percent ranking (top 20) for both regimes.
-4. Step-level VRAM curve over the full 200-step warmup.
-5. tok/s curve at 10-step granularity.
-6. Optimizer step + grad norm CSV.
-7. Analysis writeup in `runs/064-profile-bottleneck/analysis.md`.
+1. **`profile_full.nsys-rep`** — Nsight Systems trace covering the
+   full ~250 step run, captured externally via `nsys profile`.
+   Includes kernel timeline, CUDA API calls, NVTX ranges,
+   GPU memory transactions.
+2. **`profile_full.sqlite`** — exported queryable form of the
+   trace (via `nsys export`).
+3. **`kernel_summary_pre_loop.txt`** — top kernels by wall time for
+   the pre-loop window (extracted from sqlite via post-processing).
+4. **`kernel_summary_post_loop.txt`** — same for post-loop window.
+5. **`vram_curve.csv`** — `step, allocated_MiB, max_allocated_MiB`
+   logged from the existing train.log (060A already prints this; we
+   just scrape it).
+6. **`toks_per_s.csv`** — same, from existing train.log.
+7. **`analysis.md`** — human-written interpretation: hot kernels,
+   loop-activation step function visible in the trace, which of
+   {A,B,C} above is confirmed. Written by research after
+   the run.
+
+All saved to `runs/064-profile-bottleneck/seed_42/`.
 
 ## Accept criteria
 
-- Trace JSONs successfully captured for both regimes (no profiler
-  crash).
-- Top-3 kernels by time identified for each regime.
-- Loop activation event clearly visible in tok/s curve.
-- One concrete hypothesis-confirmed-or-rejected line in analysis.
+- `profile_full.nsys-rep` exists, opens cleanly in Nsight Systems
+  GUI (or on the CLI via `nsys stats`).
+- Loop activation event clearly visible in the timeline (sharp
+  step function in step-time around `enable_looping_at`).
+- Top-3 kernels by wall time identified for both pre-loop and
+  post-loop regimes.
+- One concrete hypothesis-confirmed-or-rejected line in analysis.md.
 
 ## Config diff vs 060A
 
 ```
-PROFILE_ENABLED          = 1   # turns on torch.profiler harness
-PROFILE_STEPS_BEFORE     = 5   # steps captured pre-loop
-PROFILE_STEPS_AFTER      = 5   # steps captured post-loop
-PROFILE_OUTPUT_DIR       = /workspace/runs/064-profile-bottleneck/seed_42/
-LOG_PER_BLOCK_TIMING     = 1   # CUDA-event timing per block.forward
-LOG_VRAM_EVERY_N_STEPS   = 10
-LOG_TOKENS_PER_S_EVERY_N = 10
-MAX_TRAIN_STEPS          = 250 # short — just enough to span loop activation
-WALLCLOCK_BUDGET         = 200 # 200s, hard kill
+MAX_TRAIN_STEPS = 250          # short — just enough to span loop activation
+WALLCLOCK_BUDGET = 240         # 240s, hard kill (200s + nsys overhead)
+EMA_DECAY = 0.0                # disable EMA eval (not relevant; saves time)
+PHASED_TTT_ENABLED = 0         # disable TTT (we're profiling training, not eval)
+GPTQ_ENABLED = 0               # disable post-quant (no submission needed)
+RUN_LABEL = profile_seed_42
 ```
 
-All other env vars unchanged from 060A. **Skip TTT, skip GPTQ, skip
-EMA evaluation** — these are not relevant to the diagnostic and add
-artifact-build time.
+(All other env vars verbatim from 060A.)
 
 ## Code changes
 
-Three additive sites in `train_gpt.py` (no logic changes to model):
+**None.** 060A's `train_gpt.py` is run verbatim. Profiling is
+attached externally via the launch script.
 
-1. **Profiler harness around the training loop.** Wraps the step
-   loop with `torch.profiler.profile(...)` configured with
-   `schedule=schedule(wait=W, warmup=Wm, active=A, repeat=2)` such
-   that one capture window lands ~10 steps before
-   `enable_looping_at` and the second lands ~10 steps after. Saves
-   to `chrome_trace_pre_loop.json` and `chrome_trace_post_loop.json`.
+`tmp_exec/launch_064_profile.sh` (new, ~40 lines):
 
-2. **Per-block CUDA-event timing.** In `_forward_hidden`, wrap each
-   `self.blocks[i](...)` call with `torch.cuda.Event` start/end
-   pairs (only when `LOG_PER_BLOCK_TIMING=1` to keep prod path
-   clean). Append `(step, block_idx, layer_idx_in_bank, elapsed_ms)`
-   to a CSV.
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-3. **VRAM + tok/s tracking.** Existing tok/s logging exists; add
-   `torch.cuda.memory_allocated()` and `max_memory_allocated()`
-   readout every 10 steps to a separate CSV.
+OUT=/workspace/runs/064-profile-bottleneck/seed_42
+mkdir -p "$OUT"
 
-Branch: `exp/064-profile-bottleneck`. Commit: TBD.
+cd /workspace/parameter-golf/records/track_10min_16mb/2026-04-29_PR1855_Port_Baseline
+
+# Inline prewarm + cache restore per project conventions
+# (kept short — full prewarm not needed for a 250-step diagnostic)
+bash /workspace/parameter-golf/tmp_exec/cache_restore.sh || true
+
+# Capture full timeline including kernel-level CUDA activity.
+# --duration 0 = capture full duration; we'll slice windows in post.
+# --sample=cpu --backtrace=lbr for fine-grained CPU + GPU correlation.
+nsys profile \
+    --output="$OUT/profile_full" \
+    --trace=cuda,nvtx,osrt,cudnn,cublas \
+    --sample=cpu \
+    --gpu-metrics-device=all \
+    --force-overwrite=true \
+    torchrun --standalone --nproc_per_node=4 train_gpt.py \
+    2>&1 | tee "$OUT/train.log"
+
+# Export sqlite + extract kernel rankings windowed pre/post loop activation
+nsys export --type=sqlite --output="$OUT/profile_full.sqlite" "$OUT/profile_full.nsys-rep"
+
+python /workspace/parameter-golf/tmp_exec/analyze_064_profile.py \
+    --sqlite "$OUT/profile_full.sqlite" \
+    --train-log "$OUT/train.log" \
+    --out-dir "$OUT"
+```
+
+Plus `tmp_exec/analyze_064_profile.py` (new, ~80 lines): post-run
+analysis — queries the sqlite for kernel rankings in two time
+windows (pre/post loop activation, derived from `train.log` step
+times), writes `kernel_summary_*.txt`, scrapes VRAM and tok/s from
+`train.log`, writes the CSVs.
+
+Both new files land on `research` (no exp branch needed):
+- `tmp_exec/launch_064_profile.sh`
+- `tmp_exec/analyze_064_profile.py`
 
 ## Hardware ladder
 
-- **Single rung: 4×H100, 1 seed (42), 250 steps max, 200s wallclock cap.**
-- No mini rung (the architecture is unchanged; smoke is unnecessary).
+- **Single rung: 4×H100, 1 seed (42), 250 steps max, 240s wallclock cap.**
+- No mini rung (architecture unchanged; smoke unnecessary).
 
 ## Seed plan
 
@@ -114,68 +152,51 @@ Branch: `exp/064-profile-bottleneck`. Commit: TBD.
 Standard 060A paths — train data, tokenizer. No hotstart; fresh init
 is fine since we're not measuring model quality.
 
-## Artifacts emitted
-
-To `/workspace/runs/064-profile-bottleneck/seed_42/`:
-
-- `chrome_trace_pre_loop.json` — torch.profiler trace, ~5 steps before loop activation
-- `chrome_trace_post_loop.json` — torch.profiler trace, ~5 steps after loop activation
-- `per_block_timing.csv` — CUDA-event timing per block per step
-- `vram_curve.csv` — `step, allocated_MiB, max_allocated_MiB`
-- `toks_per_s.csv` — `step, tok_per_s, wallclock_s`
-- `loss_grad_norm.csv` — `step, train_loss, grad_norm`
-- `train.log` — full stdout/stderr
-- `final_step_summary.json` — `{step_when_loop_activated, mean_toks_per_s_pre, mean_toks_per_s_post, top_kernels_pre, top_kernels_post}` (auto-generated post-run by `tmp_exec/analyze_064.py`)
-
-**Do NOT save model checkpoints, EMA, or GPTQ artifacts.** This is a
-diagnostic run — no submission blob is needed and skipping them
-shortens the run.
-
 ## Stop-early criteria
 
-- Profiler crash → kill, debug locally
+- `nsys profile` startup fails → kill, install nsys / fix env, retry
 - tok/s drops to <50% of expected at any step (something is broken,
   not just slow)
 - Step >300 (we've gone past the budget without loop activating —
   ENABLE_LOOPING_AT may be set wrong)
-- Wallclock exceeds 200s (hard cap)
+- Wallclock exceeds 240s (hard cap)
 
 ## Cost estimate
 
-~$1.50 (4×H100 × 250s ≈ 17 min wallclock, including pod startup).
+~$1.50 (4×H100 × 240s ≈ 17 min wallclock incl. pod startup).
 
 ## Open questions for interview
 
-1. **Pod region.** Standard NE-1 → JP fallback. Diagnostic is short
-   enough that capacity issues are unlikely to bite.
-2. **Profiler overhead.** torch.profiler with stack-traces adds
-   ~10-20% wallclock per captured window. Captured windows are 10
-   steps total out of 250 — so overall wallclock impact <5%. The
-   tok/s number reported in our analysis should EXCLUDE the profiled
-   windows (which are inflated by profiler overhead).
-3. **What halts** if the trace files are corrupted or the profiler
-   schedule misses the loop activation event? Halt and ask. The run
-   is cheap to rerun; do not promote a corrupt trace to analysis.
-4. **Stop pod after?** Yes. This is a one-shot diagnostic; no
-   followup launches expected immediately.
+1. **Is `nsys` installed on the parameter-golf pod template
+   (`y5cejece4j`)?** If absent, the launch script must
+   `apt install nvidia-nsight-systems-cli` early. Add a check.
+2. **`nsys` overhead.** Full-trace nsys typically adds 5-15%
+   wallclock; with `--gpu-metrics-device=all` it can be more.
+   This affects the *absolute* tok/s numbers but NOT the relative
+   kernel ranking, which is what we care about. Note this in
+   analysis.md.
+3. **Pod region.** Standard NE-1 → JP fallback.
+4. **What halts** if `profile_full.nsys-rep` is corrupted or the
+   sqlite export fails? Halt and ask. The run is cheap to rerun;
+   do not promote a corrupt trace.
+5. **Stop pod after?** Yes. One-shot diagnostic.
 
 ## Followup specs gated on this analysis
 
-- If attention dominates pre + post: **spec 065** = cheaper loop
-  attention (skip-attn loops, smaller per-pass head count).
-- If launch overhead dominates: **spec 066** = block-level kernel
-  fusion or graph-mode forward.
-- If RMSNorm + elementwise dominate: **spec 067** = fewer norms per
-  pass / norm fusion.
-- If nothing surprising: confirms compute-bound on matmul roofline,
-  pivot back to algorithmic levers (depth recurrence is the right
-  bet).
+- **Top kernel = `flash_attn_func` (or attn-related), grows
+  post-loop:** spec 065 = cheaper loop attention (skip-attn loops,
+  smaller per-pass head count, reduced KV).
+- **Top kernel = MLP matmul, ratio steady pre/post:** we're at
+  matmul roofline; pivot back to algorithmic levers.
+- **Long tail of tiny kernels with launch gaps:** spec 066 =
+  block-level kernel fusion or graph-mode forward.
+- **RMSNorm + elementwise dominate:** spec 067 = fewer norms
+  per pass / norm fusion.
 
 ## Why this is worth the $1.50
 
-The 33% loop tax is the single largest throughput finding in this
-project. We've never instrumented *which kernels* eat that budget.
-Knowing this turns "cheaper loop iterations" from a guess into a
-targeted intervention. The diagnostic is also self-paying: every
-followup spec gated on its result avoids wasting cycles on ideas
-that don't attack the actual bottleneck.
+The 33% loop tax is the largest throughput finding in the project,
+and we've never instrumented *which kernels* eat it. Every followup
+spec gated on its result avoids wasting cycles on ideas that don't
+attack the actual bottleneck. Self-paying by even one avoided null
+spec.
