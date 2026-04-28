@@ -3581,7 +3581,9 @@ def train_and_eval(h, device):
             restore_fp32_params(base_model)
             sd = torch.load(resume_from, map_location=device, weights_only=False)
             base_model.load_state_dict(sd, strict=True)
-            log(f"resumed model_params:{sum(p.numel() for p in base_model.parameters())}")
+            if h.num_loops > 0:
+                base_model.looping_active = True
+            log(f"resumed model_params:{sum(p.numel() for p in base_model.parameters())} looping_active={getattr(base_model,'looping_active',False)}")
             compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
             compiled_forward_logits = torch.compile(
                 base_model.forward_logits, dynamic=False, fullgraph=True
