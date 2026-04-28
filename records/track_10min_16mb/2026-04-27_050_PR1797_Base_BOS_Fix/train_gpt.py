@@ -1008,7 +1008,7 @@ class CausalSelfAttention(nn.Module):
         proj = (y_g * vn).sum(dim=-1, keepdim=True) * vn
         return (y_g - proj).reshape(B, T, H, D)
 
-    def forward(self, x, q_w, k_w, v_w, out_w, cu_seqlens=None, max_seqlen=0):
+    def forward(self, x, q_w, k_w, v_w, out_w, cu_seqlens=None, max_seqlen=0, attn_temp=None):
         bsz, seqlen, dim = x.shape
         # q_raw kept around as a tap point for attn_out_gate_src='q' (post-projection,
         # pre-reshape, pre-RoPE).
@@ -1022,6 +1022,8 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin, self.rope_dims)
         k = apply_rotary_emb(k, cos, sin, self.rope_dims)
         q = q * self.q_gain.to(dtype=q.dtype)[None, None, :, None]
+        if attn_temp is not None:
+            q = q * attn_temp.to(dtype=q.dtype)
         if cu_seqlens is not None:
             y = flash_attn_varlen_func(
                 q[0],
@@ -1122,7 +1124,7 @@ class Block(nn.Module):
         )
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
 
-    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0):
+    def forward(self, x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=None, max_seqlen=0, attn_temp=None, par_up=None, par_down=None):
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(
@@ -1130,11 +1132,16 @@ class Block(nn.Module):
             q_w, k_w, v_w, out_w,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            attn_temp=attn_temp,
         )
         x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
-        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
-            None, None, :
-        ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        x_normed = self.mlp_norm(x_out) * self.ln_scale_factor
+        mlp_out = self.mlp(x_normed, up_w, down_w)
+        if par_down is not None:
+            x_flat = x_normed.reshape(-1, x_normed.shape[-1])
+            par_h = F.gelu(F.linear(x_flat, par_up.to(x_flat.dtype)))
+            mlp_out = mlp_out + F.linear(par_h, par_down.to(x_flat.dtype)).reshape_as(mlp_out)
+        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
         return x_out
 
 class GPT(nn.Module):
@@ -1214,9 +1221,56 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            # 053: per-pass attention temperature + parallel bottleneck MLP
+            _n_passes = h.num_loops + 1
+            _n_loop = h.loop_end - h.loop_start + 1
+            _bottleneck = 32
+            self.loop_pass_attn_temp = nn.Parameter(
+                torch.ones(_n_passes, _n_loop, dtype=torch.float32)
+            )
+            self.loop_pass_par_up = nn.Parameter(
+                torch.empty(_n_passes, _n_loop, _bottleneck, h.model_dim)
+            )
+            self.loop_pass_par_down = nn.Parameter(
+                torch.zeros(_n_passes, _n_loop, h.model_dim, _bottleneck)
+            )
+            nn.init.kaiming_uniform_(
+                self.loop_pass_par_up.data.reshape(-1, h.model_dim), a=math.sqrt(5)
+            )
+            self.register_buffer('_attn_temp_id', torch.ones(1))
+            self.register_buffer('_par_up_id', torch.zeros(_bottleneck, h.model_dim))
+            self.register_buffer('_par_down_id', torch.zeros(h.model_dim, _bottleneck))
+            # Precompute (pass_idx, layer_within_loop) for enc/dec steps
+            _ls, _le = h.loop_start, h.loop_end
+            enc_ps_info, pass_cnt = [], -1
+            for idx in self.encoder_indices:
+                if _ls <= idx <= _le:
+                    if idx == _ls:
+                        pass_cnt += 1
+                    enc_ps_info.append((pass_cnt, idx - _ls))
+                else:
+                    enc_ps_info.append(None)
+            self._enc_pass_scale_info = enc_ps_info
+            dec_ps_info = []
+            for idx in self.decoder_indices:
+                if _ls <= idx <= _le:
+                    if idx == _ls:
+                        pass_cnt += 1
+                    dec_ps_info.append((pass_cnt, idx - _ls))
+                else:
+                    dec_ps_info.append(None)
+            self._dec_pass_scale_info = dec_ps_info
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.loop_pass_attn_temp = None
+            self.loop_pass_par_up = None
+            self.loop_pass_par_down = None
+            self._enc_pass_scale_info = None
+            self._dec_pass_scale_info = None
+            self.register_buffer('_attn_temp_id', torch.ones(1))
+            self.register_buffer('_par_up_id', torch.zeros(32, h.model_dim))
+            self.register_buffer('_par_down_id', torch.zeros(h.model_dim, 32))
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1290,7 +1344,7 @@ class GPT(nn.Module):
     def _parallel_block(
         self, block_idx, lane0, lane1, x0,
         q_w, k_w, v_w, out_w, up_w, down_w,
-        cu_seqlens=None, max_seqlen=0,
+        cu_seqlens=None, max_seqlen=0, attn_temp=None, par_up=None, par_down=None,
     ):
         block = self.blocks[block_idx]
         mix = block.resid_mix.to(dtype=lane0.dtype)
@@ -1298,13 +1352,17 @@ class GPT(nn.Module):
         attn_out = block.attn(
             block.attn_norm(attn_read) * block.ln_scale_factor,
             q_w, k_w, v_w, out_w,
-            cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
+            cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_temp=attn_temp,
         )
         attn_out = block.attn_scale.to(dtype=attn_out.dtype)[None, None, :] * attn_out
         mlp_read = lane1
-        mlp_out = block.mlp_scale.to(dtype=lane1.dtype)[None, None, :] * block.mlp(
-            block.mlp_norm(mlp_read) * block.ln_scale_factor, up_w, down_w
-        )
+        mlp_normed = block.mlp_norm(mlp_read) * block.ln_scale_factor
+        mlp_out = block.mlp(mlp_normed, up_w, down_w)
+        if par_down is not None:
+            x_flat = mlp_normed.reshape(-1, mlp_normed.shape[-1])
+            par_h = F.gelu(F.linear(x_flat, par_up.to(x_flat.dtype)))
+            mlp_out = mlp_out + F.linear(par_h, par_down.to(x_flat.dtype)).reshape_as(mlp_out)
+        mlp_out = block.mlp_scale.to(dtype=lane1.dtype)[None, None, :] * mlp_out
         attn_resid = self.parallel_resid_lambdas[block_idx, 0].to(dtype=lane0.dtype)
         attn_post = self.parallel_post_lambdas[block_idx, 0].to(dtype=lane0.dtype)
         mlp_resid = self.parallel_resid_lambdas[block_idx, 1].to(dtype=lane0.dtype)
@@ -1351,15 +1409,39 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            if self._enc_pass_scale_info is not None and self.looping_active:
+                _info = self._enc_pass_scale_info[step_idx]
+                if _info is not None:
+                    _atemp = self.loop_pass_attn_temp[_info[0], _info[1]].unsqueeze(0)
+                    _par_up = self.loop_pass_par_up[_info[0], _info[1]]
+                    _par_down = self.loop_pass_par_down[_info[0], _info[1]]
+                else:
+                    _atemp = self._attn_temp_id
+                    _par_up = self._par_up_id
+                    _par_down = self._par_down_id
+            else:
+                _atemp, _par_up, _par_down = None, None, None
+            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_temp=_atemp, par_up=_par_up, par_down=_par_down)
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            if self._dec_pass_scale_info is not None and self.looping_active:
+                _info = self._dec_pass_scale_info[skip_idx]
+                if _info is not None:
+                    _atemp = self.loop_pass_attn_temp[_info[0], _info[1]].unsqueeze(0)
+                    _par_up = self.loop_pass_par_up[_info[0], _info[1]]
+                    _par_down = self.loop_pass_par_down[_info[0], _info[1]]
+                else:
+                    _atemp = self._attn_temp_id
+                    _par_up = self._par_up_id
+                    _par_down = self._par_down_id
+            else:
+                _atemp, _par_up, _par_down = None, None, None
             if i >= psl and psl > 0:
                 if lane0 is None:
                     lane0 = x
@@ -1374,7 +1456,7 @@ class GPT(nn.Module):
                         lane0 = lane0 + w * skip
                 lane0, lane1 = self._parallel_block(
                     i, lane0, lane1, x0, q_w, k_w, v_w, out_w, up_w, down_w,
-                    cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
+                    cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_temp=_atemp, par_up=_par_up, par_down=_par_down,
                 )
             else:
                 if skip_idx < self.num_skip_weights and skips:
@@ -1387,7 +1469,7 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, attn_temp=_atemp, par_up=_par_up, par_down=_par_down)
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
