@@ -249,6 +249,7 @@ class Hyperparameters:
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
     skip_gates_enabled = bool(int(os.environ.get("SKIP_GATES_ENABLED", "1")))
+    per_step_gate_enabled = bool(int(os.environ.get("PER_STEP_GATE_ENABLED", "0")))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 3e1))
     rope_base = float(os.environ.get("ROPE_BASE", 1e4))
@@ -1231,6 +1232,21 @@ class GPT(nn.Module):
             if h.skip_gates_enabled
             else None
         )
+        # Spec 061B — per-step output gate. One learnable scalar per step in
+        # the expanded encoder/decoder index lists. Init 1.0 = identity. Tests
+        # the overthinking-degradation finding (arXiv 2604.07822) and step-size
+        # decay finding (arXiv 2509.23314) at near-zero param cost.
+        self.per_step_gate_enabled = bool(h.per_step_gate_enabled)
+        if self.per_step_gate_enabled:
+            self.per_step_gates_enc = nn.Parameter(
+                torch.ones(len(self.encoder_indices), dtype=torch.float32)
+            )
+            self.per_step_gates_dec = nn.Parameter(
+                torch.ones(len(self.decoder_indices), dtype=torch.float32)
+            )
+        else:
+            self.per_step_gates_enc = None
+            self.per_step_gates_dec = None
         self.parallel_start_layer = h.parallel_start_layer
         self.parallel_final_lane = h.parallel_final_lane.lower()
         self.parallel_post_lambdas = nn.Parameter(
@@ -1351,9 +1367,14 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        for i in enc_iter:
+        gate_active = self.per_step_gate_enabled and self.looping_active
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            x_prev = x
             x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            if gate_active:
+                gate = self.per_step_gates_enc[step_idx].to(dtype=x.dtype)
+                x = x_prev + gate * (x - x_prev)
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
@@ -1372,10 +1393,16 @@ class GPT(nn.Module):
                         lane0 = torch.lerp(w * skip, lane0, g)
                     else:
                         lane0 = lane0 + w * skip
+                lane0_prev = lane0
+                lane1_prev = lane1
                 lane0, lane1 = self._parallel_block(
                     i, lane0, lane1, x0, q_w, k_w, v_w, out_w, up_w, down_w,
                     cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
                 )
+                if gate_active:
+                    gate = self.per_step_gates_dec[skip_idx].to(dtype=lane0.dtype)
+                    lane0 = lane0_prev + gate * (lane0 - lane0_prev)
+                    lane1 = lane1_prev + gate * (lane1 - lane1_prev)
             else:
                 if skip_idx < self.num_skip_weights and skips:
                     scaled_skip = (
@@ -1387,7 +1414,11 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
+                x_prev = x
                 x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                if gate_active:
+                    gate = self.per_step_gates_dec[skip_idx].to(dtype=x.dtype)
+                    x = x_prev + gate * (x - x_prev)
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
@@ -1453,9 +1484,14 @@ class GPT(nn.Module):
             )
         )
         slot = 0
-        for i in enc_iter:
+        gate_active = self.per_step_gate_enabled and self.looping_active
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+            x_prev = x
             x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            if gate_active:
+                gate = self.per_step_gates_enc[step_idx].to(dtype=x.dtype)
+                x = x_prev + gate * (x - x_prev)
             slot += 1
             skips.append(x)
         psl = self.parallel_start_layer
@@ -1475,10 +1511,16 @@ class GPT(nn.Module):
                         lane0 = torch.lerp(w * skip, lane0, g)
                     else:
                         lane0 = lane0 + w * skip
+                lane0_prev = lane0
+                lane1_prev = lane1
                 lane0, lane1 = self._parallel_block_with_lora(
                     i, lane0, lane1, x0, lora, slot,
                     q_w, k_w, v_w, out_w, up_w, down_w,
                 )
+                if gate_active:
+                    gate = self.per_step_gates_dec[skip_idx].to(dtype=lane0.dtype)
+                    lane0 = lane0_prev + gate * (lane0 - lane0_prev)
+                    lane1 = lane1_prev + gate * (lane1 - lane1_prev)
             else:
                 if skip_idx < self.num_skip_weights and skips:
                     scaled_skip = (
@@ -1490,7 +1532,11 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
+                x_prev = x
                 x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                if gate_active:
+                    gate = self.per_step_gates_dec[skip_idx].to(dtype=x.dtype)
+                    x = x_prev + gate * (x - x_prev)
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
