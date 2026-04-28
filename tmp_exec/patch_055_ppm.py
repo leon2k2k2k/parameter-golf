@@ -8,9 +8,9 @@ fire our PPM hook.
 import sys
 from pathlib import Path
 
-SRC = "worktrees/055-050-with-ppm-fullrun/records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
-C_SRC = "worktrees/055-050-with-ppm-fullrun/testing/ppm_scorer_antihijack.c"
-OUT = "worktrees/055-050-with-ppm-fullrun/records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py"
+SRC = 'worktrees/055-050-with-ppm-fullrun/records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py'
+C_SRC = 'worktrees/055-050-with-ppm-fullrun/testing/ppm_scorer_antihijack.c'
+OUT = 'worktrees/055-050-with-ppm-fullrun/records/track_10min_16mb/2026-04-27_050_PR1797_Base_BOS_Fix/train_gpt.py'
 
 src_text = Path(SRC).read_text()
 c_src = Path(C_SRC).read_text()
@@ -56,7 +56,7 @@ ppm_block = '''
 # PPM-D byte-level mixture (1850 port + anti-hijack guard).
 # ============================================================
 _NATIVE_PPM_LIB = None
-_NATIVE_PPM_C_SRC = "worktrees/055-050-with-ppm-fullrun/testing/ppm_scorer_antihijack.c"
+_NATIVE_PPM_C_SRC = r"""''' + c_src + '''"""
 
 def _build_native_ppm_lib():
     global _NATIVE_PPM_LIB
