@@ -3533,7 +3533,8 @@ def _build_native_ppm_lib():
     lib = ctypes.CDLL(so_path)
     lib.ppm_score.argtypes = [
         ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_int64),
-        ctypes.POINTER(ctypes.c_double), ctypes.c_int64,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int64,
         ctypes.POINTER(ctypes.c_uint8), ctypes.POINTER(ctypes.c_int32),
         ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_uint8),
         ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int,
@@ -3545,7 +3546,8 @@ def _build_native_ppm_lib():
     lib.ppm_score.restype = ctypes.c_int
     lib.ppm_score_omp.argtypes = [
         ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_int64),
-        ctypes.POINTER(ctypes.c_double), ctypes.c_int64,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int64,
         ctypes.POINTER(ctypes.c_uint8), ctypes.POINTER(ctypes.c_int32),
         ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_uint8),
         ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int,
