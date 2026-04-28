@@ -26,7 +26,7 @@ WORKTREE=$(bash /workspace/parameter-golf/tmp_exec/setup_worktree.sh "$SHA" "$AR
 # ── System deps ──────────────────────────────────────────────────────────
 # lrzip is REQUIRED for #1855's per-group compressor (_lrzip_compress).
 # brotli + sentencepiece are pip deps. Install all unconditionally; cheap if already present.
-which lrzip > /dev/null 2>&1 || apt-get install -y lrzip 2>&1 | tail -3
+which lrzip > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y lrzip) 2>&1 | tail -5
 pip install brotli python-minifier sentencepiece --break-system-packages -q
 
 # ── Output dir ────────────────────────────────────────────────────────────
@@ -119,9 +119,21 @@ PTZ_PATH="${RUNDIR}/final_model.int6.ptz"
 if [ -f "$PT_PATH" ] && [ -f "$PTZ_PATH" ]; then
     PT_SIZE=$(stat -c%s "$PT_PATH")
     PTZ_SIZE=$(stat -c%s "$PTZ_PATH")
+    # CAP IS ON TOTAL SUBMISSION (= .int6.ptz + compressed code, ~32 KB), NOT on .int6.ptz alone.
+    # train_gpt.py writes "Total submission size quantized+...: NNNN bytes" to the log.
+    TOTAL_SUB=$(grep -oE "Total submission size quantized[+:][^ ]+ [0-9]+ bytes" "${RUNDIR}/train.log" | tail -1 | grep -oE '[0-9]+' | tail -1)
     echo "[launch] OK: BOTH checkpoints saved in ${RUNDIR}/"
     echo "[launch]   final_model.pt        = ${PT_SIZE} bytes  (~$((PT_SIZE / 1024 / 1024)) MB pre-quant)"
-    echo "[launch]   final_model.int6.ptz  = ${PTZ_SIZE} bytes (cap 16,000,000; margin $((16000000 - PTZ_SIZE)))"
+    echo "[launch]   final_model.int6.ptz  = ${PTZ_SIZE} bytes (.int6.ptz alone)"
+    if [ -n "$TOTAL_SUB" ]; then
+        echo "[launch]   TOTAL submission size = ${TOTAL_SUB} bytes (cap 16,000,000; margin $((16000000 - TOTAL_SUB)))"
+        if [ "$TOTAL_SUB" -gt 16000000 ]; then
+            echo "[launch] FAIL: total submission OVER CAP by $((TOTAL_SUB - 16000000)) bytes"
+            exit 3
+        fi
+    else
+        echo "[launch] WARN: could not parse 'Total submission size' from train.log; .int6.ptz size alone is not the cap check"
+    fi
     ls -la "${RUNDIR}/final_model"*
     # Make read-only to prevent accidental overwrite by future runs in same dir.
     chmod a-w "$PT_PATH" "$PTZ_PATH" 2>/dev/null || true

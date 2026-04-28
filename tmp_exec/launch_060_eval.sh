@@ -29,7 +29,7 @@ TRAIN_SCRIPT="${TRAIN_SCRIPT:-records/track_10min_16mb/2026-04-29_PR1855_Port_Ba
 
 # ── Setup ────────────────────────────────────────────────────────────────
 WORKTREE=$(bash /workspace/parameter-golf/tmp_exec/setup_worktree.sh "$SHA" "$ARM")
-which lrzip > /dev/null 2>&1 || apt-get install -y lrzip 2>&1 | tail -3
+which lrzip > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y lrzip) 2>&1 | tail -5
 pip install brotli sentencepiece --break-system-packages -q
 
 mkdir -p "$RUNDIR"
@@ -96,7 +96,16 @@ echo "[eval] done."
 PTZ_PATH="${RUNDIR}/final_model.int6.ptz"
 if [ -f "$PTZ_PATH" ]; then
     SIZE=$(stat -c%s "$PTZ_PATH")
-    echo "[eval] OK: int6.ptz = ${SIZE} bytes (margin $((16000000 - SIZE)))"
+    # CAP IS ON TOTAL SUBMISSION (.int6.ptz + ~32 KB compressed code), NOT on .int6.ptz alone.
+    TOTAL_SUB=$(grep -oE "Total submission size quantized[+:][^ ]+ [0-9]+ bytes" "${RUNDIR}/eval.log" | tail -1 | grep -oE '[0-9]+' | tail -1)
+    echo "[eval] OK: int6.ptz = ${SIZE} bytes alone"
+    if [ -n "$TOTAL_SUB" ]; then
+        echo "[eval] TOTAL submission = ${TOTAL_SUB} bytes (cap 16,000,000; margin $((16000000 - TOTAL_SUB)))"
+        if [ "$TOTAL_SUB" -gt 16000000 ]; then
+            echo "[eval] FAIL: total submission OVER CAP by $((TOTAL_SUB - 16000000)) bytes"
+            exit 3
+        fi
+    fi
 else
     echo "[eval] WARN: missing int6.ptz"
 fi
