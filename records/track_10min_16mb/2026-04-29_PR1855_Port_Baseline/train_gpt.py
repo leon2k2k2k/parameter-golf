@@ -3572,9 +3572,24 @@ def train_and_eval(h, device):
         log(f"ttt_warm_start_a: {BatchedLinearLoRA._WARM_START_A}")
         log(f"ttt_weight_decay: {h.ttt_weight_decay}")
     else:
-        base_model, compiled_model, compiled_forward_logits = train_model(
-            h, device, val_data
-        )
+        resume_from = os.environ.get("RESUME_FROM_CKPT", "").strip()
+        if resume_from:
+            log(f"RESUME_FROM_CKPT={resume_from} — loading EMA-applied weights, skipping training")
+            if not os.path.exists(resume_from):
+                raise FileNotFoundError(f"RESUME_FROM_CKPT path not found: {resume_from}")
+            base_model = GPT(h).to(device).bfloat16()
+            restore_fp32_params(base_model)
+            sd = torch.load(resume_from, map_location=device, weights_only=False)
+            base_model.load_state_dict(sd, strict=True)
+            log(f"resumed model_params:{sum(p.numel() for p in base_model.parameters())}")
+            compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+            compiled_forward_logits = torch.compile(
+                base_model.forward_logits, dynamic=False, fullgraph=True
+            )
+        else:
+            base_model, compiled_model, compiled_forward_logits = train_model(
+                h, device, val_data
+            )
         torch._dynamo.reset()
         timed_eval(
             "diagnostic pre-quantization post-ema",
