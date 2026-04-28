@@ -24,6 +24,9 @@ baseline validation + downstream lever signal only.
 | 060B | ATTN_CLIP_SIGMAS 13.0→12.5 | 1.07193891 | −0.000182 | 15,962,059 | LEGAL, 38 KB headroom |
 | 060D-half | ATTN_CLIP_SIGMAS 13.0→12.0 | 1.07176948 | −0.000352 | 16,024,916 | OVER cap by 25 KB |
 | 060E | EMBED_CLIP_SIGMAS 14.0→13.0 | 1.07191140 | −0.000209 | 15,957,730 | LEGAL, 42 KB headroom |
+| 060F | ATTN 12.5 + EMBED 13.0 | 1.07172520 | −0.000397 | 16,017,570 | OVER cap by 18 KB |
+| **060G** | **ATTN 12.5 + EMBED 13.5** | **1.07182443** | **−0.000297** | **15,989,345** | **LEGAL, 11 KB headroom — current best** |
+| 060H | ATTN 12.75 + EMBED 13.0 | (running) | — | — | — |
 
 060A also ran TTT (3 phases, 792s eval): post-TTT val_bpb **1.05918371**
 — beats #1855's 3-seed mean (1.06108) by 0.0019.
@@ -90,12 +93,12 @@ ATTN is approximately linear in step (60 KB per −0.5σ). EMBED is **more
 byte-efficient than ATTN** (~26 vs ~34 KB per 1e-4 bpb). MLP untested but
 likely the most expensive lever per step (largest weight class).
 
-**Stack predictions** (assume linear additivity of byte costs):
-- 060B + 060E (ATTN −0.5σ + EMBED −1σ): predict +115 KB total → ~16,017 KB.
-  Marginal — coin flip whether it fits. Real cost may be sub-additive due to
-  LQER residual interactions.
-- 060D-half + 060E (ATTN −1σ + EMBED −1σ): predict +178 KB → ~16,080 KB.
-  Likely overshoots.
+**Stack predictions vs observed** (additivity of byte costs):
+- 060F (ATTN −0.5σ + EMBED −1σ): predicted +115 KB → 16,017 KB. **Observed: 16,017,570.** Perfect match. Δ also additive (−0.000397 vs predicted −0.000391). Overshoots cap by 18 KB.
+- 060G (ATTN −0.5σ + EMBED −0.5σ, half-step EMBED): predicted +88 KB → 15,990 KB. **Observed: 15,989,345.** Perfect match. Δ −0.000297. **LEGAL, current best.**
+- 060H (ATTN −0.25σ + EMBED −1σ, half-step ATTN): pending.
+
+Conclusion: byte cost is essentially perfectly additive across ATTN+EMBED. The cap forces choosing one full lever or two half-levers. Half+half produces same Δ-bpb as one full lever at slightly tighter byte budget.
 
 ## Open issues for research
 
