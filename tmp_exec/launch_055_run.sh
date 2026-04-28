@@ -79,7 +79,7 @@ export PPM_CONF_THRESHOLD=0.76          # tuned (vs 1850's 0.9)
 export PPM_NN_SKIP_THR_NATS=0.277       # = 0.40 bits, anti-hijack
 export PPM_LOG_CACHE_SIZE=1048576
 export PPM_OMP_THREADS=8
-export PPM_OMP_CHUNK_TOKENS=4194304     # OMP-chunked default
+export PPM_OMP_CHUNK_TOKENS="${PPM_OMP_CHUNK_TOKENS:-0}"     # default 0 = single-pass (best gain, ~250s on 8H); set 4194304 for OMP-chunked smoke
 
 # ── Per-run identity ──────────────────────────────────────────────────────
 export SEED="$SEED"
