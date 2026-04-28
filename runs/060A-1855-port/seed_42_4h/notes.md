@@ -45,6 +45,12 @@ Two angles on the question "does clip tightening still help after TTT?":
 
 So TTT and clip tightening are **independent levers** that compose with mild attenuation. Reasonable mental model: TTT learns LoRAs that partially compensate for quantization noise; tighter clip → less noise to compensate → smaller compensation needed → smaller absolute Δ visible after TTT, but the Δ still flows through.
 
+### 060J (off-spec): phases 4 on top of H-clip — no help
+
+Ran +1 TTT phase (PHASED_TTT_NUM_PHASES 3→4) on top of 060H clip combo (off-spec — official 060J spec uses 060A clips). Result: post-TTT 1.05893 vs 060H+TTT 1.05891 — Δ +0.000015 (noise). Total eval 655s on 4H ≈ 328s on 8H.
+
+Conclusion: extra TTT phase does NOT help when quant noise is already reduced via clip tightening. Likely TTT is at saturation on the cleaner-quantized weights. Pure 060J (+1 phase, no clip change) might still help — that's research's call to spec.
+
 060A also ran TTT (3 phases, 792s eval): post-TTT val_bpb **1.05918371**
 — beats #1855's 3-seed mean (1.06108) by 0.0019.
 
