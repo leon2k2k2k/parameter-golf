@@ -1,8 +1,36 @@
-# Spec 061 — Skip-Layer Attention adapted to loop block
+# Spec 061A — Skip-Layer Attention adapted to loop block
+
+**Status: DRAFT — implementation deferred.** Code change requires threading
+cached K,V through `Block.forward` across the encoder loop's expanded
+index list, which has non-trivial torch.compile interactions (new graph
+variants on cache hit/miss; cross-block tensor liveness). Proper
+always-tensor scaffolding + a 2×H100 smoke must precede pinning a
+commit. Recommend a follow-up implementation session before handing
+off. **Do not launch a pod against this spec — there is no pinned
+commit yet.**
 
 **Date:** 2026-04-29
-**Branch:** `exp/061-skip-layer-attn-loop`
-**Parent:** 060A (#1855 port on `research`).
+**Branch:** `exp/061A-skip-layer-attn-loop` (not yet created)
+**Pinned commit:** **TBD** — pending implementation pass
+**Parent:** 060A (#1855 port; would fork from `exp/060-resume-ckpt @ a0a48b7`).
+
+## Note on existing architecture (added 2026-04-29 after code review)
+
+The 060A baseline **already implements a U-Net structure** at the
+*hidden-state* level: `encoder_indices` push to a `skips` stack,
+`decoder_indices` pop and combine via `skip_weights` (per-channel) and
+optional `skip_gates` (per-channel sigmoid lerp; `SKIP_GATES_ENABLED=1`
+by default). This is residual-stream skip, which is **not** the same
+as Skip-Layer Attention.
+
+This spec adds an *attention-level* skip orthogonal to the existing
+hidden-state skip: in the last visit of loop layer 5 in the decoder, a
+fraction of attention heads use Q from the current residual but K,V
+*projected from* the input residual at the matched encoder visit of
+loop layer 3 (or alternative source — see open questions). The
+existing `skip_weights` pass full hidden state forward; this new
+mechanism gives attention selective access to earlier representations
+without polluting the residual stream itself.
 
 ## Hypothesis
 
@@ -66,8 +94,19 @@ SKIP_LAYER_ATTN_AT_LAYER   = 5   # target loop layer (heads use cached K,V)
   no None passthrough, identity buffers initialized.
 - Init: `SKIP_LAYER_ATTN_ENABLED=0` ⇒ identical bytes/behavior to 060A.
 
-Branch `exp/061-skip-layer-attn-loop` from current `research`. Commit hash:
-**TBD** — research must implement, push, and pin before mini rung.
+Branch `exp/061A-skip-layer-attn-loop` (not yet created) from
+`exp/060-resume-ckpt @ a0a48b7`. Commit hash: **TBD** — research must
+implement, push, and pin before mini rung.
+
+**Implementation surface:** add a `kv_skip_cache` keyword to
+`Block.forward` (always-tensor: zeros buffer when inactive); on the
+encoder-side visit of `LOOP_START` layer, populate the cache; on the
+decoder-side visit of `LOOP_END` layer's last pass, splice the cached
+K,V into `SKIP_LAYER_ATTN_NUM_HEADS` of the heads. Both `_forward_hidden`
+and `forward_ttt` paths must mirror the change. Compile graphs to
+verify: (1) baseline (no cache), (2) cache populate, (3) cache
+consume; ideally the always-tensor pattern collapses (2)+(3) to one
+variant that's always-on with zero-cache acting as identity.
 
 ## Hardware ladder
 
