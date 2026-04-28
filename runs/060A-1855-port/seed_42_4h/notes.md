@@ -27,6 +27,7 @@ baseline validation + downstream lever signal only.
 | 060F | ATTN 12.5 + EMBED 13.0 | 1.07172520 | −0.000397 | 16,017,570 | OVER cap by 18 KB |
 | **060G** | **ATTN 12.5 + EMBED 13.5** | **1.07182443** | **−0.000297** | **15,989,345** | **LEGAL, 11 KB headroom — current best** |
 | **060H** | **ATTN 12.75 + EMBED 13.0** | **1.07180628** | **−0.000315** | **15,987,688** | **LEGAL, 12 KB headroom — best stack** |
+| **060H+TTT** | (same; full eval pipeline) | **post-TTT 1.05891477** | **−0.000269 vs 060A post-TTT 1.05918** | (same .ptz) | **−0.00217 vs #1855 3-seed mean (1.06108); −0.00098 vs #1855 seed 42 (1.05989)** |
 
 060A also ran TTT (3 phases, 792s eval): post-TTT val_bpb **1.05918371**
 — beats #1855's 3-seed mean (1.06108) by 0.0019.
