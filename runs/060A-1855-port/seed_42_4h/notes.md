@@ -29,6 +29,22 @@ baseline validation + downstream lever signal only.
 | **060H** | **ATTN 12.75 + EMBED 13.0** | **1.07180628** | **−0.000315** | **15,987,688** | **LEGAL, 12 KB headroom — best stack** |
 | **060H+TTT** | (same; full eval pipeline) | **post-TTT 1.05891477** | **−0.000269 vs 060A post-TTT 1.05918** | (same .ptz) | **−0.00217 vs #1855 3-seed mean (1.06108); −0.00098 vs #1855 seed 42 (1.05989)** |
 
+### TTT analysis on the clip-tightening Δ
+
+Two angles on the question "does clip tightening still help after TTT?":
+
+**TTT recovery (post-quant → post-TTT) is unchanged by clip tightening:**
+- 060A: 1.07212 → 1.05918, TTT recovers +0.01294 BPB
+- 060H: 1.07181 → 1.05891, TTT recovers +0.01290 BPB
+- Δ in TTT recovery: 0.00004 (noise). TTT helps the SAME amount regardless of clip choice.
+
+**The clip-Δ survives through TTT at ~85%:**
+- post-quant Δ (060H vs 060A): −0.000315
+- post-TTT Δ  (060H vs 060A): −0.000269
+- 269/315 ≈ 85% preservation. Clip tightening still wins post-TTT, just slightly smoothed.
+
+So TTT and clip tightening are **independent levers** that compose with mild attenuation. Reasonable mental model: TTT learns LoRAs that partially compensate for quantization noise; tighter clip → less noise to compensate → smaller compensation needed → smaller absolute Δ visible after TTT, but the Δ still flows through.
+
 060A also ran TTT (3 phases, 792s eval): post-TTT val_bpb **1.05918371**
 — beats #1855's 3-seed mean (1.06108) by 0.0019.
 
