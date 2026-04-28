@@ -1,5 +1,20 @@
 # Spec 060G — Partial SpinQuant from PR #1898 on 060A baseline
 
+**Status: DEPRECATED 2026-04-29 — empirically refuted by PR #1898 itself.**
+
+PR #1898 ran this exact lever (Partial SpinQuant + EMBED_BITS=6 reinvest) on
+its own base (#1851 at 1.06128) and got **1.06614** — a **regression of
++0.00486 BPB**. Their framing of "−0.01486 vs merged SOTA #1493 (1.0810)"
+is misleading; the like-for-like comparison vs their actual parent shows
+the lever doesn't help.
+
+Reason to keep this spec on file: documentation of why we're NOT pursuing
+SpinQuant on the 060A line. If the lever ever becomes promising in the
+future (e.g., paired with deploy-time repair or different bit allocations),
+the spec is here as a starting point. Do not run.
+
+---
+
 **Date:** 2026-04-29
 **Branch:** `exp/060G-partial-spinquant` (forked from research)
 **Parent:** 060A + #1898 SpinQuant code (port from `X-Abhishek-X/parameter-golf` PR #1898).

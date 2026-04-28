@@ -1,5 +1,21 @@
 # Spec 060H — EMBED_BITS=6 with LQER recovery on 060A baseline (eval-only)
 
+**Status: DEPRECATED 2026-04-29 — implied refutation by PR #1898.**
+
+PR #1898 ran EMBED_BITS=6 *with* SpinQuant rotation as protection against
+INT6 noise and got a **+0.00486 BPB regression** vs their base. EMBED_BITS=6
+*without* SpinQuant (this spec's H1, H2, H3 arms) has *more* INT6 noise on
+`tok_emb`, so all arms here would likely regress further. Don't run on its
+own — the pessimistic scenario in our prediction table is the most likely
+outcome.
+
+Document kept for reference. If we ever build deploy-time repair (060C)
+that specifically targets `tok_emb` precision recovery, this spec becomes
+worth re-examining as a stack candidate — but only after that's measured
+and shown to work.
+
+---
+
 **Date:** 2026-04-29
 **Branch:** `research` (config-only)
 **Parent:** 060A `final_model.pt` + `RESUME_FROM_CKPT` infrastructure (commit `a7c0ed8`).
