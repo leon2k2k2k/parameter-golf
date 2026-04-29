@@ -78,6 +78,7 @@ extract extra recurrence value**.
 - **W15 (2026-04-29 +150min):** clusters BBB/CCC/DDD (TTT-momentum sensitivity, eval-time logit softcap variant, full-attention vs XSA on loop layers); spec 094 frozen (TTT_LORA_LR=5e-5, smaller-LR sweep)
 - **W16 (2026-04-29 +160min):** clusters EEE/FFF/GGG (XSA on/off subset of layers, validation-set sub-sampling for fast iteration, eval-time mixed-precision); spec 095 frozen (TTT_LORA_LR=2e-4, larger-LR sweep, completes LR direction)
 - **W17 (2026-04-29 +170min):** clusters HHH/III/JJJ (TTT-momentum activation, prefix-doc count sweep, 1-shot TTT post-hoc); spec 096 frozen (TTT_BETA1=0.9, novel TTT-momentum axis)
+- **W18 (2026-04-29 +180min):** clusters KKK/LLL/MMM (TTT batch granularity, TTT chunk size effect, TTT_BETA2 variant); spec 097 frozen (TTT_BATCH_SIZE=32, TTT-batch-granularity axis)
 - (next wake will append below)
 
 ---
@@ -1755,4 +1756,62 @@ the LoRA on a small global pre-prefix.
 - **III1 (smaller prefix)** is config-only and complementary; spec
   candidate W18.
 - **JJJ (1-shot warmup TTT)** requires a code change; defer.
+
+---
+
+## W18 — TTT batch granularity, chunk size, β2 variant
+
+### Cluster KKK — TTT batch granularity (HH1 reframe)
+
+`TTT_BATCH_SIZE=64` is the default. The TTT optimizer accumulates
+gradients over batches of this many sequences per Adam step.
+
+**KKK1. TTT_BATCH_SIZE=32 at canonical.** Smaller batches = more
+frequent Adam updates per phase, finer-grained adaptation.
+- Hypothesis: smaller batches give the optimizer more signal-to-noise
+  rolls; could improve adaptation quality.
+- Caveat: smaller batches also mean noisier gradients per step.
+- Config-only spec.
+- **Spec candidate: 097.** **FREEZE THIS WAKE.**
+
+**KKK2. TTT_BATCH_SIZE=128 at canonical.** Larger batches = fewer
+updates, smoother gradients. Tests inverse direction.
+
+### Cluster LLL — TTT chunk size sweep (HH2 reframe)
+
+`TTT_CHUNK_SIZE=48` controls the per-chunk forward token count
+during TTT. Each chunk runs a forward, then the loss is used for the
+LoRA update.
+
+**LLL1. TTT_CHUNK_SIZE=24 (smaller).** Each chunk has less context;
+more chunks per phase. Trade-off: more updates vs less per-update
+context.
+
+**LLL2. TTT_CHUNK_SIZE=96 (larger).** Each chunk has more context;
+fewer chunks. More-context-per-update.
+
+These are config-only and conceptually separate from KKK
+(batch granularity vs context length).
+
+### Cluster MMM — TTT_BETA2 variant
+
+Sibling to 096 (TTT_BETA1=0.9). Canonical TTT_BETA2=0.99. Adam's
+default is 0.999 (more variance smoothing).
+
+**MMM1. TTT_BETA2=0.999 at canonical.** More smoothing of the
+variance estimate. Standard Adam practice.
+
+**MMM2. TTT_BETA2=0.95 at canonical.** Less smoothing; faster
+adaptation to local variance.
+
+Both config-only.
+
+### Decisions for W18
+
+- **Spec 097 = KKK1 = TTT_BATCH_SIZE=32 at canonical.** Novel axis
+  (TTT batch granularity). Config-only. **FREEZE THIS WAKE.**
+- **LLL (chunk size sweep)** is config-only and orthogonal; W19
+  candidate.
+- **MMM (β2 variant)** is config-only; could complete the Adam
+  hyperparameter mapping started by 096. W19+ candidate.
 
