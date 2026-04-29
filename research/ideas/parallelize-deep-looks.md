@@ -79,6 +79,7 @@ extract extra recurrence value**.
 - **W16 (2026-04-29 +160min):** clusters EEE/FFF/GGG (XSA on/off subset of layers, validation-set sub-sampling for fast iteration, eval-time mixed-precision); spec 095 frozen (TTT_LORA_LR=2e-4, larger-LR sweep, completes LR direction)
 - **W17 (2026-04-29 +170min):** clusters HHH/III/JJJ (TTT-momentum activation, prefix-doc count sweep, 1-shot TTT post-hoc); spec 096 frozen (TTT_BETA1=0.9, novel TTT-momentum axis)
 - **W18 (2026-04-29 +180min):** clusters KKK/LLL/MMM (TTT batch granularity, TTT chunk size effect, TTT_BETA2 variant); spec 097 frozen (TTT_BATCH_SIZE=32, TTT-batch-granularity axis)
+- **W19 (2026-04-29 +190min):** clusters NNN/OOO/PPP (TTT-WD effect, eval-time GPTQ-only test, TTT-LR-warmup ramp); spec 098 frozen (TTT_BETA2=0.999, completes Adam β-mapping)
 - (next wake will append below)
 
 ---
@@ -1814,4 +1815,63 @@ Both config-only.
   candidate.
 - **MMM (β2 variant)** is config-only; could complete the Adam
   hyperparameter mapping started by 096. W19+ candidate.
+
+---
+
+## W19 — TTT weight decay, GPTQ-only, LR-warmup ramp
+
+### Cluster NNN — TTT weight decay (orthogonal to LR/momentum)
+
+`TTT_WEIGHT_DECAY=0.5` per the 060A canonical config. Adam-W weight
+decay regularizes LoRA weights toward zero. This is a third
+optimizer dimension besides LR and β.
+
+**NNN1. TTT_WEIGHT_DECAY=0.0 at canonical.** No regularization. Tests
+whether the LoRA needs WD to behave well in 3 phases.
+- Hypothesis: at small phase counts, WD pull is small per phase; may
+  not matter. If it doesn't, we can remove the regularizer.
+- Config-only.
+
+**NNN2. TTT_WEIGHT_DECAY=1.0 at canonical.** Stronger regularization.
+Tests inverse direction.
+
+### Cluster OOO — GPTQ-only eval (skip TTT entirely)
+
+Cleanest TTT-vs-canonical test: at eval, run GPTQ but skip TTT
+phases entirely. Measures the model's intrinsic post-quant val_bpb.
+
+**OOO1. PHASED_TTT_NUM_PHASES=0 at canonical.** Disable TTT phases
+(0 iterations). Eval the GPTQ-quantized 060A model without any
+adaptation. Compare to 060A canonical (which has 3 phases).
+- The delta tells us: how much value does TTT contribute on top of
+  pre-quant + GPTQ?
+- Config-only.
+- **Diagnostic value HIGH** — calibrates the leverage of TTT in the
+  full pipeline.
+
+### Cluster PPP — TTT-LR-warmup ramp
+
+Currently TTT runs at fixed `TTT_LORA_LR=1e-4` from phase 1. Warmup-
+ramp could start at small LR (1e-5) and grow to canonical (1e-4) over
+the 3 phases.
+
+**PPP1. Warmup-ramp from 1e-5 to 1e-4 over 3 phases.** Each phase
+uses an exponentially-increasing LR.
+- **Code change required:** ~20 LOC in TTT phase loop to compute
+  per-phase LR.
+- **Compile audit:** LR is Python-side; no graph effect.
+- **Defer for code change.**
+
+### Decisions for W19
+
+- **Spec 098 = MMM1 = TTT_BETA2=0.999 at canonical.** Completes the
+  Adam β-mapping started by 096 (TTT_BETA1=0.9). 060A canonical has
+  β1=0.0, β2=0.99 — both unusual. Spec 096 tests β1=0.9 direction;
+  098 tests β2=0.999 direction. Independent axes. Config-only.
+  **FREEZE THIS WAKE.**
+- **NNN1 (TTT_WEIGHT_DECAY=0.0)** is config-only and orthogonal —
+  good W20 candidate.
+- **OOO1 (TTT-disable diagnostic)** is high-info and config-only;
+  W20 candidate.
+- **PPP (LR warmup)** requires code change; defer.
 
