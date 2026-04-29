@@ -261,6 +261,12 @@ class Hyperparameters:
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
+    # Spec 110 — multi-stream loop body (dual paths 3→4→5 + 5→4→3 with MLP merge).
+    # When enabled, replaces the canonical sequential loop iteration with two
+    # independent forward paths through the loop band in opposite layer orderings,
+    # combined by a small bottleneck-MLP merge module.
+    multi_stream_loop_enabled = bool(int(os.environ.get("MULTI_STREAM_LOOP_ENABLED", "0")))
+    multi_stream_merge_rank = int(os.environ.get("MULTI_STREAM_MERGE_RANK", "8"))
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
@@ -1082,6 +1088,31 @@ class MLP(nn.Module):
         return F.linear(hidden, down_w.to(x.dtype))
 
 
+class MultiStreamMerge(nn.Module):
+    """Spec 110 — bottleneck-MLP merge for multi-stream loop body.
+
+    Combines two stream outputs (from opposite-order forwards through the
+    loop band) via a per-token, per-channel learned gate computed from the
+    streams' difference. Init: merge_w2 zero-init → sigmoid(0)=0.5 →
+    plain averaging at init (identity-like behavior).
+
+    Param cost: 2 × d × r ≈ 8K for d=512, r=8.
+    """
+
+    def __init__(self, model_dim, rank=8):
+        super().__init__()
+        self.merge_w1 = nn.Linear(model_dim, rank, bias=False)
+        self.merge_w2 = nn.Linear(rank, model_dim, bias=False)
+        # Zero-init merge_w2 → gate = 0.5 → averaging at init.
+        nn.init.zeros_(self.merge_w2.weight)
+
+    def forward(self, x_a, x_b):
+        delta = x_a - x_b
+        hidden = F.relu(self.merge_w1(delta.to(self.merge_w1.weight.dtype)))
+        gate = torch.sigmoid(self.merge_w2(hidden)).to(x_a.dtype)
+        return gate * x_a + (1.0 - gate) * x_b
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -1206,7 +1237,15 @@ class GPT(nn.Module):
             for i in range(max(0, h.num_layers - h.xsa_last_n), h.num_layers):
                 self.blocks[i].attn.use_xsa = True
         self.looping_active = False
-        if h.num_loops > 0:
+        # Spec 110 — multi-stream takes precedence over canonical loop expansion.
+        # encoder = pre-loop layers, decoder = post-loop layers; the loop band
+        # runs as a dual-stream block inserted between encoder and decoder.
+        self.multi_stream_loop_enabled = bool(h.multi_stream_loop_enabled)
+        if self.multi_stream_loop_enabled:
+            self.encoder_indices = list(range(h.loop_start))
+            self.decoder_indices = list(range(h.loop_end + 1, h.num_layers))
+            self.loop_band_layer_indices = list(range(h.loop_start, h.loop_end + 1))
+        elif h.num_loops > 0:
             loop_seg = list(range(h.loop_start, h.loop_end + 1))
             all_indices = list(range(h.loop_start))
             for _ in range(h.num_loops + 1):
@@ -1215,9 +1254,11 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            self.loop_band_layer_indices = []
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.loop_band_layer_indices = []
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1231,6 +1272,13 @@ class GPT(nn.Module):
             if h.skip_gates_enabled
             else None
         )
+        # Spec 110 — multi-stream merge module (one for the whole loop band).
+        if self.multi_stream_loop_enabled:
+            self.multi_stream_merge = MultiStreamMerge(
+                h.model_dim, rank=h.multi_stream_merge_rank
+            )
+        else:
+            self.multi_stream_merge = None
         self.parallel_start_layer = h.parallel_start_layer
         self.parallel_final_lane = h.parallel_final_lane.lower()
         self.parallel_post_lambdas = nn.Parameter(
@@ -1355,6 +1403,19 @@ class GPT(nn.Module):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             skips.append(x)
+        # Spec 110 — multi-stream loop band: dual paths {3,4,5} + {5,4,3} merged.
+        # Inserted between encoder and decoder iterations. Active only when
+        # looping_active (matches canonical loop activation timing).
+        if self.multi_stream_loop_enabled and self.looping_active:
+            x_A = x
+            for i in self.loop_band_layer_indices:
+                q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                x_A = self.blocks[i](x_A, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x_B = x
+            for i in reversed(self.loop_band_layer_indices):
+                q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                x_B = self.blocks[i](x_B, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x = self.multi_stream_merge(x_A, x_B)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
@@ -1458,6 +1519,19 @@ class GPT(nn.Module):
             x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             slot += 1
             skips.append(x)
+        # Spec 110 — multi-stream loop band on TTT path.
+        if self.multi_stream_loop_enabled and self.looping_active:
+            x_A = x
+            for i in self.loop_band_layer_indices:
+                q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                x_A = self._block_with_lora(self.blocks[i], x_A, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                slot += 1
+            x_B = x
+            for i in reversed(self.loop_band_layer_indices):
+                q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                x_B = self._block_with_lora(self.blocks[i], x_B, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                slot += 1
+            x = self.multi_stream_merge(x_A, x_B)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
