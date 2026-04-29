@@ -80,6 +80,7 @@ extract extra recurrence value**.
 - **W17 (2026-04-29 +170min):** clusters HHH/III/JJJ (TTT-momentum activation, prefix-doc count sweep, 1-shot TTT post-hoc); spec 096 frozen (TTT_BETA1=0.9, novel TTT-momentum axis)
 - **W18 (2026-04-29 +180min):** clusters KKK/LLL/MMM (TTT batch granularity, TTT chunk size effect, TTT_BETA2 variant); spec 097 frozen (TTT_BATCH_SIZE=32, TTT-batch-granularity axis)
 - **W19 (2026-04-29 +190min):** clusters NNN/OOO/PPP (TTT-WD effect, eval-time GPTQ-only test, TTT-LR-warmup ramp); spec 098 frozen (TTT_BETA2=0.999, completes Adam β-mapping)
+- **W20 (2026-04-29 +200min):** clusters QQQ/RRR/SSS (TTT vs no-TTT calibration, GPTQ-without-TTT pre-quant comparison, single-phase TTT diagnostic); spec 099 frozen (TTT-disabled, calibrates TTT lever weight)
 - (next wake will append below)
 
 ---
@@ -1874,4 +1875,63 @@ uses an exponentially-increasing LR.
 - **OOO1 (TTT-disable diagnostic)** is high-info and config-only;
   W20 candidate.
 - **PPP (LR warmup)** requires code change; defer.
+
+---
+
+## W20 — TTT vs no-TTT calibration, GPTQ-only baseline
+
+### Cluster QQQ — TTT contribution diagnostic (OOO1 reframed)
+
+The cleanest "what does TTT actually buy?" measurement: at eval, run
+GPTQ but skip TTT entirely. Compares to canonical post-TTT
+post-quant val_bpb to size the TTT lever.
+
+**QQQ1. TTT-disabled at canonical NL.** `TTT_ENABLED=0` and/or
+`PHASED_TTT_NUM_PHASES=0`. Eval the GPTQ-quantized model directly
+without LoRA adaptation.
+- The delta tells us: how much value does TTT contribute on top of
+  pre-quant + GPTQ?
+- Calibration baseline for all the other TTT-axis specs (091, 094,
+  095, 096, 097, 098). If TTT contributes 0.005 bpb total, then any
+  TTT-axis improvement of 0.001 is a 20% relative improvement. If
+  TTT contributes 0.001 bpb total, then 0.001 axis-improvement is a
+  100% relative improvement.
+- Config-only.
+- **Spec candidate: 099 = QQQ1.** **FREEZE THIS WAKE.**
+
+### Cluster RRR — Single-phase TTT diagnostic
+
+A finer-grained calibration than QQQ1: run TTT with exactly 1 phase
+instead of 0 or 3. Tells us:
+- 099 vs 060A canonical: 3 phases of TTT contribution
+- 100 vs 099 (RRR1): 1 phase of TTT contribution
+- 060A canonical vs 100: marginal phases 2-3 contribution
+
+**RRR1. PHASED_TTT_NUM_PHASES=1 at canonical NL.** Config-only.
+- Combined with 099 and canonical: gives a 3-point phase-count
+  calibration (0, 1, 3). Memory-cited 091 already adds the 4-point.
+- W21 candidate.
+
+### Cluster SSS — TTT × deeper recurrence as a "TTT-amplification" test
+
+If 091 (TTT phases up) wins on canonical NL, the question is whether
+TTT-axis amplification compounds with recurrence-axis amplification.
+
+**SSS1. PHASED_TTT_NUM_PHASES=4 + LOOP_PATTERN at NL=3 eq.** Combines
+091's TTT extension with 080's recurrence extension. If both win
+individually, this composes.
+- Cost ~$4-5 (full pipeline + extra TTT phase).
+- Compile audit: same as 083 — forward_logits and forward_ttt
+  compile once each, no mid-run recompile.
+- W21 or W22 candidate.
+
+### Decisions for W20
+
+- **Spec 099 = QQQ1 = TTT-disabled at canonical.** Calibration
+  diagnostic; sizes the TTT lever. Config-only on `e7ccda2`.
+  **FREEZE THIS WAKE.**
+- **RRR1 (1-phase TTT)** is the natural finer-grained companion;
+  spec candidate W21.
+- **SSS1 (compound TTT × recurrence)** is config-only and
+  potentially leaderboard-relevant; W22 candidate.
 
