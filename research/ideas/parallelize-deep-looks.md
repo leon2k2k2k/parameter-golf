@@ -74,6 +74,7 @@ extract extra recurrence value**.
 - **W11 (2026-04-29 +110min):** clusters PP/QQ/RR (band {4,5,6} symmetry test, training-data-free hotstart from canonical, partial-rank weight slicing); spec 090 frozen (band-position shift {4,5,6} — completes position pair with 089)
 - **W12 (2026-04-29 +120min):** clusters SS/TT/UU (TTT-compute axis isolation, eval-time-deterministic seeding, multi-checkpoint averaging); spec 091 frozen (more TTT phases at canonical — TTT compute axis test)
 - **W13 (2026-04-29 +130min):** clusters VV/WW/XX (position × TTT cell completion, GPTQ calibration sweep, dropout-style residual perturbation); spec 092 frozen (TTT-on band {2,3,4}, leaderboard cell for 089)
+- **W14 (2026-04-29 +140min):** clusters YY/ZZ/AAA (TTT-LR sweep, eval-time SmearGate alteration, repeated-context test); spec 093 frozen (TTT-on band {4,5,6}, completes position × TTT grid)
 - (next wake will append below)
 
 ---
@@ -1498,4 +1499,79 @@ their own quantization. Speculative; not clearly useful.
   verify before duplicating.
 - **XX (eval-time residual perturbation)** is novel but code-change
   required; defer.
+
+---
+
+## W14 — TTT-LR sweep, SmearGate sensitivity, repeated-context
+
+### Cluster YY — TTT_LORA_LR sweep at canonical NL
+
+`TTT_LORA_LR=0.0001` is the default. Eval-time hyperparameter that
+controls how aggressively the LoRA adapts during TTT phases.
+
+**YY1. TTT_LORA_LR=5e-5 at canonical.** Smaller LR → more conservative
+adaptation. Tests "is canonical LR too aggressive for the eval
+distribution?"
+- Config-only spec; no graph effect.
+- Cost: ~$3-4 (full pipeline eval).
+
+**YY2. TTT_LORA_LR=2e-4 at canonical.** Larger LR → faster adaptation,
+risk of overshoot. Tests "is canonical LR too conservative?"
+
+**YY3. Joint sweep** with the deeper-recurrence specs (083/084).
+LR may need to scale with effective recurrence depth (deeper
+recurrence = longer chain rule = effectively larger gradients).
+Combination spec.
+
+### Cluster ZZ — Eval-time SmearGate alteration
+
+The model has a SmearGate mechanism (`smear_gate_enabled`) at the
+embedding level. It's tied to `gate_window=12` and a learned gate
+weight. Memory cluster LL (W9) considered changing gate_window
+and dropped. But there's another SmearGate lever:
+
+**ZZ1. Disable SmearGate at eval (`SMEAR_GATE_ENABLED=0`).** The
+model trained with SmearGate; turning it off at eval removes its
+forward-1 smear. Tests whether the trained model relies on the
+smear or whether it's a redundant mechanism the model has learned
+around.
+- **Compile audit:** SMEAR_GATE_ENABLED gates a Python `if` in
+  `_forward_hidden` (around line 1332). When disabled, the
+  embedding `x` doesn't go through the smear path. This is a
+  graph-level change → one new graph variant on first call. Same
+  iteration count, no mid-run recompile.
+- Almost certainly hurts (the model trained with it). But cheap
+  test.
+
+### Cluster AAA — Repeated-context evaluation (data-side)
+
+A different "free eval-compute" usage: at eval, present each
+sequence to the model TWICE (concatenate sequence with itself).
+The model autoregressively predicts. The second copy benefits from
+the first as in-context. Logits on the second copy may be lower
+loss → free bpb improvement.
+
+**AAA1. Repeated-context eval.** Concat each val sequence with itself
+before scoring. Doubles eval data per sequence, requires careful
+loss-mask to score only the second half (first half is context).
+- **Engineering: real change to validation data preparation.** Not
+  a config-only spec.
+- **Compile audit:** sequence length doubles → graph variant on first
+  call. One new variant; cached. No mid-run recompile.
+- **Score-mask handling:** the existing eval scores all positions in
+  the window with stride=64. We need to ignore positions in the
+  first-copy half. Adds complexity to the eval loop.
+- **Defer.**
+
+### Decisions for W14
+
+- **Spec 093 = VV2 = TTT-on band {4,5,6}.** Completes the position ×
+  TTT grid (089/092 covered {2,3,4}; 090/093 cover {4,5,6}).
+  Config-only on `e7ccda2`. **FREEZE THIS WAKE.**
+- **YY (TTT-LR sweep)** is config-only and worth doing if budget
+  allows. Multiple specs (YY1, YY2). Defer to W15+.
+- **ZZ1 (disable SmearGate at eval)** is config-only but predicted
+  to lose. Low-priority diagnostic.
+- **AAA (repeated-context eval)** is genuinely novel but requires
+  validation-side code change. Defer.
 
