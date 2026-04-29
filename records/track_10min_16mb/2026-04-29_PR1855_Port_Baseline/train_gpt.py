@@ -258,6 +258,9 @@ class Hyperparameters:
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 5.0))
     num_loops = int(os.environ.get("NUM_LOOPS", 2))
+    # Spec 114 — Recur-Alpha: per-pass per-loop-layer learnable residual gate.
+    # 6 scalars (NL=2 × 3 looped layers). Identity at α=0.
+    recur_alpha_enabled = bool(int(os.environ.get("RECUR_ALPHA_ENABLED", "0")))
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
@@ -1218,6 +1221,36 @@ class GPT(nn.Module):
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+        # Spec 114 — Recur-Alpha. Active only when num_loops > 0 AND env enabled.
+        self.recur_alpha_enabled = bool(h.recur_alpha_enabled) and h.num_loops > 0
+        self.loop_start = h.loop_start
+        self.loop_end = h.loop_end
+        if self.recur_alpha_enabled:
+            num_looped = h.loop_end - h.loop_start + 1
+            self.recur_alpha = nn.Parameter(
+                torch.zeros(h.num_loops, num_looped, dtype=torch.float32)
+            )
+            visits = {}
+            self._encoder_alpha_info = []
+            for idx in self.encoder_indices:
+                pi = visits.get(idx, 0)
+                visits[idx] = pi + 1
+                if self.loop_start <= idx <= self.loop_end and pi > 0:
+                    self._encoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                else:
+                    self._encoder_alpha_info.append(None)
+            self._decoder_alpha_info = []
+            for idx in self.decoder_indices:
+                pi = visits.get(idx, 0)
+                visits[idx] = pi + 1
+                if self.loop_start <= idx <= self.loop_end and pi > 0:
+                    self._decoder_alpha_info.append((pi - 1, idx - self.loop_start))
+                else:
+                    self._decoder_alpha_info.append(None)
+        else:
+            self.recur_alpha = None
+            self._encoder_alpha_info = None
+            self._decoder_alpha_info = None
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1351,13 +1384,31 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        for i in enc_iter:
+        # Spec 114: alpha_info active only when Recur-Alpha enabled AND looping active.
+        enc_alpha_info = (
+            self._encoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x_before = x
+            x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                pass_off, local_idx = enc_alpha_info[step_idx]
+                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                x = alpha * x_new + (1.0 - alpha) * x_before
+            else:
+                x = x_new
             skips.append(x)
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
+        dec_alpha_info = (
+            self._decoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
@@ -1387,7 +1438,14 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                x_before = x
+                x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    pass_off, local_idx = dec_alpha_info[skip_idx]
+                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                    x = alpha * x_new + (1.0 - alpha) * x_before
+                else:
+                    x = x_new
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
         x = self.final_norm(x)
@@ -1452,10 +1510,28 @@ class GPT(nn.Module):
                 )
             )
         )
+        # Spec 114: alpha_info active only when Recur-Alpha enabled AND looping active.
+        enc_alpha_info = (
+            self._encoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
+        dec_alpha_info = (
+            self._decoder_alpha_info
+            if (self.recur_alpha is not None and self.looping_active)
+            else None
+        )
         slot = 0
-        for i in enc_iter:
+        for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
-            x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            x_before = x
+            x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+            if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
+                pass_off, local_idx = enc_alpha_info[step_idx]
+                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                x = alpha * x_new + (1.0 - alpha) * x_before
+            else:
+                x = x_new
             slot += 1
             skips.append(x)
         psl = self.parallel_start_layer
@@ -1490,7 +1566,14 @@ class GPT(nn.Module):
                         x = torch.lerp(scaled_skip, x, g)
                     else:
                         x = x + scaled_skip
-                x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                x_before = x
+                x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
+                if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
+                    pass_off, local_idx = dec_alpha_info[skip_idx]
+                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                    x = alpha * x_new + (1.0 - alpha) * x_before
+                else:
+                    x = x_new
             slot += 1
         if lane0 is not None:
             x = self._final_parallel_hidden(lane0, lane1)
