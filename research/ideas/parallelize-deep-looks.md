@@ -69,6 +69,7 @@ extract extra recurrence value**.
 - **W6 (2026-04-29 +60min):** V1/V2 design challenge (U-Net midpoint constraint); clusters AA/BB/CC (matched-compute pattern shape, TTT-prefix length sweep, hot-pass conditioning); spec 085 frozen (matched-compute broad pattern eval on 060A)
 - **W7 (2026-04-29 +70min):** clusters DD/EE/FF (LR schedule × deeper-NL interactions, rolling-window eval, low-rank residual stream); spec 086 frozen (TTT-on × broad-pattern, leaderboard-relevant)
 - **W8 (2026-04-29 +80min):** clusters GG/HH/II (band-position shifts, TTT batch size sensitivity, gradient-aligned recurrence); spec 087 frozen (matched-compute stepped pattern eval, 073-shape sibling)
+- **W9 (2026-04-29 +90min):** clusters JJ/KK/LL (post-quant only TTT-extension, KV-projection truncation, expanded smear-gate window); spec 088 frozen (TTT-on stepped-pattern, leaderboard cell)
 - (next wake will append below)
 
 ---
@@ -1125,4 +1126,79 @@ same direction as earlier passes. Smooths the iteration.
 - **HH (TTT batch size sensitivity)** is config-only and complementary
   to the (compute, shape) grid; defer to W9.
 - **II demoted** — autograd-in-forward isn't compile-safe.
+
+---
+
+## W9 — TTT-extension on existing artifact, KV-projection truncation, smear-gate window
+
+### Cluster JJ — Post-quant-only TTT extension
+
+The full eval pipeline does: pre-quant eval → GPTQ → post-quant eval
+with TTT phases. The TTT phases adapt LoRA on the *quantized* model.
+
+**JJ1. More TTT phases at eval.** Current `PHASED_TTT_NUM_PHASES=3`.
+Try 4 or 5 phases. Each phase costs ~1-2 min. Eval headroom (~180s)
+might fit one extra phase, definitely fits 1-2 more if we drop other
+overhead.
+- **Compile audit:** number of phases is a Python loop bound, not a
+  graph parameter. Same compiled `forward_ttt` graph, just called
+  more times. **No mid-run recompile.**
+- **Spec candidate.**
+
+**JJ2. Larger TTT_LORA_RANK at eval-time.** Currently 80 (came from
+060A canonical). Try 96 or 128. The LoRA matrices are bigger; uses
+some of the 98 KB byte budget at the cost of capacity. But this is
+EVAL ONLY — the LoRA weights are computed on-the-fly during TTT, not
+baked into the submission artifact. So byte budget isn't affected.
+- **Catch:** the LoRA was *initialized* during training at rank 80;
+  loading the checkpoint and switching to rank 128 means new (mostly
+  zero) LoRA banks. The model may not have the capacity to use the
+  extra rank effectively in 3 TTT phases.
+- **Compile audit:** rank changes the LoRA tensor shapes, which
+  changes the compiled forward_ttt graph. ONE new graph variant on
+  first TTT phase. No mid-run recompile.
+- **Defer:** uncertain whether this helps; needs careful analysis.
+
+### Cluster KK — KV-projection truncation at eval
+
+Memory mentioned 047B (loop KV shrink) trained-time was killed
+on size, +0.0028 quality cost at +10% throughput. **Eval-only**
+KV truncation hasn't been tested.
+
+**KK1. Use only top-N KV-rank at eval.** Project K and V through a
+truncated SVD (top-r modes) before attention. Reduces attention
+softmax noise floor. Eval-time: weights unchanged; just a runtime
+projection.
+- **Compile audit:** SVD inside compile is risky (PyTorch SVD has
+  graph-break behavior). Truncated projection via a fixed mask
+  could work but requires picking the mask offline. Engineering cost.
+- **Defer for code change.**
+
+### Cluster LL — Expanded smear-gate window at eval
+
+The model has a SmearGate mechanism with `gate_window=12` (from
+hyperparam dump). The gate creates a per-token forward-1 smear of
+the embedding lane, with a sigmoid gate over the first 12 dims.
+
+**LL1. Wider gate_window at eval.** Try gate_window=24 (use more
+embedding dims for the gate signal). Eval-only override; the
+trained gate weights operate on the first 12 dims; expanding to 24
+means using untrained dims as gate input. Almost certain to be
+neutral or harmful since the trained weights expect 12 dims.
+- **Drop.** Unlikely to help; high blast radius.
+
+**LL2. Shrink gate_window at eval to 6.** Inverse: smaller window,
+narrower gate. Same problem in reverse — trained weights expect 12.
+- **Drop.**
+
+### Decisions for W9
+
+- **Spec 088 = TTT-on stepped pattern eval.** Direct sibling to 087
+  (TTT-off stepped pattern). Composes 087 with TTT for the
+  leaderboard-relevant matched-compute stepped-shape test. Config-
+  only on `e7ccda2`. **FREEZE THIS WAKE.**
+- **JJ1 (more TTT phases)** is config-only and complementary; spec
+  candidate for W10.
+- **JJ2 (larger LoRA rank at eval)** has uncertain value; defer.
+- **KK / LL clusters demoted** — code-change-required or low-value.
 
