@@ -1092,6 +1092,7 @@ class MLP(nn.Module):
         return F.linear(hidden, down_w.to(x.dtype))
 
 
+@torch.compiler.disable
 def anderson_step(x_history, f_history, beta, reg):
     """Spec 111 — Anderson acceleration step.
 
