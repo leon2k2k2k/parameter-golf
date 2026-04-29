@@ -1103,9 +1103,10 @@ def anderson_step(x_history, f_history, beta, reg):
        = G^-1 1 / (1^T G^-1 1)
     """
     M = len(x_history)
-    orig_dtype = x_history[0].dtype
-    # Build Gram matrix entrywise in fp32 (no big matmul; M is tiny).
-    g_flat = [(f - x).reshape(-1).to(torch.float32) for x, f in zip(x_history, f_history)]
+    # All-bf16 path: avoid any fp32 tensors that could leak into Inductor-fused
+    # downstream matmuls. .sum() on bf16 inputs uses fp32 accumulator internally
+    # but returns bf16 — precision sufficient for 2x2/3x3 LS solve with reg.
+    g_flat = [(f - x).reshape(-1) for x, f in zip(x_history, f_history)]
     if M == 2:
         a = (g_flat[0] * g_flat[0]).sum() + reg
         b = (g_flat[0] * g_flat[1]).sum()
@@ -1113,9 +1114,7 @@ def anderson_step(x_history, f_history, beta, reg):
         u0 = c - b
         u1 = a - b
         s = u0 + u1
-        a0 = u0 / s
-        a1 = u1 / s
-        alpha = torch.stack([a0, a1], dim=0).to(orig_dtype)
+        alpha = torch.stack([u0 / s, u1 / s], dim=0)
     else:
         # M == 3 (history=2 default after pass 2)
         a = (g_flat[0] * g_flat[0]).sum() + reg
@@ -1129,7 +1128,7 @@ def anderson_step(x_history, f_history, beta, reg):
         u1 = (c * e - b * f_) + (a * f_ - c * c) + (b * c - a * e)
         u2 = (b * e - c * d) + (b * c - a * e) + (a * d - b * b)
         s = u0 + u1 + u2
-        alpha = torch.stack([u0 / s, u1 / s, u2 / s], dim=0).to(orig_dtype)
+        alpha = torch.stack([u0 / s, u1 / s, u2 / s], dim=0)
     # Apply weights to history tensors
     F_stack = torch.stack(f_history, dim=0)
     X_stack = torch.stack(x_history, dim=0)
