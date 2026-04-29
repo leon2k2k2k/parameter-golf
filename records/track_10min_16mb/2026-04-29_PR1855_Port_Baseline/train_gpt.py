@@ -287,6 +287,12 @@ class Hyperparameters:
     ema_decay = float(os.environ.get("EMA_DECAY", 0.9965))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "1")))
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 96))
+    # Spec 113 — per-region LoRA rank. 0 = inherit ttt_lora_rank.
+    # Region = encoder (layer < loop_start), loop ([loop_start, loop_end]),
+    # decoder (layer > loop_end), based on underlying block layer index per slot.
+    ttt_lora_rank_encoder = int(os.environ.get("TTT_LORA_RANK_ENCODER", "0"))
+    ttt_lora_rank_loop = int(os.environ.get("TTT_LORA_RANK_LOOP", "0"))
+    ttt_lora_rank_decoder = int(os.environ.get("TTT_LORA_RANK_DECODER", "0"))
     ttt_lora_lr = float(os.environ.get("TTT_LORA_LR", 0.0001))
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 48))
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 2048))
@@ -1661,43 +1667,58 @@ class BatchedLinearLoRA(nn.Module):
 
 
 class BatchedTTTLoRA(nn.Module):
-    def __init__(self, bsz, model, rank, k_lora=True, mlp_lora=True, o_lora=True):
+    def __init__(self, bsz, model, rank, k_lora=True, mlp_lora=True, o_lora=True,
+                 rank_encoder=0, rank_loop=0, rank_decoder=0,
+                 loop_start=3, loop_end=5):
         super().__init__()
         self.bsz = bsz
         dim = model.qo_bank.shape[-1]
         vocab = model.tok_emb.num_embeddings
         if getattr(model, "looping_active", False):
-            num_slots = len(model.encoder_indices) + len(model.decoder_indices)
+            slot_layer_indices = list(model.encoder_indices) + list(model.decoder_indices)
         else:
-            num_slots = len(model.blocks)
+            slot_layer_indices = list(range(len(model.blocks)))
+        num_slots = len(slot_layer_indices)
+        # Spec 113 — per-region rank. 0 means inherit `rank`.
+        re = rank_encoder if rank_encoder > 0 else rank
+        rl = rank_loop if rank_loop > 0 else rank
+        rd = rank_decoder if rank_decoder > 0 else rank
+        slot_ranks = []
+        for layer_idx in slot_layer_indices:
+            if layer_idx < loop_start:
+                slot_ranks.append(re)
+            elif layer_idx <= loop_end:
+                slot_ranks.append(rl)
+            else:
+                slot_ranks.append(rd)
         kv_dim = model.blocks[0].attn.num_kv_heads * (
             dim // model.blocks[0].attn.num_heads
         )
         embed_dim = model.tok_emb.embedding_dim
         self.lm_head_lora = BatchedLinearLoRA(bsz, embed_dim, vocab, rank)
         self.q_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, dim, r) for r in slot_ranks]
         )
         self.v_loras = nn.ModuleList(
-            [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+            [BatchedLinearLoRA(bsz, dim, kv_dim, r) for r in slot_ranks]
         )
         self.k_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, kv_dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, kv_dim, r) for r in slot_ranks]
             )
             if k_lora
             else None
         )
         self.mlp_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, r) for r in slot_ranks]
             )
             if mlp_lora
             else None
         )
         self.o_loras = (
             nn.ModuleList(
-                [BatchedLinearLoRA(bsz, dim, dim, rank) for _ in range(num_slots)]
+                [BatchedLinearLoRA(bsz, dim, dim, r) for r in slot_ranks]
             )
             if o_lora
             else None
@@ -3074,6 +3095,8 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
     reusable_lora = BatchedTTTLoRA(
         h.ttt_batch_size, base_model, h.ttt_lora_rank,
         k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                rank_encoder=h.ttt_lora_rank_encoder, rank_loop=h.ttt_lora_rank_loop, rank_decoder=h.ttt_lora_rank_decoder,
+                loop_start=h.loop_start, loop_end=h.loop_end,
     ).to(device)
 
     def _build_opt(lora):
@@ -3116,6 +3139,8 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
             cur_lora = BatchedTTTLoRA(
                 bsz, base_model, h.ttt_lora_rank,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                rank_encoder=h.ttt_lora_rank_encoder, rank_loop=h.ttt_lora_rank_loop, rank_decoder=h.ttt_lora_rank_decoder,
+                loop_start=h.loop_start, loop_end=h.loop_end,
             ).to(device)
             cur_opt = _build_opt(cur_lora)
         pred_lens = [doc_len - 1 for _, doc_len in batch]
@@ -3287,6 +3312,8 @@ def eval_val_ttt_phased(h, base_model, device, val_data, forward_ttt_train):
                 reusable_lora = BatchedTTTLoRA(
                     h.ttt_batch_size, base_model, h.ttt_lora_rank,
                     k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                rank_encoder=h.ttt_lora_rank_encoder, rank_loop=h.ttt_lora_rank_loop, rank_decoder=h.ttt_lora_rank_decoder,
+                loop_start=h.loop_start, loop_end=h.loop_end,
                 ).to(device)
                 reusable_opt = _build_opt(reusable_lora)
                 current_phase += 1
@@ -3672,6 +3699,8 @@ def train_and_eval(h, device):
             wl = BatchedTTTLoRA(
                 bsz, ttt_model, h.ttt_lora_rank,
                 k_lora=h.ttt_k_lora, mlp_lora=h.ttt_mlp_lora, o_lora=h.ttt_o_lora,
+                rank_encoder=h.ttt_lora_rank_encoder, rank_loop=h.ttt_lora_rank_loop, rank_decoder=h.ttt_lora_rank_decoder,
+                loop_start=h.loop_start, loop_end=h.loop_end,
             ).to(device)
             wo = torch.optim.AdamW(
                 wl.parameters(),
