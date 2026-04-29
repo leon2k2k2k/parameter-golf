@@ -62,6 +62,7 @@ extract extra recurrence value**.
 
 - **W0 (2026-04-29 initial):** seed file, broad brainstorm
 - **W1 (2026-04-29 +10min):** fresh ideas in clusters H/I/J/K; spec 080 frozen
+- **W2 (2026-04-29 +20min):** clusters L/M/N/O + opposite-direction tests; spec 081 frozen
 - (next wake will append below)
 
 ---
@@ -369,4 +370,108 @@ per pass. Theoretical home run if it works (3 passes ≈ NL=8).
 - **I2 (asymmetric pass-0 weights)** is interesting but contradicts
   prior 047 nulls. Lower priority for the homestretch.
 - **J1/J2** require infrastructure that doesn't exist yet. W3+.
+
+---
+
+## W2 — opposite-direction tests + sensitivity sweeps + premature exits
+
+### Cluster L — "Premature head" intermediate prediction
+
+**L1. Auxiliary intermediate-pass logit head.** During training, project
+the hidden state at the *end of pass 1* (instead of the final pass) to
+vocab via the tied embedding head. Compute a *small* auxiliary CE loss
+on it. The model is then trained to make pass 1's output already
+predictive — which means at eval, you could potentially skip later
+passes for tokens whose pass-1 prediction is high-confidence.
+- **Param cost:** zero new params (uses tied head).
+- **Quality risk:** the auxiliary loss may compete with the main loss;
+  weight carefully (probably 0.1× main loss).
+- **Eval flexibility:** tokens with H(p_pass1) < threshold can skip
+  passes 2/3 → free wallclock. Tokens with high entropy continue.
+- **Compile audit complication:** the per-token early-exit gate is
+  data-dependent control flow inside compile — would force graph
+  break. So at training time we'd just compute both losses every step
+  (no early exit). The early-exit win is eval-only.
+
+**L2. Simpler variant: pass-1 logit ensemble at eval.** Train normally;
+at eval, compute logits at end of pass 1 AND end of final pass, average
+them. Doesn't require any training-side change — uses spare eval compute
+to ensemble two depths. Bypasses the data-dependent control flow problem.
+
+### Cluster M — Opposite-direction sensitivity tests
+
+**M1. Eval at NL=1 (FEWER passes) on 060A checkpoint.** The dual to
+spec 080. If the model already reaches good output at NL=1 (one pass
+through {3,4,5}), we know the recurrence isn't load-bearing for *most*
+tokens. If it crashes, recurrence is essential.
+- LOOP_PATTERN body for NL=1 equivalent: the trained pattern minus
+  two passes. Body = "1,2,3,4,5,6,7" (7 visits). Pre [0] + post
+  [8,9,10] = 11 total visits = no-loop equivalent on layer band.
+  Layers 3,4,5 visited only ONCE each. Drastic reduction.
+- Spec 082 candidate: this is the cleanest companion to 080/081.
+
+**M2. Eval at NL=2 with {3,5} band only.** Skip layer 4 in the loop
+band. body = "1,2,3,5,3,5,3,5,6,7" — visits: 3:3, 5:3, 4 in non-loop
+visits only. Tests whether layer 4's loop-pass contribution is
+load-bearing or just filler.
+- Empirical hole; never tested.
+
+**M3. Eval-pattern sensitivity sweep.** On 060A checkpoint, eval with
+all four already-specced patterns (071/072/073/074) plus 080/081's
+patterns. Build a "pattern × bpb" table to see how robust the trained
+representation is to pattern shape.
+- Cost: ~4 × $1 = $4 for the full sweep.
+
+### Cluster N — Loop-pass dropout regularization
+
+**N1. Random pass-skip at training time.** Per training step, with
+probability p (e.g., 0.1), randomly skip ONE of the three loop passes.
+Forces the model to be functional with NL ∈ {2, 3}. At eval, always
+use NL=3 (full power). Free at inference; cheaper at training (10%
+faster on average); regularization upside.
+- Compile-graph hazard: per-step random pass count → variable
+  iteration depth → graph variant explosion. Could be fixed with
+  always-tensor pattern: instead of skipping, multiply the skipped
+  pass's output by 0 (a learned-dropout mask tensor). Then iteration
+  count is fixed, graph is one variant, but the skipped pass has
+  identity behavior.
+- This makes it not a throughput lever (still pays for the pass), only
+  a regularization lever. Drop the throughput angle; keep the regu-
+  larization framing.
+
+**N2. Pass-index conditional modulation (= 047D AdaLN done right).**
+047D failed; the failure mode was likely that per-pass γ/β has too
+many degrees of freedom for the optimizer. Cleaner: a *single* learnable
+scalar per pass index, applied uniformly across the entire residual
+(not per-channel). 5 scalars × 3 loop layers = 15 params total. Tested
+indirectly by 053 ("per-pass FFN scale") — null. Confirmed dead.
+
+### Cluster O — Eval-time auxiliary refinement
+
+**O1. Final-pass MLP-only refinement.** At eval, after the trained NL=2
+loop completes, run ONE additional pass through just the MLP of the loop
+band (skip attention). Cheaper than a full extra pass (~50% of pass cost),
+since MLP is half the loop-block compute. Tests whether the residual
+benefits from one more "feature update" without re-attending.
+- Compile audit: requires a code change to add an "MLP-only refinement"
+  flag that conditionally runs `mlp(x)` after the main loop. Must use
+  always-tensor pattern (zero-buffer for inactive case).
+
+**O2. Final-pass attention-only refinement.** Inverse of O1: extra
+attention pass without MLP. Tests the orthogonal hypothesis. Same
+compile-audit complexity.
+
+### Decisions for W2
+
+- **Spec 081 = NL=4 equivalent eval on 060A** (5 passes through {3,4,5}).
+  Direct upward extension of 080. Pattern-only, config-only, same code
+  as 080. **FREEZE THIS WAKE.**
+- **Spec 082 candidate (W3): NL=1 equivalent eval (M1).** Downward dual.
+- **L2 (pass-1 logit ensemble at eval)** is interesting but requires a
+  small code change (forward returns intermediate logits). Defer.
+- **N1 with always-tensor masking** is novel but the regularization
+  angle is the only justification; throughput-side framing was wrong.
+  Lower priority for homestretch.
+- **O1/O2** require code changes for the MLP-only / attn-only
+  refinement modes. Defer to W3 or W4.
 
