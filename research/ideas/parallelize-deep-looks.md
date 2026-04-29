@@ -76,6 +76,7 @@ extract extra recurrence value**.
 - **W13 (2026-04-29 +130min):** clusters VV/WW/XX (position × TTT cell completion, GPTQ calibration sweep, dropout-style residual perturbation); spec 092 frozen (TTT-on band {2,3,4}, leaderboard cell for 089)
 - **W14 (2026-04-29 +140min):** clusters YY/ZZ/AAA (TTT-LR sweep, eval-time SmearGate alteration, repeated-context test); spec 093 frozen (TTT-on band {4,5,6}, completes position × TTT grid)
 - **W15 (2026-04-29 +150min):** clusters BBB/CCC/DDD (TTT-momentum sensitivity, eval-time logit softcap variant, full-attention vs XSA on loop layers); spec 094 frozen (TTT_LORA_LR=5e-5, smaller-LR sweep)
+- **W16 (2026-04-29 +160min):** clusters EEE/FFF/GGG (XSA on/off subset of layers, validation-set sub-sampling for fast iteration, eval-time mixed-precision); spec 095 frozen (TTT_LORA_LR=2e-4, larger-LR sweep, completes LR direction)
 - (next wake will append below)
 
 ---
@@ -1633,4 +1634,68 @@ is fine.
   candidate for W16.
 - **CCC, DDD demoted** — already partially explored or low-value
   diagnostics.
+
+---
+
+## W16 — XSA layer subset, val sub-sampling, eval-time mixed precision
+
+### Cluster EEE — XSA on a layer subset (refines DDD)
+
+DDD1 (W15) considered disabling XSA entirely. More refined: disable
+XSA only on the loop layers (where recurrence may interact differently
+with XSA's exclusivity correction).
+
+**EEE1. XSA only on non-loop layers.** Set `XSA_LAST_N=11` but
+override on loop layers via a hypothetical env var. Tests "does XSA
+help or hurt during recurrence?"
+- Code change required: ~10 LOC adding per-layer XSA flag.
+- Compile audit: trivial — adds a static if/else per layer at
+  __init__. One graph variant.
+- Defer.
+
+### Cluster FFF — Validation sub-sampling for fast iteration
+
+For diagnostic specs (where we want a fast bpb estimate, not the
+full leaderboard number), use a subset of the val set.
+
+**FFF1. Eval on first 1024 sequences only.** Full val set has many
+more; using 1024 is faster but still gives a reasonable variance
+estimate.
+- **Cost reduction:** ~5-10× faster eval (depending on full set size).
+- **Use case:** would let us run dozens of variant specs at $0.10
+  each instead of $1+.
+- **Caveat:** sub-sampled val_bpb has higher variance; not reliable
+  for sub-0.001 deltas.
+- **Compile audit:** sequence count is data-loop-bound; no graph
+  effect.
+- Could be a meta-spec ("use this for cheap exploration") more than
+  a science result. Defer to research-time tooling.
+
+### Cluster GGG — Eval-time mixed-precision
+
+The model uses bf16 throughout. Could we eval with parts of the model
+in fp32 for higher precision?
+
+**GGG1. fp32 head + softmax at eval.** The output projection (tied
+embedding) and the cross-entropy computation can run in fp32 for
+better numerical precision in the bpb measurement.
+- The training-time path already uses softcapped CE which controls
+  numerics; this would be a redundant change.
+- Actually MEMORY mentions spec 060A uses `fused_ce_enabled` and
+  `softcapped_cross_entropy` — already optimized. Lower priority.
+
+**GGG2. fp32 attention softmax on loop layers.** During recurrence,
+each loop pass's softmax is computed in bf16. fp32 could improve
+precision in the iterative refinement.
+- Same theme as Z1 (W5) but more targeted.
+- Code change required, defer.
+
+### Decisions for W16
+
+- **Spec 095 = YY2 = TTT_LORA_LR=2e-4 (larger LR).** Direct sibling
+  to 094. Completes the LR direction sweep. Together with canonical
+  (1e-4) and 094 (5e-5) gives a 3-point LR scan. Config-only.
+  **FREEZE THIS WAKE.**
+- **EEE / FFF / GGG clusters** all require code changes or have
+  unclear value. Defer.
 
