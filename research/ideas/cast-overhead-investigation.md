@@ -1,7 +1,39 @@
 # Cast / dtype-conversion overhead — investigation thread
 
 **Date opened:** 2026-04-29
-**Status:** OPEN — needs more testing before any spec is justified.
+**Date closed:** 2026-04-29 (same day)
+**Status:** **CLOSED — pure-cast cost is 2.84%, below the 3% action threshold.**
+
+## VERDICT (2026-04-29)
+
+Refined classification on the existing 064b chrome traces with strict
+separation:
+
+| Class | % of kernel time |
+|---|---|
+| no_cast | 70.8% |
+| fused_with_cast (real fused work, includes `to_copy` as one ingredient) | 26.4% |
+| **pure_cast** | **2.84%** |
+
+Same numbers in both pre/post-loop traces (within 0.05%).
+
+The dominant pure-cast kernel is a single cutlass bf16↔fp32 kernel
+(~39 ms, 552 launches) — almost certainly the parameter-bank dtype
+management. Even eliminating it entirely (which would require
+restructuring the bank storage) would buy only ~2.7% wallclock —
+below the threshold where training-stability risk is justified.
+
+The 26.4% in `fused_with_cast` is what `torch.compile` *already
+does* to minimize memory traffic. Un-fusing those kernels to
+"remove" the cast would make things slower, not faster.
+
+**Decision: do not spec a cast-reduction experiment for the
+homestretch.** The 17% number that triggered this thread was a
+classification artifact in my crude regex, corrected by the refined
+analysis above.
+
+---
+
 **Trigger:** spec 064b chrome traces showed ~17% of rank-0 GPU kernel
 time in kernels matching `cast|to_copy|convert`. Initial reading was
 "wasted dtype overhead — easy throughput recovery." On closer
