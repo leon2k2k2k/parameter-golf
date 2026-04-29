@@ -261,6 +261,12 @@ class Hyperparameters:
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
+    # Spec 071/072 — explicit loop-body pattern as comma-separated layer
+    # indices. Overrides loop_start/loop_end/num_loops contiguous-band
+    # construction when set. Empty (default) = use contiguous band.
+    # Example: LOOP_PATTERN="2,3,4,5,4,5,6,5,6,7" implements a "diamond"
+    # pattern peaking at layer 5.
+    loop_pattern = os.environ.get("LOOP_PATTERN", "")
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
@@ -1206,7 +1212,24 @@ class GPT(nn.Module):
             for i in range(max(0, h.num_layers - h.xsa_last_n), h.num_layers):
                 self.blocks[i].attn.use_xsa = True
         self.looping_active = False
-        if h.num_loops > 0:
+        if h.loop_pattern:
+            # Spec 071/072 — explicit pattern overrides contiguous-band logic.
+            body = [int(s.strip()) for s in h.loop_pattern.split(",") if s.strip()]
+            if not body:
+                raise ValueError(f"LOOP_PATTERN parsed empty: {h.loop_pattern!r}")
+            band_min = min(body)
+            band_max = max(body)
+            if band_min < 0 or band_max >= h.num_layers:
+                raise ValueError(
+                    f"LOOP_PATTERN out of range [0,{h.num_layers}): {body}"
+                )
+            pre = list(range(band_min))
+            post = list(range(band_max + 1, h.num_layers))
+            all_indices = pre + body + post
+            num_enc = len(all_indices) // 2
+            self.encoder_indices = all_indices[:num_enc]
+            self.decoder_indices = all_indices[num_enc:]
+        elif h.num_loops > 0:
             loop_seg = list(range(h.loop_start, h.loop_end + 1))
             all_indices = list(range(h.loop_start))
             for _ in range(h.num_loops + 1):
