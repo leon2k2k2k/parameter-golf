@@ -66,6 +66,7 @@ extract extra recurrence value**.
 - **W3 (2026-04-29 +30min):** clusters P/Q/R/S/T (TTT×recurrence, position-dependent depth, cross-rank pattern divergence, fixed-point cache); spec 082 frozen
 - **W4 (2026-04-29 +40min):** TTT compositional risks; clusters U/V/W (eval-time logit blends, encoder-only/decoder-only NL skew, post-quant deeper recurrence); spec 083 frozen (TTT-on × NL=3 eq)
 - **W5 (2026-04-29 +50min):** R1 framing correction; clusters X/Y/Z (warmup-skip eval, prefix-only deeper recurrence, mixed-precision recurrence); spec 084 frozen (TTT-on × NL=4 eq)
+- **W6 (2026-04-29 +60min):** V1/V2 design challenge (U-Net midpoint constraint); clusters AA/BB/CC (matched-compute pattern shape, TTT-prefix length sweep, hot-pass conditioning); spec 085 frozen (matched-compute broad pattern eval on 060A)
 - (next wake will append below)
 
 ---
@@ -844,4 +845,117 @@ precision per pass.
 - **Z1 (fp32 loop residual)** is a code-change candidate for W6+.
   Higher engineering cost than the eval-only specs we've been freezing.
 - **R1 demotion finalized** — not a free ensemble; lower priority.
+
+---
+
+## W6 — U-Net midpoint constraint + matched-compute pattern shape + TTT-prefix sweep
+
+### V1/V2 design challenge — U-Net midpoint forces near-symmetry
+
+W4 proposed V1 (encoder-deeper) and V2 (decoder-deeper) NL skews. This
+wake's investigation: **the existing GPT.__init__ splits all_indices at
+the midpoint** (`num_enc = len(all_indices) // 2`), so attempting to
+skew {3,4,5} visits per side is constrained.
+
+**Concrete attempts (matched 17-pass compute):**
+
+| Pattern body | Pre+post | enc {3,4,5} visits | dec {3,4,5} visits |
+|---|---|---|---|
+| `3,4,5,3,4,5,3,4,5,6,7` | [0,1,2]+[8,9,10] | 5 | 4 |
+| `3,4,5,3,4,5,3,4,5,4,5` | [0,1,2]+[6..10] | 5 | 4 |
+| canonical `3,4,5,3,4,5,3,4,5` | (auto) | 5 | 4 |
+
+In all matched-17-pass body designs, the midpoint split lands at the
+same encoder/decoder distribution. **Truly skewed V1/V2 require a
+code change** to override the midpoint split (e.g., `ENC_DEC_SPLIT`
+env var that forces split at a different index).
+
+- **Implication:** V1/V2 demoted to "code-change required, lower
+  priority." If a future wake produces this, the change is small
+  (~5 LOC: read ENC_DEC_SPLIT, override `num_enc` if set).
+- **Compile audit for the code change:** trivial — `num_enc` is a
+  Python int set at __init__. Different value → different
+  encoder/decoder split lists. Same compile-time fixed iteration
+  count, no mid-run recompile.
+
+### Cluster AA — Matched-compute pattern shape at eval
+
+Sibling to the (NL eq) scaling curve specs 080/081/082. Those vary
+*compute* (number of layer-passes). This cluster varies *shape* at
+**fixed compute** (17 passes = canonical).
+
+We already specced 071/072/073/074 as TRAINING-time pattern variants.
+Reusing those patterns at *eval* (no retraining) on 060A's checkpoint
+tests a different question: **how robust is the trained representation
+to runtime pattern shape changes?**
+
+**AA1. Eval at 074's broad pattern.** Pattern body
+`1,2,3,3,4,5,4,5,6,5,6,7,7` — 17 total layer-passes. Layers 3,4,5,6,7
+all visited 2-3 times each (broader band).
+
+The trained model saw layers 3,4,5 visited 3× each and layers 6,7
+visited only 1× each. AA1 visits layers 6 and 7 *twice*, demanding
+they iterate in the recurrent role they weren't trained for.
+
+- **Hypothesis:** if recurrence is robust to pattern shape (the
+  iterated function generalizes across band shapes), AA1 gets
+  bpb similar to canonical. If shape-sensitive, AA1 worsens.
+- **Compile audit:** same as 080. Eval-only, LOOP_PATTERN sets
+  the index lists at __init__, one new graph variant on first
+  eval call. No mid-run recompile.
+- **Spec candidate: 085 = AA1.** **FREEZE THIS WAKE.**
+
+**AA2. Eval at 073's stepped 2-3-3-2 pattern.** Companion to AA1
+testing a different shape (2-3-3-2 across {3,4,5,6}, layer 5 not
+peaked).
+
+**AA3. Full sweep AA1+AA2+canonical with bpb table.** Reads as a
+2D map: compute axis (080/081/082) × shape axis (AA1/AA2/canonical).
+
+### Cluster BB — TTT prefix length × recurrence
+
+PHASED_TTT_PREFIX_DOCS=2500 was tuned for the canonical NL=2 setting.
+With deeper recurrence at eval (083, 084), the LoRA may benefit from
+longer prefix (more adaptation budget for the deeper iteration) or
+shorter (less overfit to the deeper-recurrence eval distribution).
+
+**BB1. NL=3 eval × prefix_docs={1500, 2500, 3500} sweep.** Three
+configs, each a config-only spec. Each tests how TTT prefix length
+interacts with deeper-recurrence eval. Cost: ~$3-4 each, $9-12 total.
+
+**BB2. NL=2 eval × prefix_docs sweep.** Baseline check — does the
+canonical NL benefit from non-default prefix lengths? Important
+for separating "TTT-prefix lever" from "TTT-prefix × deeper-NL
+interaction."
+
+Defer this to W7+ if time permits — these tests are most informative
+*after* 083/084's results land.
+
+### Cluster CC — Hot-pass conditioning (variant of N1, no compile risk)
+
+W2's N1 (random pass-skip at training) was rejected for compile-graph
+hazards. This wake: a static analog that's compile-safe.
+
+**CC1. Per-pass dropout MASK (not a skip).** During training, with
+some probability p, multiply a random pass's output by a small
+factor (e.g. 0.5 instead of 1.0). Iteration count stays fixed; the
+"skipped" pass contributes less. Always-tensor: a precomputed mask
+tensor controls per-pass scaling.
+- **Forces robustness:** model learns to function across different
+  per-pass weight distributions.
+- **Eval:** all passes at full weight (1.0).
+- **Compile audit:** mask is a tensor, indexed deterministically per
+  step. Single graph variant. No mid-run recompile.
+- **Code change:** ~30 LOC. Defer.
+
+### Decisions for W6
+
+- **Spec 085 = AA1 (matched-compute broad pattern eval on 060A).**
+  Eval-only, config-only, completes the (compute, shape) grid.
+  **FREEZE THIS WAKE.**
+- **AA3 (full sweep)** is the natural followup but requires running
+  3+ eval configs. Single-spec with multi-arm structure for W7?
+- **BB1 (TTT-prefix × NL sweep)** worth doing AFTER 083/084 land —
+  conditional value.
+- **V1/V2 demoted** — code change required.
 
