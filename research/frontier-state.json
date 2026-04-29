@@ -1,6 +1,6 @@
 {
-  "last_scan_utc": "2026-04-26T12:45:00Z",
-  "note": "Seeded from pt4 scan + 2026-04-20 incremental scan + 2026-04-21 incremental scans 2 and 3 + 2026-04-22 incremental scans 1 and 2 + 2026-04-23 scans 1 and 2 + 2026-04-24 scans 1/2/3 + 2026-04-25 scan + 2026-04-26 scans 1 and 2. State backfilled with PRs from diary files that were missing.",
+  "last_scan_utc": "2026-04-29T14:10:00Z",
+  "note": "2026-04-29 14:10Z incremental scan: classified 21 new PRs (#1906-#1931 minus prior). Headline: PRs #1908+#1918 independently confirm AWQ-lite mixed-bit GPTQ pattern at ~1.0608 on #1855 base; #1925 hyperparam-only at 1.06109; #1923 Asymmetric Logit Rescale = empirical negative; #1929 banned SLOT+prequant-TTT. New idea files: 1925-matrix-lr-ttt-prefix-tune, 1915-per-doc-lora-ttt. Map dated 2026-04-20 \u2014 flagged for rebuild.",
   "prs": {
     "1493": {
       "verdict": "clean",
@@ -532,13 +532,12 @@
       "note": "Scylla TokenMonster tokenizer with metadata-driven byte accounting"
     },
     "1797": {
-      "verdict": "tokenizer-disputed",
+      "verdict": "clean",
       "claimed_bpb": 1.06157,
-      "sha": "04d35edaad74fc88b5ef08a814c94596b616ec1b",
       "builds_on": "1787",
       "trunk": "A",
-      "legitimacy": "likely-legal",
-      "note": "SmearGate + LQER asym on #1787; best tokenizer-disputed/likely-legal; BELOW BASELINE"
+      "legitimacy": "clean",
+      "note": "SmearGate+LQER on #1787 base; FLAGGED by cocohearts leaderboard as validity/provenance pending"
     },
     "1799": {
       "verdict": "clean",
@@ -550,13 +549,12 @@
       "note": "headwise gated attention; too weak"
     },
     "1801": {
-      "verdict": "tokenizer-disputed",
+      "verdict": "clean",
       "claimed_bpb": 1.06287,
-      "sha": "unknown",
-      "builds_on": "1736",
+      "builds_on": "1779,1787",
       "trunk": "A",
-      "legitimacy": "likely-legal",
-      "note": "sparse-gate + frozen-carry on CaseOps stack; below baseline"
+      "legitimacy": "clean",
+      "note": "OUR earlier sparse-gate+frozen-carry; FLAGGED by cocohearts"
     },
     "1802": {
       "verdict": "clean",
@@ -735,7 +733,7 @@
       "builds_on": "1736, 1767",
       "trunk": "A",
       "legitimacy": "likely-legal",
-      "note": "OUR SUBMISSION — frozen learned recurrent alpha/beta carry blend on #1736 + #1767 TTT; BELOW BASELINE"
+      "note": "OUR SUBMISSION \u2014 frozen learned recurrent alpha/beta carry blend on #1736 + #1767 TTT; BELOW BASELINE"
     },
     "1780": {
       "verdict": "clean",
@@ -761,7 +759,7 @@
       "builds_on": "unknown",
       "trunk": "new",
       "legitimacy": "likely-illegal",
-      "note": "non-record NN + byte-level PPM adaptive-λ mixture demo; banned n-gram/eval-cache family"
+      "note": "non-record NN + byte-level PPM adaptive-\u03bb mixture demo; banned n-gram/eval-cache family"
     },
     "1783": {
       "verdict": "other",
@@ -851,7 +849,7 @@
     },
     "1826": {
       "verdict": "clean",
-      "claimed_bpb": 1.0770,
+      "claimed_bpb": 1.077,
       "sha": "8f3c65a865a4b7ad5c581db294d8c57872562199",
       "builds_on": "1787, 1667",
       "trunk": "A",
@@ -884,6 +882,686 @@
       "trunk": "A",
       "legitimacy": "legal",
       "note": "non-record Polar Express NS coefficient ablation on #1809; confirms PE gain ~0.002 bpb"
+    },
+    "1832": {
+      "verdict": "other",
+      "claimed_bpb": 1.087,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "QK-Gain 5.25 reproduction, single seed"
+    },
+    "1833": {
+      "verdict": "broken",
+      "claimed_bpb": 0.90688,
+      "builds_on": "1756",
+      "trunk": "A",
+      "legitimacy": "broken",
+      "note": "WIP; artifact 24.5MB over cap, eval 658s over cap; PPM-mixture class also suspended"
+    },
+    "1835": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 1.00136,
+      "builds_on": "1493",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "PPM byte-mixture class; suspended pending #1872"
+    },
+    "1836": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "hardik top5_run draft"
+    },
+    "1837": {
+      "verdict": "other",
+      "claimed_bpb": 1.07063,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "non-record E2E TTT wishlist"
+    },
+    "1838": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "kailean codex/scylla plans"
+    },
+    "1839": {
+      "verdict": "other",
+      "claimed_bpb": 1.192,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "LateQAT bit-plan-locked; above baseline"
+    },
+    "1841": {
+      "verdict": "other",
+      "claimed_bpb": 1.1413,
+      "builds_on": "unknown",
+      "trunk": "new",
+      "note": "non-record decorrelation regularizer"
+    },
+    "1842": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "new",
+      "note": "non-record H-Net dynamic chunking"
+    },
+    "1843": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "training infra: muon warmup auto-detect"
+    },
+    "1844": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "SkipQuant adapter TTT (rank-1024 eval-time)"
+    },
+    "1845": {
+      "verdict": "other",
+      "claimed_bpb": 1.31,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "non-record DGX Spark"
+    },
+    "1848": {
+      "verdict": "other",
+      "claimed_bpb": 0.8798,
+      "builds_on": "unknown",
+      "trunk": "byte-bug",
+      "note": "newjordan opaque sub-1 series; likely PPM-class or byte-bug"
+    },
+    "1849": {
+      "verdict": "other",
+      "claimed_bpb": 1.085,
+      "builds_on": "1493",
+      "trunk": "A",
+      "note": "compute-grant draft, pruning + rANS"
+    },
+    "1850": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 1.00495,
+      "builds_on": "1493",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "PPM byte-mixture canonical; suspended pending #1872; OE-GOD originator-equivalent"
+    },
+    "1851": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06128,
+      "builds_on": "1797",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "SmearGate BOS-mask fix; reproduced by #1868"
+    },
+    "1852": {
+      "verdict": "prequant-ttt-disputed",
+      "claimed_bpb": 1.0282,
+      "builds_on": "1735",
+      "trunk": "C",
+      "legitimacy": "likely-illegal",
+      "note": "Pre-quant TTT (Issue #1017 Cond 3)"
+    },
+    "1854": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.90236,
+      "builds_on": "1797,1835",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "PPM byte-mixture on #1797 base; suspended pending #1872"
+    },
+    "1855": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06108,
+      "builds_on": "1851",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "9-hparam greedy stack; current clean leader"
+    },
+    "1858": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.9946,
+      "builds_on": "1850",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "PPM byte-mixture + score-first TTT; suspended"
+    },
+    "1859": {
+      "verdict": "other",
+      "claimed_bpb": 1.1454,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "weak baseline"
+    },
+    "1860": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "Hymba SP1024"
+    },
+    "1862": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 1.18765,
+      "builds_on": "unknown",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "SkipQuant + PPM-mixture; subset coverage"
+    },
+    "1864": {
+      "verdict": "broken",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "empty submission"
+    },
+    "1865": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.8748,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "disputed",
+      "note": "newjordan opaque PPM-class likely"
+    },
+    "1866": {
+      "verdict": "other",
+      "claimed_bpb": 1.5042,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "non-record Apple M1"
+    },
+    "1867": {
+      "verdict": "other",
+      "claimed_bpb": 1.078,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "above baseline; SMT (Sparse Matrix Tuning) lever"
+    },
+    "1868": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06145,
+      "builds_on": "1851",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "3-seed reproduction of #1851 BOS-fix"
+    },
+    "1869": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06654,
+      "builds_on": "1797",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "BOS-masked SmearGate, weaker base"
+    },
+    "1870": {
+      "verdict": "other",
+      "claimed_bpb": 2.13131,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "non-record sub-1MB"
+    },
+    "1871": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.8533,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "disputed",
+      "note": "newjordan Leo opaque"
+    },
+    "1873": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.82006,
+      "builds_on": "unknown",
+      "trunk": "A",
+      "legitimacy": "likely-illegal",
+      "note": "SP10240 lossy casefold + PPM mixture; double dispute"
+    },
+    "1874": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06766,
+      "builds_on": "1790",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "PolarNS+MIN_LR+LQER on non-CaseOps base"
+    },
+    "1875": {
+      "verdict": "broken",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "scratchpad/spam"
+    },
+    "1876": {
+      "verdict": "clean",
+      "claimed_bpb": 1.08008,
+      "builds_on": "1394",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "coprime loader + score-first TTT, above baseline"
+    },
+    "1877": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.96255,
+      "builds_on": "1850",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "Order-6 PPM byte-mixture; suspended"
+    },
+    "1878": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.85018,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "disputed",
+      "note": "newjordan Raphe_II opaque"
+    },
+    "1879": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 1.0803,
+      "builds_on": "unknown",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "DualClock token-PPM mixture (token alphabet, not byte) \u2014 only token-\u03a3-normalized member of cluster"
+    },
+    "1880": {
+      "verdict": "clean",
+      "claimed_bpb": 1.0775,
+      "builds_on": "1493,1667,1693,1851",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "AttnOutGate+SmearGate+softcap=15 on #1493 base"
+    },
+    "1881": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.9019,
+      "builds_on": "1797,1835",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "PPM byte-mixture v2 with full-val coverage; subset for mix; quantized_ttt fallback 1.0621"
+    },
+    "1882": {
+      "verdict": "other",
+      "claimed_bpb": 1.2013,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "10L hybrid SWA, weak baseline"
+    },
+    "1883": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06777,
+      "builds_on": "1854",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "neural stack only (no PPM); budget-compliant"
+    },
+    "1884": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "1868",
+      "trunk": "A",
+      "note": "train-only logit calibration WIP"
+    },
+    "1885": {
+      "verdict": "tokenizer-disputed",
+      "claimed_bpb": 0.99445,
+      "builds_on": "1850",
+      "trunk": "A",
+      "legitimacy": "disputed",
+      "note": "OUR submission: PPM byte-mixture + anti-hijack; suspended pending #1872; ALSO has C1 violation per OE-GOD"
+    },
+    "1886": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06957,
+      "builds_on": "1768",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "Fused softcap CE + WD=2.0 stability fix"
+    },
+    "1887": {
+      "verdict": "broken",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "credit-exhausted draft"
+    },
+    "1888": {
+      "verdict": "other",
+      "claimed_bpb": 1.1691,
+      "builds_on": "unknown",
+      "trunk": "new",
+      "note": "Tensor-Train attention rank-8 MPS; non-competitive bpb"
+    },
+    "1889": {
+      "verdict": "broken",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "credit-blocked draft"
+    },
+    "1890": {
+      "verdict": "other",
+      "claimed_bpb": 1.1456,
+      "builds_on": "unknown",
+      "trunk": "new",
+      "note": "non-record Mamba-3 hybrid"
+    },
+    "1891": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "BitNet MLP2304"
+    },
+    "1893": {
+      "verdict": "other",
+      "claimed_bpb": 1.0901,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "ParallelResid+UNet, empty body"
+    },
+    "1894": {
+      "verdict": "other",
+      "claimed_bpb": 1.0996,
+      "builds_on": "1493",
+      "trunk": "A",
+      "note": "non-record MuonEq-R+RECUR_AB"
+    },
+    "1895": {
+      "verdict": "clean",
+      "claimed_bpb": 1.07849,
+      "builds_on": "1493",
+      "trunk": "new",
+      "legitimacy": "clean",
+      "note": "3GDN/8FA + Attention Sink; first credibly clean GDN entry"
+    },
+    "1896": {
+      "verdict": "other",
+      "claimed_bpb": 1.1155,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "Flower Brain ternary; unlimited compute"
+    },
+    "1897": {
+      "verdict": "other",
+      "claimed_bpb": 1.1636,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "SP4096 5L"
+    },
+    "1898": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06614,
+      "builds_on": "1851",
+      "trunk": "A",
+      "legitimacy": "clean",
+      "note": "Partial SpinQuant start_layer=5 + #1851 stack"
+    },
+    "1899": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "trunk-update",
+      "note": "cocohearts leaderboard update; superseded by #1902"
+    },
+    "1900": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "trunk-update",
+      "note": "cocohearts leaderboard update; gates #1787/#1797/#1801"
+    },
+    "1901": {
+      "verdict": "byte-bug-suspect",
+      "claimed_bpb": 0.8335,
+      "builds_on": "unknown",
+      "trunk": "byte-bug",
+      "legitimacy": "broken",
+      "note": "DualHash+AdaMuon+MoE; sliding-window scored_tokens/total_bytes accounting bug"
+    },
+    "1902": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "1518,1530,1610,1626,1667,1784,1851",
+      "trunk": "trunk-update",
+      "note": "cocohearts leaderboard update with BOS fix; EXPLICITLY EXCLUDES PPM-D pending #1872"
+    },
+    "1903": {
+      "verdict": "byte-bug-suspect",
+      "claimed_bpb": 0.9418,
+      "builds_on": "unknown",
+      "trunk": "byte-bug",
+      "legitimacy": "broken",
+      "note": "BigramHash+MuonEqR+3L recur+SDClip; same sliding-window byte-bug as #1901"
+    },
+    "1904": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "unknown",
+      "trunk": "new",
+      "note": "non-record Activation-Space CSA on SP1024"
+    },
+    "1905": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "builds_on": "1850",
+      "trunk": "meta",
+      "note": "OUR informational report on PPM-D not a valid distribution; not a submission"
+    },
+    "1793": {
+      "verdict": "other",
+      "claimed_bpb": 1.5782,
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "note": "non-record RMLA"
+    },
+    "1857-CLOSED": {
+      "verdict": "other",
+      "claimed_bpb": 1.0322,
+      "note": "self-closed by dexhunter citing #1850 priority"
+    },
+    "1911": {
+      "verdict": "prequant-ttt-disputed",
+      "claimed_bpb": 1.0354,
+      "sha": null,
+      "builds_on": "1735, 1738, 1729",
+      "trunk": "C",
+      "legitimacy": "likely-illegal",
+      "author": "dttdrv",
+      "note": "CaseOps V15 + PR #1735 pre-quant AdamW TTT (21 epochs on val chunks) + #1729 byte sidecars; 3-seed mean 1.0354 (std 0.00057); explicitly val-chunk pre-quant TTT - same disputed class as #1735/#1738; author transparent about legality concern"
+    },
+    "1906": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06136,
+      "sha": "dba870a",
+      "builds_on": "1797",
+      "trunk": "B",
+      "legitimacy": "disputed",
+      "note": "3-seed repro of #1797 \u2014 inherits validity-pending status"
+    },
+    "1907": {
+      "verdict": "broken",
+      "claimed_bpb": 1.10705,
+      "sha": "121e88f",
+      "builds_on": "1874",
+      "trunk": "D",
+      "legitimacy": "broken",
+      "note": "Newton-Muon negative result via forward-hook recompile saturation"
+    },
+    "1908": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06081,
+      "sha": "291d3ab",
+      "builds_on": "1855",
+      "trunk": "B",
+      "legitimacy": "likely-legal",
+      "note": "AWQ-style activation-aware mixed-bit GPTQ \u2014 already specced as ideas/1908-awq-lite-mixed-bit-gptq.md"
+    },
+    "1909": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06996,
+      "sha": "105e000",
+      "builds_on": "1874",
+      "trunk": "D",
+      "legitimacy": "likely-legal",
+      "note": "LoRA TTT rank 128\u2192192, within noise; above baseline"
+    },
+    "1910": {
+      "verdict": "broken",
+      "claimed_bpb": 2.0237,
+      "sha": "c71cbb3",
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "broken",
+      "note": "ternary blowup, far above baseline"
+    },
+    "1912": {
+      "verdict": "other",
+      "claimed_bpb": 1.3163,
+      "sha": "b1fb9b6",
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "unknown",
+      "note": "export plumbing draft"
+    },
+    "1913": {
+      "verdict": "clean",
+      "claimed_bpb": 1.0847,
+      "sha": "708b00c",
+      "builds_on": "unknown",
+      "trunk": "A",
+      "legitimacy": "likely-legal",
+      "note": "multi-temperature AR GPTQ calibration; novel quant-calib variant of ar-selfgen-gptq-calib idea"
+    },
+    "1915": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06504,
+      "sha": "f4c8b4f",
+      "builds_on": "unknown",
+      "trunk": "A",
+      "legitimacy": "likely-legal",
+      "note": "per-doc LoRA TTT no-global-SGD discipline \u2014 idea file 1915-per-doc-lora-ttt.md (parked as fallback)"
+    },
+    "1916": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "sha": "ed9ce53",
+      "builds_on": "1851/1868/1873/1876",
+      "trunk": "new",
+      "legitimacy": "legal",
+      "note": "non-record PPM-D legality framework responding to Issue #1872"
+    },
+    "1917": {
+      "verdict": "other",
+      "claimed_bpb": 1.1636,
+      "sha": "cad7738",
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "unknown",
+      "note": "weak BigramHash submission"
+    },
+    "1918": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06086,
+      "sha": "d5328fe",
+      "builds_on": "1855/1908",
+      "trunk": "B",
+      "legitimacy": "likely-legal",
+      "note": "AWQ-lite (same lever as #1908) \u2014 confirmation, no separate spec"
+    },
+    "1919": {
+      "verdict": "other",
+      "claimed_bpb": 1.0587,
+      "sha": "811d863",
+      "builds_on": "1855/1797/1767",
+      "trunk": "B",
+      "legitimacy": "unknown",
+      "note": "UNVERIFIED claim; author admits no H100 run; watch"
+    },
+    "1921": {
+      "verdict": "other",
+      "claimed_bpb": 4.916,
+      "sha": "feed1c7",
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "legal",
+      "note": "RTX2070 non-record smoke"
+    },
+    "1922": {
+      "verdict": "other",
+      "claimed_bpb": 1.18746,
+      "sha": "cf87509",
+      "builds_on": "unknown",
+      "trunk": "new",
+      "legitimacy": "legal",
+      "note": "JEPA non-record signs-of-life"
+    },
+    "1923": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06577,
+      "sha": "fc67377",
+      "builds_on": "1855",
+      "trunk": "B",
+      "legitimacy": "likely-legal",
+      "note": "Asymmetric Logit Rescale \u2014 empirical NEGATIVE result, regresses ~0.005 vs #1855"
+    },
+    "1925": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06109,
+      "sha": "b30691f",
+      "builds_on": "1855",
+      "trunk": "A",
+      "legitimacy": "likely-legal",
+      "note": "MATRIX_LR=0.028 + PHASED_TTT_PREFIX_DOCS=3500 \u2014 hyperparam-only; idea 1925-matrix-lr-ttt-prefix-tune.md"
+    },
+    "1926": {
+      "verdict": "clean",
+      "claimed_bpb": 1.06844,
+      "sha": "efd6cae",
+      "builds_on": "1874",
+      "trunk": "B",
+      "legitimacy": "likely-legal",
+      "note": "env-var unlock of #1874; above baseline"
+    },
+    "1927": {
+      "verdict": "other",
+      "claimed_bpb": null,
+      "sha": "f144aaf",
+      "builds_on": "1901/1797/1855",
+      "trunk": "new",
+      "legitimacy": "unknown",
+      "note": "non-record Brotli-11 + stride-2 byte-shuffle compression"
+    },
+    "1929": {
+      "verdict": "prequant-ttt-disputed",
+      "claimed_bpb": 0.94569,
+      "sha": "abb4050",
+      "builds_on": "1738/1229",
+      "trunk": "C",
+      "legitimacy": "likely-illegal",
+      "note": "banned SLOT-4 + pre-quant TTT; double-illegal"
+    },
+    "1930": {
+      "verdict": "other",
+      "claimed_bpb": 1.26,
+      "sha": "6f83148",
+      "builds_on": "unknown",
+      "trunk": "unknown",
+      "legitimacy": "legal",
+      "note": "non-record QAT int8 RTX 4090"
+    },
+    "1931": {
+      "verdict": "clean",
+      "claimed_bpb": 1.07586,
+      "sha": "716807f",
+      "builds_on": "1812",
+      "trunk": "C",
+      "legitimacy": "likely-legal",
+      "note": "size-clearing fallback (KV int5 + Brotli lgwin=24); not SOTA"
     }
   }
 }
