@@ -1,12 +1,11 @@
 # Spec 110 — Multi-stream loop body (345 + 543 dual paths, MLP merge)
 
-**Status:** DRAFT — text frozen, code implementation pending. Will become
-FROZEN once `exp/110-multi-stream-345-543` branch is created, train_gpt.py
-edits committed, syntax-checked, and pushed to fork.
+**Status:** FROZEN — code committed at `a0c1ba9` on `exp/110-multi-stream-345-543`,
+pushed to fork. Ready to run.
 
 **Date:** 2026-04-30 (architectural research thread, post-overnight wakes)
-**Branch:** `exp/110-multi-stream-345-543` (not yet created)
-**Pinned commit:** **TBD**
+**Branch:** `exp/110-multi-stream-345-543`
+**Pinned commit:** `a0c1ba94a1e29a8a8fb20fe0a7f56ae2c0745174`
 **Parent:** 060A (#1855 port; forks from `exp/060-resume-ckpt @ a0a48b7`).
 
 ## Hypothesis

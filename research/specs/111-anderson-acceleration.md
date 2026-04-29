@@ -1,12 +1,11 @@
 # Spec 111 — Anderson acceleration on the recurrence loop
 
-**Status:** DRAFT — text frozen, code implementation pending. Will become
-FROZEN once `exp/111-anderson-recurrence` branch is created, train_gpt.py
-edits committed, syntax-checked, and pushed to fork.
+**Status:** FROZEN — code committed at `e9da01a` on `exp/111-anderson-recurrence`,
+pushed to fork. Ready to run.
 
 **Date:** 2026-04-30 (architectural research thread)
-**Branch:** `exp/111-anderson-recurrence` (not yet created)
-**Pinned commit:** **TBD**
+**Branch:** `exp/111-anderson-recurrence`
+**Pinned commit:** `e9da01aa3dd64919ac07eb67ffee94ebabb394b9`
 **Parent:** 060A (#1855 port; forks from `exp/060-resume-ckpt @ a0a48b7`).
 
 ## Hypothesis
