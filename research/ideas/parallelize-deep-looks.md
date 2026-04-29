@@ -65,6 +65,7 @@ extract extra recurrence value**.
 - **W2 (2026-04-29 +20min):** clusters L/M/N/O + opposite-direction tests; spec 081 frozen
 - **W3 (2026-04-29 +30min):** clusters P/Q/R/S/T (TTT×recurrence, position-dependent depth, cross-rank pattern divergence, fixed-point cache); spec 082 frozen
 - **W4 (2026-04-29 +40min):** TTT compositional risks; clusters U/V/W (eval-time logit blends, encoder-only/decoder-only NL skew, post-quant deeper recurrence); spec 083 frozen (TTT-on × NL=3 eq)
+- **W5 (2026-04-29 +50min):** R1 framing correction; clusters X/Y/Z (warmup-skip eval, prefix-only deeper recurrence, mixed-precision recurrence); spec 084 frozen (TTT-on × NL=4 eq)
 - (next wake will append below)
 
 ---
@@ -723,4 +724,124 @@ script does exactly this.
 - **U1 (logit-blend ensemble)** needs careful eval-time wallclock
   accounting — defer until we know if there's headroom for 2× eval
   cost.
+
+---
+
+## W5 — correction to R1 framing + new clusters X/Y/Z
+
+### Correction: R1 (per-rank pattern divergence) is NOT a free ensemble
+
+W3 proposed R1 as "free implicit ensemble at zero extra wallclock" via
+per-rank LOOP_PATTERN. **Re-examined this wake — the framing was wrong.**
+
+In our DDP setup, each rank processes a *different subset* of validation
+sequences. So per-rank pattern means rank 0 scores subset A under
+pattern P_A, rank 1 scores subset B under pattern P_B, etc. Aggregating
+their bpb gives **mixture-of-patterns aggregate bpb across the dataset**,
+not a per-token ensemble of patterns on the same sequences.
+
+That's a different (and less useful) measurement. The aggregate is
+unbiased only if all patterns produce identical per-sequence bpb
+expectations — exactly what we're trying to test.
+
+For a *real* per-token ensemble we'd need each sequence scored under
+multiple patterns and logits averaged — that's U1, which costs ~2× eval
+wallclock. There's no zero-cost free-lunch on this axis.
+
+R1 demoted: drop from "novel zero-cost test" to "interesting comparison
+data point at no extra cost, but not an ensemble."
+
+### Cluster X — Warmup-skip eval (a one-line win possibility)
+
+**X1. Skip the loop-warmup at eval-only runs.** During training, the
+`loop_warmup` phase runs ~20 forward+backward passes through the looped
+graph to populate the inductor cache before training begins. For
+**eval-only** runs (RESUME_FROM_CKPT), the looping is set to active
+immediately on first forward — but the loop_warmup may still run if not
+explicitly skipped. That's wasted compute (~20 × loop forward pass times).
+- **Verify:** check 080's `train.log` to see if loop_warmup_step runs
+  appear during the eval-only path.
+- **Fix:** if yes, add a `SKIP_LOOP_WARMUP_FOR_EVAL=1` env var that
+  short-circuits the warmup when there's no training. ~5 min savings on
+  every eval-only spec (082-085 all benefit).
+- **Compile audit:** the warmup itself is what creates the compiled
+  graph cache. Skipping warmup means first eval batch triggers the
+  compile burst. Same total work, just shifted from warmup phase to
+  first batch. No mid-run recompile.
+- **Savings real?** Probably not net — warmup compile is the same
+  compile that would happen on first eval batch anyway. False savings.
+  **Drop this idea.**
+
+**X2. Pre-cache the inductor cache on the pod.** Memory has
+`feedback_prewarm_before_new_commit` — for new code commits, do a full
+autotune prewarm. For eval-only runs on a *different* SHA than 060A's
+trained run (we're on `e7ccda2` vs 060A's `a0a48b7`), the cached graphs
+may not match. Stash + restore the inductor cache from the original 060A
+training run before launching the eval. Memory has utilities for this.
+- **Concrete:** `tmp_exec/cache_restore.sh a0a48b7` would restore the
+  cache from the training run. The launch script already does this for
+  matching SHA; need to verify behavior for different SHA.
+- **If it works:** saves ~5 min on every eval spec (no first-batch
+  compile burst). Real savings.
+- **Implementation:** verify cache_restore behavior, possibly modify
+  launch_060_eval.sh to use the training SHA's cache.
+- **Tractable for an execution-time tweak, not a research-spec.**
+
+### Cluster Y — Prefix-only deeper recurrence
+
+**Y1. Run NL=3 only on the *prefix* tokens of each eval sequence.**
+Autoregressive bpb is computed by predicting each token from its
+preceding context. For long contexts, the prefix length grows. Apply
+extra loop passes ONLY to prefix processing (longer chain of context
+integration), then revert to NL=2 for the prediction-tail.
+- **Catch:** in our forward, the model processes the *whole* sequence
+  in one shot, then computes per-token loss via shifted logits. There
+  is no separate "prefix-encoding" phase. The model is parallel over
+  position. So this idea doesn't directly apply.
+- **Variant Y1':** in the TTT pipeline, the prefix docs ARE processed
+  separately (used to update LoRA). If TTT prefix processing uses
+  NL=3 but scoring uses NL=2, that's a clean test of "TTT learns
+  better with deeper recurrence even if scoring is shallow."
+- **Compile audit:** TTT and scoring already use separate compiled
+  functions. Different NL for each = two distinct graph variants,
+  both compile once, no recompile. Implementable as two LOOP_PATTERN
+  env vars: `TTT_LOOP_PATTERN` for `forward_ttt` and `LOOP_PATTERN`
+  for `forward_logits`. Requires small code change to read both.
+
+### Cluster Z — Mixed-precision recurrence (compile-safe)
+
+**Z1. fp32 residual stream during loop band only.** Currently the
+residual stream is bf16 throughout. The recurrent passes accumulate
+small per-pass updates; bf16's ~7-bit mantissa may quantize away
+useful signal across many passes.
+- **Hypothesis:** fp32 residual during the loop band, cast back to
+  bf16 after. Tests whether mantissa precision limits recurrence
+  refinement.
+- **VRAM cost:** doubles activation memory for loop-band layers.
+  We have headroom (50% spare).
+- **Compile audit:** dtype change at the loop entry/exit is two
+  static cast ops baked into the compile graph. One graph variant
+  (with-fp32-loop), no mid-run recompile.
+- **Code change:** small, targeted. ~30 LOC in train_gpt.py to wrap
+  the loop band in `with torch.autocast(dtype=torch.float32)`.
+- **Spec candidate for W6+ if a code-change spec is desired.**
+
+**Z2. Per-pass dtype hierarchy.** First pass in fp32 (precise
+integration), later passes in bf16 (cheaper refinement). Asymmetric
+precision per pass.
+- **Compile audit:** would need per-pass dtype routing inside compile.
+  Risky — likely produces multiple graph variants. Skip unless we
+  carefully always-tensor the dtype selection.
+
+### Decisions for W5
+
+- **Spec 084 = TTT-on × NL=4 eq.** Direct extension of 083. Composes
+  081 with TTT. Tests whether the deeper-recurrence gain (if any)
+  scales with depth under TTT. Config-only on `e7ccda2`. **FREEZE
+  THIS WAKE.**
+- **Y1' (separate TTT vs scoring LOOP_PATTERN)** is novel and worth
+  doing if 083 shows ambiguous TTT-NL coupling. Defer for code-change.
+- **Z1 (fp32 loop residual)** is a code-change candidate for W6+.
+  Higher engineering cost than the eval-only specs we've been freezing.
+- **R1 demotion finalized** — not a free ensemble; lower priority.
 
