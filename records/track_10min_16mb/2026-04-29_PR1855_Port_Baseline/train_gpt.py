@@ -1796,7 +1796,15 @@ class BatchedTTTLoRA(nn.Module):
         dim = model.qo_bank.shape[-1]
         vocab = model.tok_emb.num_embeddings
         if getattr(model, "looping_active", False):
-            num_slots = len(model.encoder_indices) + len(model.decoder_indices)
+            if getattr(model, "anderson_enabled", False):
+                # Encoder slots + Anderson loop slots (passes × band depth) + decoder slots
+                num_slots = (
+                    len(model.encoder_indices)
+                    + model.anderson_num_passes * len(model.loop_band_layer_indices)
+                    + len(model.decoder_indices)
+                )
+            else:
+                num_slots = len(model.encoder_indices) + len(model.decoder_indices)
         else:
             num_slots = len(model.blocks)
         kv_dim = model.blocks[0].attn.num_kv_heads * (
