@@ -63,6 +63,7 @@ extract extra recurrence value**.
 - **W0 (2026-04-29 initial):** seed file, broad brainstorm
 - **W1 (2026-04-29 +10min):** fresh ideas in clusters H/I/J/K; spec 080 frozen
 - **W2 (2026-04-29 +20min):** clusters L/M/N/O + opposite-direction tests; spec 081 frozen
+- **W3 (2026-04-29 +30min):** clusters P/Q/R/S/T (TTT×recurrence, position-dependent depth, cross-rank pattern divergence, fixed-point cache); spec 082 frozen
 - (next wake will append below)
 
 ---
@@ -474,4 +475,135 @@ compile-audit complexity.
   Lower priority for homestretch.
 - **O1/O2** require code changes for the MLP-only / attn-only
   refinement modes. Defer to W3 or W4.
+
+---
+
+## W3 — TTT × recurrence interactions, position-dependent depth, cross-rank divergence
+
+### Cluster P — TTT × deeper-recurrence composition
+
+The model has Phased TTT enabled (`PHASED_TTT_ENABLED=3`,
+`PHASED_TTT_NUM_PHASES=3`, `PHASED_TTT_PREFIX_DOCS=2500`). TTT adapts
+LoRA weights to the eval distribution at inference time. The 060A
+checkpoint already pays ~423-495s of the 600s eval budget on TTT +
+quant + scoring.
+
+**P1. TTT-on with NL=3 equivalent (compose 080 with TTT).** Spec 080
+disabled TTT to isolate the deeper-recurrence effect on pre-quant bpb.
+But the *real* leaderboard number includes TTT. So we need to know
+whether the deeper-recurrence gain (if any) survives TTT. Implement-
+ation: same as 080 but `TTT_ENABLED=1 PHASED_TTT_ENABLED=3`. Tests
+whether the two eval-time-compute levers compose.
+- **Compile-graph audit:** TTT path (`forward_ttt`) is a separate
+  compiled function from `forward_logits`. Both share the same
+  encoder/decoder index lists at module level. Setting LOOP_PATTERN
+  means both compile once for the longer iteration count, on first
+  call each. No mid-run recompile.
+- **Risk:** TTT was tuned for NL=2 trained model. Deeper recurrence
+  may distort what TTT sees — could compose well, could destructively
+  interfere.
+
+**P2. TTT phases at different recurrence depths.** Run phase 1 of TTT
+at NL=2 (matches training distribution; warms LoRA on the canonical
+model), then phases 2-3 at NL=3 (uses the LoRA-adapted weights with
+deeper recurrence to refine final logits). Stages compute across
+phases like a curriculum.
+- **Code change:** requires per-phase LOOP_PATTERN switching inside
+  the TTT phase loop. Modest but real engineering. Defer.
+
+### Cluster Q — Position-dependent recurrence depth
+
+**Q1. Depth-tail-only.** For autoregressive bpb, the loss-dominant
+positions are typically the last k tokens of each window (or the
+"hard" positions per-document). If we only apply NL=3 to the LAST 25%
+of the sequence and NL=2 to the rest, we recover roughly 75% of the
+extra cost while still helping where it matters most.
+- **Implementation:** requires a position-mask in the forward; not a
+  pure config change. Compile-graph hazard: position-conditional
+  iteration depth = data-dependent control flow inside compile = graph
+  break or recompile.
+- **Defer until we have a clean always-tensor design.**
+
+**Q2. Depth-by-doc-length at eval.** Choose NL based on document length
+once at the start of each eval window (deterministic, not data-
+dependent). Short docs use NL=2; long docs use NL=3. This is per-doc,
+not per-token, so the iteration count is fixed within a window.
+- **Compile audit:** still involves variable-iteration-count, would
+  produce two distinct graph variants (one per NL). Both compile once,
+  cache, no mid-run recompile if the *number* of distinct variants is
+  bounded.
+- **Marginally implementable** but engineering-heavy. Defer.
+
+### Cluster R — Cross-rank pattern divergence (multi-pattern ensemble for free)
+
+**R1. Per-rank LOOP_PATTERN at eval.** The 4-GPU eval setup distributes
+sequences across ranks via DDP. Each rank processes its own subset of
+the val set. If we set a *different* LOOP_PATTERN on each rank
+(rank-conditional via LOCAL_RANK env var), each subset of sequences
+is evaluated under a different recurrence pattern. The aggregate
+val_bpb averages across patterns naturally — implicit ensemble at
+zero extra wallclock.
+- **Cost:** zero — uses existing DDP infrastructure.
+- **Implementation:** read LOCAL_RANK in launch script, choose
+  pattern. Or per-rank LOOP_PATTERN env via systemd-style launch.
+- **Catch:** per-rank pattern means per-rank graph variant. With 4
+  ranks running 4 patterns, each rank compiles its own pattern variant
+  once, no recompile after that. **Compile-safe.**
+- **Hypothesis:** if patterns 080/081/canonical/no-loop produce
+  different bpbs that average lower than canonical-everywhere, we get
+  a free ensemble effect. If they degrade, we lose.
+- **Spec candidate:** could freeze as 084 in W4.
+
+**R2. Sequence-level sharding to specific patterns.** Within a single
+rank, group sequences by length and route long-docs to NL=3 LOOP_PATTERN
+batches, short-docs to NL=2 batches. Maintains throughput while
+specializing pattern per-doc.
+- More complex than R1; defer.
+
+### Cluster S — Speculative fixed-point caching (refines D1)
+
+**S1. Cache-and-extend.** Train at NL=2. Eval forward = run NL=2 normally;
+cache the residual-stream output of the loop band; THEN run k more
+passes from the cached state through ONLY the loop block, using the
+cached state as input. Append the k-extended output to the rest of the
+forward (decoder).
+- **VRAM cost:** one residual cache per loop layer, ~3 GiB total. Fits.
+- **Code change:** a single hook that grabs the residual at end of
+  loop band, then re-feeds it through the loop block k times before
+  passing to layers 6+. Modest implementation.
+- **Quality story:** lets us adjust the *number* of additional passes
+  at eval-time without rerunning the whole forward — if we're already
+  computing NL=2, adding 2 more passes through the loop block costs
+  roughly 2 × loop-band-time, not 2 × full-forward-time.
+- **Compile-graph audit:** the extension passes are inside compile
+  region; but iteration count is fixed (k is a constant env var, not
+  data-dependent). One graph variant per (k, base NL) combination,
+  compiles once, cached.
+- **Spec candidate for W4 with code change**
+
+### Cluster T — TTT-aware deeper recurrence
+
+**T1. TTT learns the extended recurrence.** TTT phases adapt LoRA. If we
+*also* extend the recurrence during TTT (not just at scoring), the LoRA
+adapts the model to deeper iteration. In effect, we "fine-tune at
+inference" for NL=3 even though training was NL=2.
+- **Hypothesis:** P1 (deeper recurrence at scoring only, TTT at canonical
+  NL) may show neutral effect because TTT doesn't see the deeper
+  recurrence. T1 has TTT learn the deeper recurrence pattern, possibly
+  unlocking the gain.
+- **Implementation:** identical to P1 (both TTT and scoring use
+  LOOP_PATTERN with extra passes). Same compile-audit story.
+- **Effectively a renaming of P1 — they're the same spec.**
+
+### Decisions for W3
+
+- **Spec 082 = NL=1 equivalent eval (M1).** Bookends the 080/081
+  scaling curve from below. Pattern body = "1,2,3,4,5,6,7" giving
+  layers 3,4,5 each visited ONCE. Equivalent to non-looping forward,
+  but using LOOP_PATTERN explicitly so the comparison is matched
+  via the same code path. Config-only on `e7ccda2`. **FREEZE THIS WAKE.**
+- **P1 / T1 (TTT-on with NL=3 eq)** is the next obvious freeze for W4
+  — composes 080 with TTT, real leaderboard-relevant.
+- **R1 (per-rank pattern divergence)** is the most novel idea this wake
+  — free ensemble effect at no extra cost. Worth specifying for W5.
 
