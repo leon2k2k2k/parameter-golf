@@ -1103,26 +1103,27 @@ def anderson_step(x_history, f_history, beta, reg):
        = G^-1 1 / (1^T G^-1 1)
     """
     M = len(x_history)
-    # All-bf16 path: avoid any fp32 tensors that could leak into Inductor-fused
-    # downstream matmuls. .sum() on bf16 inputs uses fp32 accumulator internally
-    # but returns bf16 — precision sufficient for 2x2/3x3 LS solve with reg.
-    g_flat = [(f - x).reshape(-1) for x, f in zip(x_history, f_history)]
+    # Build Gram matrix via one small bf16 matmul instead of 6 fused reductions
+    # (latter triggered Inductor OOM in shared memory: 458KB > H100's 232KB).
+    # Matmul template handles [M, N] @ [N, M] → [M, M] cleanly.
+    R = torch.stack([(f - x).reshape(-1) for x, f in zip(x_history, f_history)], dim=0)
+    G = R @ R.transpose(0, 1)  # [M, M] bf16
     if M == 2:
-        a = (g_flat[0] * g_flat[0]).sum() + reg
-        b = (g_flat[0] * g_flat[1]).sum()
-        c = (g_flat[1] * g_flat[1]).sum() + reg
+        a = G[0, 0] + reg
+        b = G[0, 1]
+        c = G[1, 1] + reg
         u0 = c - b
         u1 = a - b
         s = u0 + u1
         alpha = torch.stack([u0 / s, u1 / s], dim=0)
     else:
         # M == 3 (history=2 default after pass 2)
-        a = (g_flat[0] * g_flat[0]).sum() + reg
-        b = (g_flat[0] * g_flat[1]).sum()
-        c = (g_flat[0] * g_flat[2]).sum()
-        d = (g_flat[1] * g_flat[1]).sum() + reg
-        e = (g_flat[1] * g_flat[2]).sum()
-        f_ = (g_flat[2] * g_flat[2]).sum() + reg
+        a = G[0, 0] + reg
+        b = G[0, 1]
+        c = G[0, 2]
+        d = G[1, 1] + reg
+        e = G[1, 2]
+        f_ = G[2, 2] + reg
         # Cofactors of symmetric 3x3 (G^-1 @ 1, ignoring det since it cancels)
         u0 = (d * f_ - e * e) + (c * e - b * f_) + (b * e - c * d)
         u1 = (c * e - b * f_) + (a * f_ - c * c) + (b * c - a * e)
