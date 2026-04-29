@@ -72,6 +72,7 @@ extract extra recurrence value**.
 - **W9 (2026-04-29 +90min):** clusters JJ/KK/LL (post-quant only TTT-extension, KV-projection truncation, expanded smear-gate window); spec 088 frozen (TTT-on stepped-pattern, leaderboard cell)
 - **W10 (2026-04-29 +100min):** clusters MM/NN/OO (eval-only embedding-LR rescale, recurrence + sliding window interaction, multiple residual streams during loop band); spec 089 frozen (band-position shift {2,3,4} eval — novel positional axis)
 - **W11 (2026-04-29 +110min):** clusters PP/QQ/RR (band {4,5,6} symmetry test, training-data-free hotstart from canonical, partial-rank weight slicing); spec 090 frozen (band-position shift {4,5,6} — completes position pair with 089)
+- **W12 (2026-04-29 +120min):** clusters SS/TT/UU (TTT-compute axis isolation, eval-time-deterministic seeding, multi-checkpoint averaging); spec 091 frozen (more TTT phases at canonical — TTT compute axis test)
 - (next wake will append below)
 
 ---
@@ -1349,4 +1350,83 @@ and use only the top-k singular components.
   spec — defer to W12 only if no other novel idea matures.
 - **RR1 (startup-SVD-truncated weights)** is the most novel idea
   this wake — code change required, defer.
+
+---
+
+## W12 — TTT compute axis, eval determinism, multi-checkpoint averaging
+
+So far the eval-time specs (080-090) have varied loop pattern (compute,
+shape, position) and TTT on/off. Today's wake explores a different
+eval-time-headroom lever: **the TTT compute axis itself**.
+
+### Cluster SS — TTT compute axis (orthogonal to LOOP_PATTERN)
+
+We have ~100-180s of unused eval wallclock. Most of 080-090 spent
+that on extra layer-passes via LOOP_PATTERN. SS asks: spend it on
+TTT instead.
+
+**SS1. More TTT phases at canonical NL.** PHASED_TTT_NUM_PHASES=3
+default. Each phase: TTT update → score next chunk → repeat. Adding
+phase 4 means ~30-50% more TTT compute, more LoRA adaptation
+opportunities.
+- **Hypothesis:** 4 phases lets the LoRA adapt further to the eval
+  distribution; fits in eval-time headroom.
+- **Compile audit:** number of phases is a Python loop bound. Same
+  compiled `forward_ttt` graph called more times. **No new graph
+  variant. No mid-run recompile.**
+- **Cost:** ~$3-4 (canonical eval pace + 1 extra phase ≈ +1-2 min).
+- **Spec candidate: 091 = SS1.** **FREEZE THIS WAKE.**
+
+**SS2. Larger TTT prefix at canonical NL.** Memory has spec 060L
+(`PHASED_TTT_PREFIX_DOCS` up). May be already specced — check before
+duplicating. The idea: longer prefix per phase = more adaptation
+data per LoRA step.
+
+**SS3. Combined TTT-extension + canonical recurrence.** No deeper
+recurrence; just spend the eval budget on TTT compute. Pure TTT-axis
+test isolates whether the headroom is best spent on TTT or on
+recurrence depth.
+
+### Cluster TT — Eval-time determinism (sanity)
+
+The 080+ specs all use seed=42 to match 060A. But the eval-time path
+may have nondeterministic operators (e.g., flash-attention tile
+order, all_reduce ordering across ranks). Verifying determinism
+helps disambiguate "real signal" from "rng noise."
+
+**TT1. Run 060A canonical at e7ccda2 twice; verify exact match.** If
+identical to 5+ decimal places, eval-time path is deterministic.
+If not, all 080+ "Δ ≤ 0.0005 noise floor" thresholds need revisiting.
+- **Cost:** $2 for two eval runs.
+- **Engineering value: HIGH** but not a science result.
+- Defer to user-discretion spec.
+
+### Cluster UU — Multi-checkpoint averaging
+
+A more speculative lever: load *multiple* trained checkpoints
+(if available — e.g., 060A and 060A-with-different-seed) and
+average their weights before eval.
+
+**UU1. Weight-averaged 060A across seeds.** Memory says baseline
+should be multi-seed. If we have seed-42 + seed-43 + seed-44
+checkpoints, average their weights → run eval. Should produce a
+smoother model. Common technique in DL ensembles.
+- **Catch:** we may not have multiple seeds of 060A. Memory implies
+  only seed-42 is saved. Skipped.
+
+**UU2. Inter-step EMA outside training.** During training, EMA decay
+is 0.9965. After training, we have the EMA-applied weights. Could
+we keep the *non-EMA* weights too and run a different decay at
+eval? Speculative; would need both saved which we likely don't have.
+
+### Decisions for W12
+
+- **Spec 091 = SS1 (more TTT phases at canonical).** Tests the
+  TTT-compute axis directly. Config-only on `e7ccda2`. Real
+  leaderboard relevance (different lever from LOOP_PATTERN).
+  **FREEZE THIS WAKE.**
+- **TT1 (determinism check)** is good engineering hygiene but
+  low-priority for science output. Defer.
+- **UU cluster** depends on having multiple checkpoints we likely
+  don't have. Drop.
 
