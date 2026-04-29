@@ -3,6 +3,48 @@
 **Status:** OPEN, autonomous-loop-driven brainstorm. New ideas appended each
 wake cycle (10 min). Mature ideas promoted to `research/specs/08x-*.md`.
 
+## Hard rules for every spec promoted from this file
+
+**EVERY spec written from this thread must be FROZEN before the wake ends.**
+"Frozen" per `CLAUDE.md` checklist:
+1. Spec file committed.
+2. Code commit pushed (if code change), pinned hash in spec.
+3. Spec change pushed (commit + `git push fork exp/046-quant-repair`).
+4. No silent code changes (no uncommitted edits in worktree).
+5. Verify clean: `git status` clean + `git ls-remote fork <branch>` matches.
+
+**EVERY spec must explicitly verify NO mid-run recompile path.** Per memory
+`feedback_no_mid_run_recompile`: mid-run recompile = run is dead. Per
+memory `feedback_always_tensor_block_kwargs` and `feedback_spec_compile_checklist`:
+
+- ITEM 0: **Always-tensor rule.** No Python `if`/`None` passthroughs of
+  loop-only kwargs in the compile region. Use registered identity buffers
+  (zeros/ones) for inactive steps. Single graph variant.
+- ITEM 1: **No weight slicing in compile.** Column/row slices of an
+  `nn.Parameter` (e.g. `weight[:, :h2]`) produce non-contiguous tensors
+  that hang Triton silently. Fix: separate `nn.Parameter` banks in
+  `__init__`.
+- ITEM 2: **No narrow-K matmul** (K<16) inside compile — pre-fold in eager.
+- ITEM 3: **No new shape dimensions appearing post-loop-activation** that
+  weren't compile-warmed. (Loop-warmup of the looped graph is required if
+  shapes change at activation.)
+- ITEM 4: **`@dynamo.disable` for backward kwargs** that flow into
+  control-flow conditionals.
+
+For each spec, the **Code changes** section must include an explicit line:
+`Compile-graph audit: <one-paragraph verification that no mid-run recompile
+is possible>`. Reject any spec where this audit cannot be written
+honestly.
+
+**Cluster-level audit done at file open (W0):** the LOOP_PATTERN env var
+(used by 071-074) is __init__-time only — it changes the
+`encoder_indices`/`decoder_indices` Python lists once at module
+construction. The compiled forward iterates the list using a Python `for`
+(not a torch op), so each unique pattern produces one graph variant total
+(at first invocation), no mid-run recompile. Verified.
+
+
+
 **Date opened:** 2026-04-29 (overnight session)
 **Goal:** find ways to compute "more recurrent depth" without paying linear
 wallclock. Exploit the unspent compute resources we've identified:
