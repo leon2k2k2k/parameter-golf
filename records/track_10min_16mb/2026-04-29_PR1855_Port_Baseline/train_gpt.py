@@ -1404,24 +1404,41 @@ class GPT(nn.Module):
             x_history = []
             f_history = []
             x_curr = x
+            # Spec 116 — frozen recur-alpha-beta inside Anderson f-application.
+            # Values from spec 035g (terminal 035fA learned coefficients):
+            #   beta:  per-loop-layer scalar amplifier on new block output
+            #   alpha: per (current_layer, source_layer) carry mixing matrix
+            # On extra passes (k>0), apply: f = β[i]*x_new + Σⱼ α[i,j]·carry[j]
+            # On pass 0, vanilla (no formula).
+            R_BETA = (1.6940, 2.0385, 2.2292)
+            R_ALPHA = (
+                (+0.2773, -0.0260, +0.0457),
+                (+0.0679, -0.4219, -0.0033),
+                (+0.1123, +0.2539, -0.0048),
+            )
+            carry = [None, None, None]  # detached x_new from each loop layer
             for k in range(self.anderson_num_passes):
-                # Apply f: one trip through the loop band layers.
                 f_curr = x_curr
-                for i in self.loop_band_layer_indices:
+                for layer_local_idx, i in enumerate(self.loop_band_layer_indices):
                     q_w, k_w_, v_w, out_w, up_w, down_w = self._bank_weights(i)
-                    f_curr = self.blocks[i](
+                    x_new = self.blocks[i](
                         f_curr, x0, q_w, k_w_, v_w, out_w, up_w, down_w,
                         cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
                     )
+                    if k > 0:
+                        beta_l = R_BETA[layer_local_idx]
+                        f_curr = beta_l * x_new
+                        for j in range(3):
+                            f_curr = f_curr + R_ALPHA[layer_local_idx][j] * carry[j]
+                    else:
+                        f_curr = x_new
+                    carry[layer_local_idx] = x_new.detach()
                 x_history.append(x_curr)
                 f_history.append(f_curr)
-                # Truncate history to last (m+1) entries.
                 if len(x_history) > self.anderson_history + 1:
                     x_history = x_history[-(self.anderson_history + 1):]
                     f_history = f_history[-(self.anderson_history + 1):]
-                # Compute next iterate.
                 if k == 0 or len(x_history) < 2:
-                    # First pass: vanilla (no history to mix).
                     x_curr = f_curr
                 else:
                     x_curr = anderson_step(
@@ -1537,14 +1554,30 @@ class GPT(nn.Module):
             x_history = []
             f_history = []
             x_curr = x
+            # Spec 116 — frozen recur-alpha-beta on TTT path (mirror of training path).
+            R_BETA = (1.6940, 2.0385, 2.2292)
+            R_ALPHA = (
+                (+0.2773, -0.0260, +0.0457),
+                (+0.0679, -0.4219, -0.0033),
+                (+0.1123, +0.2539, -0.0048),
+            )
+            carry = [None, None, None]
             for k in range(self.anderson_num_passes):
                 f_curr = x_curr
-                for i in self.loop_band_layer_indices:
+                for layer_local_idx, i in enumerate(self.loop_band_layer_indices):
                     q_w, k_w_, v_w, out_w, up_w, down_w = self._bank_weights(i)
-                    f_curr = self._block_with_lora(
+                    x_new = self._block_with_lora(
                         self.blocks[i], f_curr, x0, lora, slot,
                         q_w, k_w_, v_w, out_w, up_w, down_w,
                     )
+                    if k > 0:
+                        beta_l = R_BETA[layer_local_idx]
+                        f_curr = beta_l * x_new
+                        for j in range(3):
+                            f_curr = f_curr + R_ALPHA[layer_local_idx][j] * carry[j]
+                    else:
+                        f_curr = x_new
+                    carry[layer_local_idx] = x_new.detach()
                     slot += 1
                 x_history.append(x_curr)
                 f_history.append(f_curr)
