@@ -70,6 +70,7 @@ extract extra recurrence value**.
 - **W7 (2026-04-29 +70min):** clusters DD/EE/FF (LR schedule × deeper-NL interactions, rolling-window eval, low-rank residual stream); spec 086 frozen (TTT-on × broad-pattern, leaderboard-relevant)
 - **W8 (2026-04-29 +80min):** clusters GG/HH/II (band-position shifts, TTT batch size sensitivity, gradient-aligned recurrence); spec 087 frozen (matched-compute stepped pattern eval, 073-shape sibling)
 - **W9 (2026-04-29 +90min):** clusters JJ/KK/LL (post-quant only TTT-extension, KV-projection truncation, expanded smear-gate window); spec 088 frozen (TTT-on stepped-pattern, leaderboard cell)
+- **W10 (2026-04-29 +100min):** clusters MM/NN/OO (eval-only embedding-LR rescale, recurrence + sliding window interaction, multiple residual streams during loop band); spec 089 frozen (band-position shift {2,3,4} eval — novel positional axis)
 - (next wake will append below)
 
 ---
@@ -1201,4 +1202,82 @@ narrower gate. Same problem in reverse — trained weights expect 12.
   candidate for W10.
 - **JJ2 (larger LoRA rank at eval)** has uncertain value; defer.
 - **KK / LL clusters demoted** — code-change-required or low-value.
+
+---
+
+## W10 — Band-position shift, eval-only LR-style overrides, lane-split during loop
+
+### Cluster MM — Eval-only LR-style overrides
+
+These overrides apply only at eval time when no training optimizer
+state exists. Mostly null since LR doesn't affect eval forward — but
+some apply to TTT phases:
+
+**MM1. TTT-LR sweep at NL=2 baseline.** `TTT_LORA_LR=0.0001` is the
+default. Try 5e-5 (smaller, more conservative LoRA updates) or 2e-4
+(larger, faster adaptation). Tests whether canonical TTT is at the
+right LR for our checkpoint.
+- **Compile audit:** TTT_LORA_LR is a Python float used by Adam in
+  TTT phases; no graph effect. Safe.
+- **Spec candidate** for W11+ if simpler than other ideas.
+
+**MM2. TTT-LR scaling with NL.** When eval-NL doubles (NL=2→4 = 23 vs
+17 passes), the LoRA gradients flow through more layer-passes per
+chunk. Effective LR per Adam step is amplified by chain-rule depth.
+Could either need smaller LR (to compensate) or larger (to keep up).
+- **Companion to 084 (NL=4 + TTT)** — would clean up that spec's
+  result if 084 lands ambiguous.
+
+### Cluster NN — Recurrence × sliding window attention
+
+The model has `gate_window=12`. Memory and code mention attention is
+basic (no sliding window in 060A). For deeper recurrence at eval, we
+could *introduce* a sliding window only on the loop layers, with
+window size matched to the recurrence depth.
+
+**NN1. Sliding-window attention only on loop layers, eval-only.** Per
+loop pass, the attention attends over a window of N tokens (not full
+context). Smaller window = cheaper attention compute, partially offsets
+the deeper-recurrence cost.
+- **Engineering:** real code change to `CausalSelfAttention.forward`
+  to accept a window-mask argument, gated by env var on loop layers.
+  ~50 LOC. Compile audit: mask is a static tensor, single graph
+  variant.
+- **Defer for code change.**
+
+**NN2. Per-pass increasing window size.** Pass 0 uses window=64,
+pass 1 uses window=256, pass 2 uses window=full. Mimics "iterative
+attention expansion." More speculative.
+
+### Cluster OO — Multiple residual streams during loop band
+
+The architecture already has parallel lanes after `parallel_start_layer=8`
+(decoder side, two lanes merged at end). Idea: extend lane structure
+to the loop band itself.
+
+**OO1. Lane-split inside loop band.** At loop entry, split residual
+into 2 lanes; each lane runs its own NL=2 recurrence; merge at loop
+exit.
+- **Mechanism:** lanes carry different views of the residual (e.g.,
+  one for syntactic features, one for semantic). Independent
+  recurrence per lane.
+- **VRAM cost:** 2× activation memory in the loop band. Have headroom.
+- **Param cost:** adds lane-split / lane-merge weights (~2 × d² for
+  the 2D affine projection). ~500K params. Doesn't fit byte budget.
+- **Reduced version:** lane-split is a fixed orthogonal projection
+  (no learned weights); merge is sum or learned-weighted sum (~d
+  params). Cheaper.
+- **Defer code change.**
+
+### Decisions for W10
+
+- **Spec 089 = GG1 band-position shift to {2,3,4} eval.** Novel
+  positional axis — never tested at NL=2 on canonical band shape.
+  Memory's #1726 only tested wider bands {2..7}, not narrower
+  shifted band {2,3,4}. Config-only on `e7ccda2`. **FREEZE THIS WAKE.**
+- **MM1 (TTT-LR sweep)** is config-only; possible W11 spec.
+- **NN1 (sliding-window on loop layers)** is the most novel idea
+  this wake — code-change required, defer.
+- **OO1 (lane-split in loop band)** has param-budget issues at full
+  rank; reduced version is interesting future work.
 
