@@ -1130,12 +1130,15 @@ def anderson_step(x_history, f_history, beta, reg):
         u2 = (b * e - c * d) + (b * c - a * e) + (a * d - b * b)
         s = u0 + u1 + u2
         alpha = torch.stack([u0 / s, u1 / s, u2 / s], dim=0)
-    # Apply weights to history tensors
-    F_stack = torch.stack(f_history, dim=0)
-    X_stack = torch.stack(x_history, dim=0)
-    alpha_view = alpha.view(M, 1, 1, 1)
-    f_blend = (alpha_view * F_stack).sum(dim=0)
-    x_blend = (alpha_view * X_stack).sum(dim=0)
+    # Explicit sum over M instead of stack-then-reduce. Stacking [M,B,T,d] and
+    # broadcast-mul created a fused Triton kernel needing >232KB shared memory.
+    # Pairwise additions tile cleanly.
+    if M == 2:
+        f_blend = alpha[0] * f_history[0] + alpha[1] * f_history[1]
+        x_blend = alpha[0] * x_history[0] + alpha[1] * x_history[1]
+    else:
+        f_blend = alpha[0] * f_history[0] + alpha[1] * f_history[1] + alpha[2] * f_history[2]
+        x_blend = alpha[0] * x_history[0] + alpha[1] * x_history[1] + alpha[2] * x_history[2]
     return beta * f_blend + (1.0 - beta) * x_blend
 
 
