@@ -61,6 +61,7 @@ extract extra recurrence value**.
 ## Wake log
 
 - **W0 (2026-04-29 initial):** seed file, broad brainstorm
+- **W1 (2026-04-29 +10min):** fresh ideas in clusters H/I/J/K; spec 080 frozen
 - (next wake will append below)
 
 ---
@@ -265,3 +266,107 @@ Cuts memory bandwidth by avoiding HBM round-trips between sub-ops.
 
 Spec drafts will land at `research/specs/080-*.md` and onward when any of
 these matures past the brainstorm threshold.
+
+---
+
+## W1 — fresh angles + spec 080 frozen
+
+### Cluster H — Eval-time-only "more passes" leveraging trained checkpoint
+
+**H1. Eval at NL=3 on a model trained at NL=2.** Extends C1. Implementation
+is *config-only* on top of `exp/071-loop-pattern @ e7ccda2` (no new code):
+set `LOOP_PATTERN` to encode 4 passes through {3,4,5} when resuming the
+060A checkpoint via `launch_060_eval.sh`. The trained model has bank-
+indexed weights — extra visits to layer 3,4,5 just reuse those banks.
+- **Why "parallelism":** no actual parallelism in the wallclock sense, but
+  conceptually parallel to the C1 idea: it tests whether the trained
+  iterative-refinement function generalizes to deeper iteration.
+- **Compile audit:** eval-only run. Model construction reads LOOP_PATTERN
+  at __init__, builds longer encoder/decoder index lists once. Compiled
+  forward sees one new graph variant on first eval call (different
+  iteration count from training-time graph), no mid-run recompile.
+- **Frozen as spec 080.**
+
+**H2. Eval at NL=3 with progressive "warmup."** Variant of H1: at eval,
+run forward with NL=2 first (matches training), then run a *second* forward
+with NL=3, blend logits (0.7 × NL=2 logits + 0.3 × NL=3 logits). Tests
+whether trained-distribution and OOD-deeper-distribution outputs combine
+better than either alone. ~2× eval compute — only viable if eval headroom
+allows.
+
+**H3. Per-document NL adaptation.** Long documents may benefit from extra
+passes more than short ones (more context to iterate over). At eval, set
+NL=2 for short docs, NL=3 for long docs (length threshold). Free at eval.
+Risk: doc-length distribution may make the gain negligible if eval is
+mostly short docs.
+
+### Cluster I — Pass-axis weight-sharing variants
+
+**I1. Pass-shared LoRA injection.** Instead of per-pass LoRA (047C, 050B,
+050D — all null), share a single LoRA across all passes but apply it
+*only on the recurrent passes* (not pass 0). Tests whether it's the
+"per-pass differentiation" that fails or the "LoRA-on-loop" that fails.
+Single LoRA, low param cost.
+
+**I2. Asymmetric pass-1 vs pass-N+ weights.** Add a single learnable
+ΔW on the loop layers that's applied ONLY for the *first* pass (pass 0)
+and ZEROED for later passes. Tests whether "the first pass is doing
+encoding, later passes are doing refinement" hypothesis. If yes, giving
+pass 0 dedicated capacity helps; if no, this is null. Costs the same as
+047C but inverts the asymmetry.
+
+### Cluster J — Speculative-input parallelism (cheap, no quality risk)
+
+**J1. Bigram-prefix speculative parallel pass.** Compute pass k+1 *in
+parallel* with pass k by feeding pass k+1 a *bigram-predicted* input
+(estimated from the prior token's hidden state). When pass k completes,
+rectify pass k+1's output with a delta correction. Speculatively-
+parallel; cost is one extra pass per step but it runs concurrent
+with pass k.
+- VRAM headroom can absorb the extra activations.
+- The bigram prediction is cheap: a 2-gram table lookup (or fast linear
+  layer) gives a near-deterministic next-residual prediction for common
+  bigrams.
+- Implementation is real engineering work — not for tonight.
+
+**J2. Pass-k-output reuse from prior step.** At training time, the same
+input batch goes through the model. The *same residual at layer 3* on
+*sequential training steps* should be similar (slowly-changing weights,
+similar inputs). At step t, predict pass-3-of-layer-5 using pass-3-of-
+layer-5 from step t-1 (cached). Use cached value as a *speculative input*
+to pass-4-of-layer-5 in parallel with computing pass-3 freshly. Merge.
+- Speculative; if the prediction is close, we save one sequential pass.
+- Hard to verify without testing — but cheap to add as a flag if we
+  build the infrastructure.
+
+### Cluster K — Mathematical reformulations of the recurrence
+
+**K1. Anderson acceleration on the loop.** Anderson mixing accelerates
+fixed-point iteration: instead of x_{k+1} = f(x_k), use
+x_{k+1} = β·f(x_k) + (1-β)·linear-combination-of-prior-iterates.
+Converges 2-5× faster on smooth fixed points. Tested for years on
+DeepEqQ/DEQs (Bai et al. 2019) — known to work.
+- Implementation: store m=2-3 prior pass outputs, compute coefficients
+  via least-squares, mix. Adds ~3 small matmuls per pass.
+- Compile audit: stateful cache across passes inside compile region —
+  compiles to one graph variant if cache size is fixed and tensors are
+  always-tensor. Need careful design.
+
+**K2. Implicit fixed-point via Newton iteration.** As K1 but with
+explicit Jacobian-vector product. Converges quadratically. ~2× compute
+per pass. Theoretical home run if it works (3 passes ≈ NL=8).
+- Implementation: requires backward pass during forward (`torch.autograd.grad`
+  inside compile) — almost certainly forces graph break. Skip for the
+  homestretch.
+
+### Decisions for tonight
+
+- **H1 → frozen as spec 080.** Cheapest, safest, eval-only, config-only,
+  uses LOOP_PATTERN already implemented at e7ccda2. Tests "deeper is free"
+  hypothesis directly.
+- **K1 (Anderson)** is the most exciting algorithmic angle but needs
+  careful engineering. Defer to W2 or W3 wakes if time permits.
+- **I2 (asymmetric pass-0 weights)** is interesting but contradicts
+  prior 047 nulls. Lower priority for the homestretch.
+- **J1/J2** require infrastructure that doesn't exist yet. W3+.
+
