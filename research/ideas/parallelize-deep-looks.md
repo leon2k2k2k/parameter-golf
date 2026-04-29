@@ -71,6 +71,7 @@ extract extra recurrence value**.
 - **W8 (2026-04-29 +80min):** clusters GG/HH/II (band-position shifts, TTT batch size sensitivity, gradient-aligned recurrence); spec 087 frozen (matched-compute stepped pattern eval, 073-shape sibling)
 - **W9 (2026-04-29 +90min):** clusters JJ/KK/LL (post-quant only TTT-extension, KV-projection truncation, expanded smear-gate window); spec 088 frozen (TTT-on stepped-pattern, leaderboard cell)
 - **W10 (2026-04-29 +100min):** clusters MM/NN/OO (eval-only embedding-LR rescale, recurrence + sliding window interaction, multiple residual streams during loop band); spec 089 frozen (band-position shift {2,3,4} eval — novel positional axis)
+- **W11 (2026-04-29 +110min):** clusters PP/QQ/RR (band {4,5,6} symmetry test, training-data-free hotstart from canonical, partial-rank weight slicing); spec 090 frozen (band-position shift {4,5,6} — completes position pair with 089)
 - (next wake will append below)
 
 ---
@@ -1280,4 +1281,72 @@ exit.
   this wake — code-change required, defer.
 - **OO1 (lane-split in loop band)** has param-budget issues at full
   rank; reduced version is interesting future work.
+
+---
+
+## W11 — Position symmetry, hotstart-free verification, partial-rank weight reads
+
+### Cluster PP — Position-axis symmetry (companion to 089)
+
+**PP1. Band shift {4,5,6} (one layer later, GG2 from W8).** Sibling
+to 089. Together with 089 brackets the canonical {3,4,5} band on
+both sides. Reads as a 3-point position curve: {2,3,4} → {3,4,5} →
+{4,5,6}.
+- Pattern body: `4,5,6,4,5,6,4,5,6` (9 visits). pre [0,1,2,3] +
+  post [7,8,9,10] = 17 total.
+- **Spec candidate: 090 = PP1.** **FREEZE THIS WAKE.**
+
+**PP2. Position symmetry hypothesis test.** If 089 ({2,3,4}) and 090
+({4,5,6}) lose by similar magnitudes, the canonical band is
+positionally optimal. If they lose asymmetrically, there's a "right
+direction" to shift — informs future band-design specs.
+
+### Cluster QQ — Hotstart-free verification
+
+A concern with all the eval-only 080+ specs: they all depend on
+060A's saved checkpoint. If that checkpoint differs subtly from what
+080+ specs assume (e.g., parameter shapes, version of LOOP_PATTERN
+in __init__), bad results would be from the dependency, not the
+hypothesis.
+
+**QQ1. Sanity-check spec for 060A canonical at e7ccda2.** Run 060A's
+canonical config (LOOP_PATTERN unset, NUM_LOOPS=2, LOOP_START=3,
+LOOP_END=5) at the e7ccda2 commit (which adds LOOP_PATTERN env var
+but doesn't otherwise change the path). Should produce identical
+val_bpb to 060A's reported number.
+- Tests: does the LOOP_PATTERN code change introduce any unintended
+  side effects when LOOP_PATTERN is empty?
+- Cost: ~$1, ~10 min eval-only.
+- **Sanity check, not headline science.** Worth doing before
+  promoting any 080+ spec. Spec candidate for W12.
+
+### Cluster RR — Partial-rank weight reads at eval (training-time orthogonal)
+
+**RR1. SVD-truncated weight reads on loop layers.** At eval, before
+each Block.forward call on a loop layer, SVD-decompose the weight
+banks (qo_bank, kv_bank, mlp_up_bank, mlp_down_bank for that layer)
+and use only the top-k singular components.
+- **Mechanism:** removes "noise rank" from weights — top-k components
+  carry signal; tail-rank may add quantization noise especially in
+  bf16.
+- **Engineering:** SVD per Block call inside compile region — risky
+  graph break. Alternative: do SVD ONCE at startup (after checkpoint
+  load), replace weights with truncated reconstructions. Then forward
+  uses standard weights. **Static** transformation, compile-safe.
+- **Code change:** ~30 LOC for the startup SVD truncation, gated by
+  env var (e.g., `EVAL_WEIGHT_RANK=64`). One-time SVD per loop
+  layer's banks; runtime forward unchanged.
+- **Compile audit:** completely safe — weights replaced before first
+  forward call.
+- **Spec candidate for W12+ if a code-change spec is wanted.**
+
+### Decisions for W11
+
+- **Spec 090 = PP1 = band shift {4,5,6} eval.** Completes the
+  positional axis pair with 089. Config-only on `e7ccda2`. **FREEZE
+  THIS WAKE.**
+- **QQ1 (sanity-check 060A at e7ccda2)** is a good "due diligence"
+  spec — defer to W12 only if no other novel idea matures.
+- **RR1 (startup-SVD-truncated weights)** is the most novel idea
+  this wake — code change required, defer.
 
