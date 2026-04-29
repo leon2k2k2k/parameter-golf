@@ -75,6 +75,7 @@ extract extra recurrence value**.
 - **W12 (2026-04-29 +120min):** clusters SS/TT/UU (TTT-compute axis isolation, eval-time-deterministic seeding, multi-checkpoint averaging); spec 091 frozen (more TTT phases at canonical — TTT compute axis test)
 - **W13 (2026-04-29 +130min):** clusters VV/WW/XX (position × TTT cell completion, GPTQ calibration sweep, dropout-style residual perturbation); spec 092 frozen (TTT-on band {2,3,4}, leaderboard cell for 089)
 - **W14 (2026-04-29 +140min):** clusters YY/ZZ/AAA (TTT-LR sweep, eval-time SmearGate alteration, repeated-context test); spec 093 frozen (TTT-on band {4,5,6}, completes position × TTT grid)
+- **W15 (2026-04-29 +150min):** clusters BBB/CCC/DDD (TTT-momentum sensitivity, eval-time logit softcap variant, full-attention vs XSA on loop layers); spec 094 frozen (TTT_LORA_LR=5e-5, smaller-LR sweep)
 - (next wake will append below)
 
 ---
@@ -1574,4 +1575,62 @@ loss-mask to score only the second half (first half is context).
   to lose. Low-priority diagnostic.
 - **AAA (repeated-context eval)** is genuinely novel but requires
   validation-side code change. Defer.
+
+---
+
+## W15 — TTT-momentum, logit softcap, XSA on/off
+
+### Cluster BBB — TTT-momentum sensitivity at canonical NL
+
+The TTT optimizer uses Adam with `TTT_BETA1=0.0` and `TTT_BETA2=0.99`
+(per memory `project_baseline_1851_post_1872`'s notes on the
+060A/#1855 stack). β1=0 means no momentum on the gradient itself;
+β2=0.99 is the variance-tracking term.
+
+**BBB1. TTT_BETA1=0.9 at canonical.** Add momentum back into TTT
+Adam. Tests whether the canonical β1=0 (which is unusual — typically
+0.9) was an active design choice or a default that didn't get tuned.
+- Config-only spec; no graph effect (Adam state is Python-side).
+- Cost: ~$3-4.
+
+**BBB2. TTT_BETA2 sweep at canonical.** Try 0.95, 0.999. Same axis
+of "is the TTT optimizer right-tuned?" Less novel than BBB1 since
+β2 sweeps are common.
+
+### Cluster CCC — Eval-time logit softcap variant
+
+`LOGIT_SOFTCAP=30` is the default. Memory's spec 044 family (qk-gain
+soft) explored similar territory. Eval-time softcap can be different
+from training (model is still applied; softcap is a tanh on logits).
+
+**CCC1. LOGIT_SOFTCAP=20 at eval.** Tighter softcap → more
+suppression of extreme logits → potentially smoother bpb.
+- **Compile audit:** softcap is a Python float used as
+  `logit_softcap * tanh(logits / logit_softcap)`. Static. No graph
+  effect when value changes (one cached graph variant per value).
+  Safe.
+- Lower priority — already partially explored in spec 044 family.
+
+### Cluster DDD — Eval-time XSA on/off
+
+The model has XSA (eXclusive Self-Attention) per memory; it's
+implementation-related to the modified attention computation in 060A.
+`XSA_LAST_N=11` means all 11 layers use XSA.
+
+**DDD1. Disable XSA at eval (`XSA_LAST_N=0`).** Tests whether the
+model relies on XSA at inference or whether canonical attention
+is fine.
+- Almost certainly hurts (the model trained with XSA throughout).
+- Diagnostic value low; defer.
+
+### Decisions for W15
+
+- **Spec 094 = YY1 = TTT_LORA_LR=5e-5 at canonical.** Direct
+  sibling to 091 (same TTT-compute axis, different parameter).
+  Tests whether the canonical TTT LR is over-aggressive. Config-only.
+  **FREEZE THIS WAKE.**
+- **BBB1 (TTT_BETA1=0.9)** is interesting and config-only; spec
+  candidate for W16.
+- **CCC, DDD demoted** — already partially explored or low-value
+  diagnostics.
 
