@@ -1384,19 +1384,23 @@ class GPT(nn.Module):
                 self.num_encoder_layers + self.num_decoder_layers,
             )
         )
-        # Spec 114: alpha_info active only when Recur-Alpha enabled AND looping active.
-        enc_alpha_info = (
-            self._encoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
-            else None
-        )
+        # Spec 114 v3: precompute alpha cast ONCE per forward to avoid per-site
+        # .to(dtype) calls inside the loop (caused Triton compile hang in v2).
+        if self.recur_alpha is not None and self.looping_active:
+            recur_alpha_cast = self.recur_alpha.to(x.dtype)
+            enc_alpha_info = self._encoder_alpha_info
+            dec_alpha_info = self._decoder_alpha_info
+        else:
+            recur_alpha_cast = None
+            enc_alpha_info = None
+            dec_alpha_info = None
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x_before = x
             x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                alpha = recur_alpha_cast[pass_off, local_idx]
                 x = alpha * x_new + (1.0 - alpha) * x_before
             else:
                 x = x_new
@@ -1404,11 +1408,6 @@ class GPT(nn.Module):
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
-        dec_alpha_info = (
-            self._decoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
-            else None
-        )
         for skip_idx, i in enumerate(dec_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             if i >= psl and psl > 0:
@@ -1442,7 +1441,7 @@ class GPT(nn.Module):
                 x_new = self.blocks[i](x_before, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                    alpha = recur_alpha_cast[pass_off, local_idx]
                     x = alpha * x_new + (1.0 - alpha) * x_before
                 else:
                     x = x_new
@@ -1510,17 +1509,15 @@ class GPT(nn.Module):
                 )
             )
         )
-        # Spec 114: alpha_info active only when Recur-Alpha enabled AND looping active.
-        enc_alpha_info = (
-            self._encoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
-            else None
-        )
-        dec_alpha_info = (
-            self._decoder_alpha_info
-            if (self.recur_alpha is not None and self.looping_active)
-            else None
-        )
+        # Spec 114 v3: precompute alpha cast once per forward.
+        if self.recur_alpha is not None and self.looping_active:
+            recur_alpha_cast = self.recur_alpha.to(x.dtype)
+            enc_alpha_info = self._encoder_alpha_info
+            dec_alpha_info = self._decoder_alpha_info
+        else:
+            recur_alpha_cast = None
+            enc_alpha_info = None
+            dec_alpha_info = None
         slot = 0
         for step_idx, i in enumerate(enc_iter):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
@@ -1528,7 +1525,7 @@ class GPT(nn.Module):
             x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             if enc_alpha_info is not None and enc_alpha_info[step_idx] is not None:
                 pass_off, local_idx = enc_alpha_info[step_idx]
-                alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                alpha = recur_alpha_cast[pass_off, local_idx]
                 x = alpha * x_new + (1.0 - alpha) * x_before
             else:
                 x = x_new
@@ -1570,7 +1567,7 @@ class GPT(nn.Module):
                 x_new = self._block_with_lora(self.blocks[i], x_before, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
                 if dec_alpha_info is not None and dec_alpha_info[skip_idx] is not None:
                     pass_off, local_idx = dec_alpha_info[skip_idx]
-                    alpha = self.recur_alpha[pass_off, local_idx].to(x_new.dtype)
+                    alpha = recur_alpha_cast[pass_off, local_idx]
                     x = alpha * x_new + (1.0 - alpha) * x_before
                 else:
                     x = x_new
