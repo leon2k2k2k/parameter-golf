@@ -1,12 +1,30 @@
 # Spec 111 — Anderson acceleration on the recurrence loop
 
-**Status:** FROZEN — code committed at `e9da01a` on `exp/111-anderson-recurrence`,
-pushed to fork. Ready to run.
+**Status:** FROZEN — code committed at `af43ded` on `exp/111-anderson-recurrence`,
+pushed to fork. Phase 1 (eval-only on 060A ckpt) DROPPED — see "Phase 1 infeasible"
+below. Phase 2 (training from scratch) is the only path.
 
-**Date:** 2026-04-30 (architectural research thread)
+**Date:** 2026-04-30 (architectural research thread; updated post-smoke 2026-04-30)
 **Branch:** `exp/111-anderson-recurrence`
-**Pinned commit:** `e9da01aa3dd64919ac07eb67ffee94ebabb394b9`
+**Pinned commit:** `af43ded` (was `e9da01a`; bumped to add `@torch.compiler.disable`
+on `anderson_step` to fix bf16/fp32 dtype mix in LS-solve under Triton).
 **Parent:** 060A (#1855 port; forks from `exp/060-resume-ckpt @ a0a48b7`).
+
+## Phase 1 infeasible (declared 2026-04-30)
+
+Phase 1 was "load 060A trained checkpoint, swap recurrence rule to Anderson,
+eval." Smoke attempt failed with `state_dict` shape mismatch on
+`skip_weights`/`skip_gates` — ckpt has [8, 512] (canonical NL=2 packs the loop
+band into encoder/decoder, giving `num_skip_weights = min(8, 9) = 8`); Anderson
+factors the loop band OUT (encoder=[0,1,2], decoder=[6,7,8,9,10],
+`num_skip_weights = min(3, 5) = 3`).
+
+The shapes are architecturally incompatible — by design. Anderson cannot reuse
+060A weights without redesigning Anderson to mimic canonical's encoder/decoder
+packing, which would defeat the architectural purpose. **Phase 1 is dropped.**
+Diagnostic value was modest anyway (expected OOD degradation since 060A weights
+weren't trained for Anderson iteration). Phase 2 (training from scratch with
+Anderson) is the only meaningful test of the hypothesis.
 
 ## Hypothesis
 

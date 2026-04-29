@@ -13,7 +13,7 @@ set -euo pipefail
 SEED="${SEED:?Set SEED}"
 RUN_LABEL="${RUN_LABEL:?Set RUN_LABEL}"
 
-SHA="e9da01a"
+SHA="af43ded"
 ARM="111-anderson-mini"
 RUNDIR="/workspace/runs/${ARM}/${RUN_LABEL}"
 TRAIN_SCRIPT="records/track_10min_16mb/2026-04-29_PR1855_Port_Baseline/train_gpt.py"
