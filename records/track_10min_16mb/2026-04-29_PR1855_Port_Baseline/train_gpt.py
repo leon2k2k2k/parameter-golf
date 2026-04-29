@@ -268,6 +268,9 @@ class Hyperparameters:
     # literature). Stateful residual buffer across passes; bounded graph
     # variants per pass position in cyclic buffer.
     anderson_enabled = bool(int(os.environ.get("ANDERSON_ENABLED", "0")))
+    # Spec 115 — Recur-Alpha gates per (Anderson pass, loop band layer).
+    # 6 scalars (anderson_num_passes-1 × num_loop_layers). α=0 → identity.
+    recur_alpha_enabled = bool(int(os.environ.get("RECUR_ALPHA_ENABLED", "0")))
     anderson_history = int(os.environ.get("ANDERSON_HISTORY", "2"))
     anderson_beta = float(os.environ.get("ANDERSON_BETA", "1.0"))
     anderson_regularization = float(os.environ.get("ANDERSON_REGULARIZATION", "1e-6"))
@@ -1243,6 +1246,17 @@ class GPT(nn.Module):
         self.anderson_beta = float(h.anderson_beta)
         self.anderson_regularization = float(h.anderson_regularization)
         self.anderson_num_passes = int(h.num_loops + 1)  # how many f-applications
+        # Spec 115 — Recur-Alpha gate inside Anderson loop band. Active only when
+        # both anderson_enabled and recur_alpha_enabled. Shape [num_loops,
+        # num_loop_layers]; pass k=0 ungated, passes k=1..NL gated by α[k-1, l].
+        self.recur_alpha_enabled = bool(h.recur_alpha_enabled) and self.anderson_enabled
+        if self.recur_alpha_enabled:
+            num_looped = h.loop_end - h.loop_start + 1
+            self.recur_alpha = nn.Parameter(
+                torch.zeros(h.num_loops, num_looped, dtype=torch.float32)
+            )
+        else:
+            self.recur_alpha = None
         if self.anderson_enabled:
             self.encoder_indices = list(range(h.loop_start))
             self.decoder_indices = list(range(h.loop_end + 1, h.num_layers))
@@ -1404,24 +1418,27 @@ class GPT(nn.Module):
             x_history = []
             f_history = []
             x_curr = x
+            recur_alpha_active = self.recur_alpha is not None
             for k in range(self.anderson_num_passes):
                 # Apply f: one trip through the loop band layers.
                 f_curr = x_curr
-                for i in self.loop_band_layer_indices:
+                for layer_local_idx, i in enumerate(self.loop_band_layer_indices):
                     q_w, k_w_, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                    f_before = f_curr
                     f_curr = self.blocks[i](
                         f_curr, x0, q_w, k_w_, v_w, out_w, up_w, down_w,
                         cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
                     )
+                    # Spec 115: per-(pass k>0, layer) residual gate.
+                    if recur_alpha_active and k > 0:
+                        alpha = self.recur_alpha[k - 1, layer_local_idx].to(f_curr.dtype)
+                        f_curr = alpha * f_curr + (1.0 - alpha) * f_before
                 x_history.append(x_curr)
                 f_history.append(f_curr)
-                # Truncate history to last (m+1) entries.
                 if len(x_history) > self.anderson_history + 1:
                     x_history = x_history[-(self.anderson_history + 1):]
                     f_history = f_history[-(self.anderson_history + 1):]
-                # Compute next iterate.
                 if k == 0 or len(x_history) < 2:
-                    # First pass: vanilla (no history to mix).
                     x_curr = f_curr
                 else:
                     x_curr = anderson_step(
@@ -1537,14 +1554,19 @@ class GPT(nn.Module):
             x_history = []
             f_history = []
             x_curr = x
+            recur_alpha_active = self.recur_alpha is not None
             for k in range(self.anderson_num_passes):
                 f_curr = x_curr
-                for i in self.loop_band_layer_indices:
+                for layer_local_idx, i in enumerate(self.loop_band_layer_indices):
                     q_w, k_w_, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                    f_before = f_curr
                     f_curr = self._block_with_lora(
                         self.blocks[i], f_curr, x0, lora, slot,
                         q_w, k_w_, v_w, out_w, up_w, down_w,
                     )
+                    if recur_alpha_active and k > 0:
+                        alpha = self.recur_alpha[k - 1, layer_local_idx].to(f_curr.dtype)
+                        f_curr = alpha * f_curr + (1.0 - alpha) * f_before
                     slot += 1
                 x_history.append(x_curr)
                 f_history.append(f_curr)
