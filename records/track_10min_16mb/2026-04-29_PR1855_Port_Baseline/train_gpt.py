@@ -366,6 +366,10 @@ class Hyperparameters:
     lqer_factor_bits = int(os.environ.get("LQER_FACTOR_BITS", 4))
     lqer_asym_enabled = bool(int(os.environ.get("LQER_ASYM_ENABLED", "1")))
     lqer_asym_group = int(os.environ.get("LQER_ASYM_GROUP", "64"))
+    awq_lite_enabled = bool(int(os.environ.get("AWQ_LITE_ENABLED", "0")))
+    awq_lite_bits = int(os.environ.get("AWQ_LITE_BITS", "8"))
+    awq_lite_group_top_k = int(os.environ.get("AWQ_LITE_GROUP_TOP_K", "1"))
+    awq_lite_group_size = int(os.environ.get("AWQ_LITE_GROUP_SIZE", "64"))
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -2038,6 +2042,8 @@ def restore_fp32_params(model):
 
 def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
     hessians = {}
+    act_sumsq = {}
+    act_counts = {}
     hooks = []
     for i, block in enumerate(model.blocks):
         block.attn._calib = True
@@ -2049,6 +2055,8 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
             x = inp[0].detach().float()
             if x.ndim == 3:
                 x = x.reshape(-1, x.shape[-1])
+            x_sq = x.square().sum(dim=0)
+            x_count = x.shape[0]
             for suffix in ["c_q", "c_k", "c_v"]:
                 name = f"blocks.{layer_idx}.attn.{suffix}.weight"
                 if name not in hessians:
@@ -2056,6 +2064,13 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
                         x.shape[1], x.shape[1], dtype=torch.float32, device=device
                     )
                 hessians[name].addmm_(x.T, x)
+                if name not in act_sumsq:
+                    act_sumsq[name] = torch.zeros(
+                        x.shape[1], dtype=torch.float32, device=device
+                    )
+                    act_counts[name] = 0
+                act_sumsq[name] += x_sq
+                act_counts[name] += x_count
             y = module._last_proj_input
             if y is not None:
                 y = y.float()
@@ -2067,6 +2082,13 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
                         y.shape[1], y.shape[1], dtype=torch.float32, device=device
                     )
                 hessians[name].addmm_(y.T, y)
+                if name not in act_sumsq:
+                    act_sumsq[name] = torch.zeros(
+                        y.shape[1], dtype=torch.float32, device=device
+                    )
+                    act_counts[name] = 0
+                act_sumsq[name] += y.square().sum(dim=0)
+                act_counts[name] += y.shape[0]
         return hook_fn
 
     def make_mlp_hook(layer_idx):
@@ -2080,6 +2102,13 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
                     x.shape[1], x.shape[1], dtype=torch.float32, device=device
                 )
             hessians[name].addmm_(x.T, x)
+            if name not in act_sumsq:
+                act_sumsq[name] = torch.zeros(
+                    x.shape[1], dtype=torch.float32, device=device
+                )
+                act_counts[name] = 0
+            act_sumsq[name] += x.square().sum(dim=0)
+            act_counts[name] += x.shape[0]
             h_act = module._last_down_input
             if h_act is not None:
                 h_act = h_act.float()
@@ -2091,6 +2120,13 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
                         h_act.shape[1], h_act.shape[1], dtype=torch.float32, device=device
                     )
                 hessians[name].addmm_(h_act.T, h_act)
+                if name not in act_sumsq:
+                    act_sumsq[name] = torch.zeros(
+                        h_act.shape[1], dtype=torch.float32, device=device
+                    )
+                    act_counts[name] = 0
+                act_sumsq[name] += h_act.square().sum(dim=0)
+                act_counts[name] += h_act.shape[0]
         return hook_fn
 
     for i, block in enumerate(model.blocks):
@@ -2123,6 +2159,13 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
                         x.shape[1], x.shape[1], dtype=torch.float32, device=device
                     )
                 hessians[name].addmm_(x.T, x)
+                if name not in act_sumsq:
+                    act_sumsq[name] = torch.zeros(
+                        x.shape[1], dtype=torch.float32, device=device
+                    )
+                    act_counts[name] = 0
+                act_sumsq[name] += x.square().sum(dim=0)
+                act_counts[name] += x.shape[0]
             return hook_fn
 
         hooks.append(
@@ -2141,10 +2184,23 @@ def collect_hessians(model, train_loader, h, device, n_calibration_batches=64):
         block.mlp.use_fused = True
     for name in hessians:
         hessians[name] = hessians[name].cpu() / n_calibration_batches
-    return hessians
+    act_stats = {}
+    for name, sumsq in act_sumsq.items():
+        count = max(act_counts.get(name, 0), 1)
+        act_stats[name] = (sumsq / count).sqrt().cpu()
+    return hessians, act_stats
 
 
-def gptq_quantize_weight(w, H, clip_sigmas=3.0, clip_range=63, block_size=128):
+def gptq_quantize_weight(
+    w,
+    H,
+    clip_sigmas=3.0,
+    clip_range=63,
+    block_size=128,
+    protect_groups=None,
+    group_size=None,
+    protect_clip_range=None,
+):
     W_orig = w.float().clone()
     rows, cols = W_orig.shape
     H = H.float().clone()
@@ -2162,6 +2218,34 @@ def gptq_quantize_weight(w, H, clip_sigmas=3.0, clip_range=63, block_size=128):
     row_std = W_orig.std(dim=1)
     s = (clip_sigmas * row_std / clip_range).clamp_min(1e-10).to(torch.float16)
     sf = s.float()
+    protect_meta = None
+    protect_mask_perm = None
+    s_hi = None
+    sf_hi = None
+    if (
+        protect_groups
+        and group_size is not None
+        and protect_clip_range is not None
+        and protect_clip_range > clip_range
+    ):
+        protect_mask = torch.zeros(cols, dtype=torch.bool)
+        starts = []
+        for (start, end) in protect_groups:
+            if start < 0 or end > cols or end <= start:
+                continue
+            protect_mask[start:end] = True
+            starts.append(start)
+        if starts:
+            protect_mask_perm = protect_mask[perm]
+            s_hi = (clip_sigmas * row_std / protect_clip_range).clamp_min(1e-10).to(
+                torch.float16
+            )
+            sf_hi = s_hi.float()
+            protect_meta = {
+                "starts": torch.tensor(starts, dtype=torch.int16),
+                "size": int(group_size),
+                "s_hi": s_hi,
+            }
     Q = torch.zeros(rows, cols, dtype=torch.int8)
     W_work = W_perm.clone()
     for i1 in range(0, cols, block_size):
@@ -2172,14 +2256,23 @@ def gptq_quantize_weight(w, H, clip_sigmas=3.0, clip_range=63, block_size=128):
         for j in range(i2 - i1):
             w_col = W_block[:, j]
             d = Hinv_block[j, j]
-            q_col = torch.clamp(torch.round(w_col / sf), -clip_range, clip_range)
+            if protect_mask_perm is not None and bool(protect_mask_perm[i1 + j]):
+                q_col = torch.clamp(
+                    torch.round(w_col / sf_hi),
+                    -protect_clip_range,
+                    protect_clip_range,
+                )
+                w_recon = q_col.float() * sf_hi
+            else:
+                q_col = torch.clamp(torch.round(w_col / sf), -clip_range, clip_range)
+                w_recon = q_col.float() * sf
             Q[:, i1 + j] = q_col.to(torch.int8)
-            err = (w_col - q_col.float() * sf) / d
+            err = (w_col - w_recon) / d
             Err[:, j] = err
             W_block[:, j:] -= err.unsqueeze(1) * Hinv_block[j, j:].unsqueeze(0)
         if i2 < cols:
             W_work[:, i2:] -= Err @ Hinv[i1:i2, i2:]
-    return Q[:, invperm], s
+    return Q[:, invperm], s, protect_meta
 
 
 def _quantize_gate_int8_row(w):
@@ -2217,12 +2310,44 @@ def _lqer_pack_asym(A, B, g=64):
     return qA, sA, qB, sB
 
 
-def gptq_mixed_quantize(state_dict, hessians, h):
+def _awq_lite_group_candidates(w, act_rms, group_size):
+    cols = w.shape[1]
+    n_groups = cols // group_size
+    if n_groups <= 0:
+        return []
+    weight_score = w.float().abs().mean(dim=0)
+    saliency = act_rms.float() * weight_score
+    cands = []
+    for gi in range(n_groups):
+        start = gi * group_size
+        end = start + group_size
+        score = float(saliency[start:end].sum())
+        cands.append((score, start, end))
+    return cands
+
+
+def gptq_mixed_quantize(state_dict, hessians, act_stats, h):
     result = {}
     meta = {}
     quant_gate = bool(getattr(h, "gated_attn_quant_gate", False))
     lqer_on = bool(getattr(h, "lqer_enabled", False))
+    awq_on = bool(getattr(h, "awq_lite_enabled", False))
     lqer_cands = {}
+    awq_selected = collections.defaultdict(list)
+    if awq_on:
+        awq_cands = []
+        for (name, tensor) in state_dict.items():
+            t = tensor.detach().cpu().contiguous()
+            if t.is_floating_point() and t.numel() > 65536 and name in act_stats:
+                bits = h.embed_bits if "tok_emb" in name else h.matrix_bits
+                if bits < h.awq_lite_bits:
+                    for score, start, end in _awq_lite_group_candidates(
+                        t, act_stats[name], h.awq_lite_group_size
+                    ):
+                        awq_cands.append((score, name, start, end))
+        awq_cands.sort(key=lambda x: -x[0])
+        for (_score, name, start, end) in awq_cands[: h.awq_lite_group_top_k]:
+            awq_selected[name].append((start, end))
     for (name, tensor) in state_dict.items():
         t = tensor.detach().cpu().contiguous()
         # Dedicated int8-per-row path for attn_gate_w (bypasses both GPTQ and
@@ -2258,15 +2383,35 @@ def gptq_mixed_quantize(state_dict, hessians, h):
             cs = h.matrix_clip_sigmas
         bits = h.embed_bits if "tok_emb" in name else h.matrix_bits
         clip_range = 2 ** (bits - 1) - 1
-        ret = gptq_quantize_weight(
-            t, hessians[name], clip_sigmas=cs, clip_range=clip_range
+        q, s, protect_meta = gptq_quantize_weight(
+            t,
+            hessians[name],
+            clip_sigmas=cs,
+            clip_range=clip_range,
+            protect_groups=awq_selected.get(name),
+            group_size=h.awq_lite_group_size if name in awq_selected else None,
+            protect_clip_range=(2 ** (h.awq_lite_bits - 1) - 1)
+            if name in awq_selected
+            else None,
         )
-        q, s = ret
         result[name + ".q"] = q
         result[name + ".scale"] = s
         meta[name] = f"gptq (int{bits})"
+        W_q = q.float() * s.float().view(-1, 1)
+        if protect_meta is not None:
+            result[name + ".awqg_start"] = protect_meta["starts"]
+            result[name + ".awqg_s_hi"] = protect_meta["s_hi"]
+            result[name + ".awqg_size"] = torch.tensor(
+                protect_meta["size"], dtype=torch.int16
+            )
+            meta[name] = meta[name] + f"+awqgrpint{h.awq_lite_bits}"
+            gsz = protect_meta["size"]
+            for start in protect_meta["starts"].tolist():
+                W_q[:, start : start + gsz] = (
+                    q[:, start : start + gsz].float()
+                    * protect_meta["s_hi"].float().view(-1, 1)
+                )
         if lqer_on:
-            W_q = q.float() * s.float().view(-1, 1)
             E = t.float() - W_q
             lqer_cands[name] = (E, float(E.norm()))
     if lqer_on and lqer_cands:
@@ -2327,6 +2472,14 @@ def dequantize_mixed(result, meta, template_sd):
             W = q.float() * s.float().view(q.shape[0], *[1] * (q.ndim - 1))
         else:
             W = q.float() * float(s.item())
+        if "awqgrpint" in info:
+            starts = result[name + ".awqg_start"].tolist()
+            s_hi = result[name + ".awqg_s_hi"].float()
+            gsz = int(result[name + ".awqg_size"].item())
+            for start in starts:
+                W[:, start : start + gsz] = (
+                    q[:, start : start + gsz].float() * s_hi.view(-1, 1)
+                )
         if "lqer_asym" in info:
             qA_t = result[name + ".lqA_a"]
             sA_t = result[name + ".lqAs_a"]
@@ -2655,7 +2808,7 @@ def serialize(h, base_model, code):
     t0 = time.perf_counter()
     calib_loader = ShuffledSequenceLoader(h, device)
     log("GPTQ:collecting Hessians from calibration data...")
-    hessians = collect_hessians(
+    hessians, act_stats = collect_hessians(
         base_model,
         calib_loader,
         h,
@@ -2663,7 +2816,7 @@ def serialize(h, base_model, code):
         n_calibration_batches=h.gptq_calibration_batches,
     )
     log(f"GPTQ:collected {len(hessians)} Hessians in {time.perf_counter()-t0:.1f}s")
-    quant_result, quant_meta = gptq_mixed_quantize(sd_cpu, hessians, h)
+    quant_result, quant_meta = gptq_mixed_quantize(sd_cpu, hessians, act_stats, h)
     if h.compressor == "pergroup":
         import tempfile
         tmpdir = tempfile.mkdtemp(prefix="pgrp_")
