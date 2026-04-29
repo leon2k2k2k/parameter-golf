@@ -67,6 +67,7 @@ extract extra recurrence value**.
 - **W4 (2026-04-29 +40min):** TTT compositional risks; clusters U/V/W (eval-time logit blends, encoder-only/decoder-only NL skew, post-quant deeper recurrence); spec 083 frozen (TTT-on × NL=3 eq)
 - **W5 (2026-04-29 +50min):** R1 framing correction; clusters X/Y/Z (warmup-skip eval, prefix-only deeper recurrence, mixed-precision recurrence); spec 084 frozen (TTT-on × NL=4 eq)
 - **W6 (2026-04-29 +60min):** V1/V2 design challenge (U-Net midpoint constraint); clusters AA/BB/CC (matched-compute pattern shape, TTT-prefix length sweep, hot-pass conditioning); spec 085 frozen (matched-compute broad pattern eval on 060A)
+- **W7 (2026-04-29 +70min):** clusters DD/EE/FF (LR schedule × deeper-NL interactions, rolling-window eval, low-rank residual stream); spec 086 frozen (TTT-on × broad-pattern, leaderboard-relevant)
 - (next wake will append below)
 
 ---
@@ -958,4 +959,92 @@ tensor controls per-pass scaling.
 - **BB1 (TTT-prefix × NL sweep)** worth doing AFTER 083/084 land —
   conditional value.
 - **V1/V2 demoted** — code change required.
+
+---
+
+## W7 — TTT × pattern shape, rolling-window eval, low-rank residual
+
+### Cluster DD — LR schedule × deeper-NL interactions
+
+The 060A model trained at NL=2 with a specific LR schedule (warmdown
+fraction 0.85, ITERATIONS=20000, etc.). The Adam/Muon momentum
+warmup steps (1500) are tied to the trained iteration count.
+
+**DD1. Anti-finding: nothing to do here at eval.** The LR schedule
+only affects training. Eval-time recurrence depth (specs 080-085)
+doesn't interact with optimizer state. So this cluster collapses to
+"the LR schedule is fixed at the trained model's settings; eval-time
+NL changes don't see it."
+
+**DD2. If we ever retrain with deeper NL:** then a longer warmup
+(2000+ steps) might be needed because the deeper recurrence is
+harder to optimize early. This is a *training-time* spec, not
+eval-only. Defer to a future training-time recurrence-deepening
+spec series.
+
+### Cluster EE — Rolling-window eval (varies eval-time stride)
+
+The current eval uses `EVAL_STRIDE=64` which means consecutive
+evaluation windows overlap by stride=64 tokens. This is a fixed
+hyperparameter at eval time.
+
+**EE1. Smaller EVAL_STRIDE.** STRIDE=32 means more overlap → more
+forward passes per evaluation token → more accurate per-token bpb
+estimate. Costs ~2× eval compute (must process ~2× more windows).
+- **Compile audit:** stride doesn't change the model graph; just
+  changes how many forward calls happen. No mid-run recompile.
+- **Wallclock:** doubles eval time. Fits in the 180s eval headroom?
+  Need to verify by checking 060A's actual eval time vs cap.
+- **Compose with deeper recurrence:** spec 080 ate ~7 min eval at
+  NL=3. Add 2× from stride=32 → ~14 min. Pushes against eval cap.
+- **Standalone test:** a config-only spec running 060A canonical
+  with stride=32. Spec candidate.
+
+**EE2. Adaptive stride per document.** Long docs use larger stride
+(less overlap, faster); short docs use smaller stride (more overlap,
+better measurement). Conditional eval scheduling. Implementation
+non-trivial.
+
+### Cluster FF — Low-rank residual stream during loop band
+
+Refines Z1 (W5) — fp32 residual is one option; another is
+*low-rank* residual structure during the loop band.
+
+**FF1. SVD-projected residual at loop entry.** Compute the SVD of the
+loop-entry residual once per layer-pass. Use only the top-k singular
+modes for the residual computation, drop the rest. The "noise floor"
+of the residual is removed; recurrence iterates on the cleaner signal.
+- **Mechanism:** if late-pass updates are mostly orthogonal but small,
+  they may live in the top-k singular subspace. Filtering keeps the
+  signal-bearing modes and drops noise.
+- **Implementation:** SVD inside compile region — risky. PyTorch's
+  `torch.svd` may not be torch.compile-friendly. Could use a simpler
+  truncation (e.g., zero-out small singular values via thresholding,
+  using torch.svd on bf16 might break gradient flow).
+- **Compile audit:** SVD adds significant compile complexity; one new
+  graph variant per pass × layer combination. Likely safe if all
+  shapes are static, but the SVD kernel itself may not be compiled.
+  This idea needs prototyping; defer to W8+.
+
+**FF2. Top-k subspace projection (lighter version).** Instead of full
+SVD, maintain a learned k-dimensional projection matrix that maps the
+residual to a k-dim subspace and back. Train k as a small parameter.
+Does the recurrence iterate better in the projected space?
+- **Code change:** ~50 LOC. Adds k×d and d×k matrices per loop layer.
+  Configurable via env var.
+- **Compile audit:** static shapes; one graph variant; no mid-run
+  recompile.
+- Defer.
+
+### Decisions for W7
+
+- **Spec 086 = TTT-on version of 085.** Direct extension. Composes
+  the matched-compute broad-pattern test with TTT for leaderboard
+  relevance. Config-only on `e7ccda2`. **FREEZE THIS WAKE.**
+- **EE1 (stride=32 eval)** is a small, clean variant — config-only.
+  Spec candidate for W8.
+- **FF1/FF2 (low-rank residual)** are code-change candidates with
+  modest implementation difficulty. Defer.
+- **DD cluster collapses** — LR schedule isn't relevant for eval-only
+  specs.
 
