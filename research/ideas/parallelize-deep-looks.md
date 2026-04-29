@@ -83,6 +83,7 @@ extract extra recurrence value**.
 - **W20 (2026-04-29 +200min):** clusters QQQ/RRR/SSS (TTT vs no-TTT calibration, GPTQ-without-TTT pre-quant comparison, single-phase TTT diagnostic); spec 099 frozen (TTT-disabled, calibrates TTT lever weight)
 - **W21 (2026-04-29 +210min):** clusters TTT/UUU/VVV (compound 080+091, GPTQ_RESERVE budget sweep, eval-time KV-rope-base scaling); spec 100 frozen (compound NL=3 eq + 4 TTT phases — first compound spec for leaderboard wins)
 - **W22 (2026-04-29 +220min):** clusters WWW/XXX/YYY (compound NL+LR, position+TTT-extension, full-pipeline ensemble); spec 101 frozen (compound NL=3 eq + smaller TTT_LORA_LR=5e-5)
+- **W23 (2026-04-29 +230min):** clusters ZZZ/AAAA/BBBB (compound shape × TTT-axis, NL=4 + smaller LR, eval-time per-layer dropout); spec 102 frozen (compound broad pattern + 4 TTT phases, shape-axis compound)
 - (next wake will append below)
 
 ---
@@ -2050,4 +2051,51 @@ typical 600s eval cap.
 - **WWW2/WWW3 (other LR-NL combos)** are config-only; W23+ candidates.
 - **XXX (position × TTT-ext)** depends on 089/090 results; defer.
 - **YYY (ensemble)** code change; defer.
+
+---
+
+## W23 — Compound shape × TTT-axis
+
+100 and 101 tested **compute × TTT** compounds. This wake adds a
+sibling: **shape × TTT** compound.
+
+### Cluster ZZZ — Compound shape × TTT-extension
+
+If 085 (broad pattern) wins or near-noise, can the extra TTT phase
+help even more?
+
+**ZZZ1. Broad pattern (085-shape) + 4 TTT phases.** Combines 085's
+LOOP_PATTERN with 091's TTT extension at canonical 17-pass compute.
+- **Spec candidate: 102.** **FREEZE THIS WAKE.**
+
+**ZZZ2. Stepped pattern (087-shape) + 4 TTT phases.** Sibling using
+the stepped pattern.
+
+### Cluster AAAA — Triple compound: NL × TTT-extension × LR
+
+If both 100 (NL=3 + 4-phases) and 101 (NL=3 + smaller LR) win,
+combine all three: NL=3 + 4-phases + smaller LR.
+
+**AAAA1. NL=3 eq + 4 phases + LR=5e-5.** Triple compound.
+- Speculative; depends on 100 and 101 individually winning.
+- W24 candidate.
+
+### Cluster BBBB — Eval-time per-layer dropout (code change)
+
+A regularization-at-test technique: per loop pass, apply dropout
+to the residual at low rate (p=0.05). The trained model never saw
+dropout, but at eval the slight perturbation may average over
+spurious local minima.
+
+**BBBB1. Per-pass residual dropout, p=0.05.** Code change, ~10 LOC.
+Compile audit: dropout adds randomness; with fixed seed, single
+graph variant.
+
+### Decisions for W23
+
+- **Spec 102 = ZZZ1 = compound broad pattern + 4 TTT phases.**
+  First **shape × TTT** compound. Config-only. **FREEZE THIS WAKE.**
+- **AAAA (triple compound)** depends on 100/101 results; W24
+  candidate.
+- **BBBB (per-pass dropout)** code change; defer.
 
