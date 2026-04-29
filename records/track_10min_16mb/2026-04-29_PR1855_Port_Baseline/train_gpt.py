@@ -2008,6 +2008,10 @@ class Optimizers:
         if getattr(base_model, "smear_gate_enabled", False):
             scalar_params.append(base_model.smear_gate.weight)
             scalar_params.append(base_model.smear_lambda)
+        # Spec 114 — Recur-Alpha lives on GPT root, must be added by hand or
+        # it never gets gradient updates (the bug that killed v1).
+        if getattr(base_model, "recur_alpha", None) is not None:
+            scalar_params.append(base_model.recur_alpha)
         token_lr = h.tied_embed_lr if h.tie_embeddings else h.embed_lr
         tok_params = [
             {"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}
@@ -3612,6 +3616,19 @@ def train_model(h, device, val_data):
             log(
                 f"{step}/{h.iterations} train_loss: {train_loss.item():.4f} train_time: {approx_training_time_ms/60000:.1f}m tok/s: {tok_per_sec:.0f}"
             )
+            # Spec 114 — log recur_alpha values so we can verify they're learning.
+            if getattr(base_model, "recur_alpha", None) is not None:
+                _ra = base_model.recur_alpha.detach().float().cpu().tolist()
+                _ra_str = " | ".join(
+                    "[" + ",".join(f"{v:+.3f}" for v in row) + "]" for row in _ra
+                )
+                _ra_grad = base_model.recur_alpha.grad
+                _ra_gnorm = (
+                    f"{_ra_grad.detach().float().norm().item():.5f}"
+                    if _ra_grad is not None
+                    else "None"
+                )
+                log(f"  recur_alpha[pass,layer]: {_ra_str}  grad_norm: {_ra_gnorm}")
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
         )
