@@ -4,7 +4,7 @@
 **Slug:** `060N-awq-plus-ttt-compound`
 **Idea sources:** `1908-awq-lite-mixed-bit-gptq.md`, `ttt-budget-reinvestment.md`, `1925-matrix-lr-ttt-prefix-tune.md`
 **Branch:** `exp/060N-awq-ttt-compound` — forks from `research`. Code change is the AWQ-lite port from PR #1908 (same as 060I); TTT bumps are env-var only.
-**Pinned SHA:** TBD on first commit of `exp/060N-awq-ttt-compound` (will pin after AWQ-lite port merges into a clean commit).
+**Pinned SHA:** `42c32f92e28fe803a2fd7e2124e199d6783cd150` on `exp/060N-awq-ttt-compound` (AWQ-lite port from PR #1908; +167/-14 LOC in `records/track_10min_16mb/2026-04-29_PR1855_Port_Baseline/train_gpt.py`; syntax-checked; default-off when `AWQ_LITE_ENABLED=0`).
 **Parent artifact:** `runs/060A-1855-port/seed_42/final_model.pt` on the NA-1 volume (or `seed_42_4h/` if 8H seed-42 hasn't been promoted yet — confirm at preflight).
 
 ## Hypothesis
