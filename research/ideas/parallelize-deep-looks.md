@@ -82,6 +82,7 @@ extract extra recurrence value**.
 - **W19 (2026-04-29 +190min):** clusters NNN/OOO/PPP (TTT-WD effect, eval-time GPTQ-only test, TTT-LR-warmup ramp); spec 098 frozen (TTT_BETA2=0.999, completes Adam β-mapping)
 - **W20 (2026-04-29 +200min):** clusters QQQ/RRR/SSS (TTT vs no-TTT calibration, GPTQ-without-TTT pre-quant comparison, single-phase TTT diagnostic); spec 099 frozen (TTT-disabled, calibrates TTT lever weight)
 - **W21 (2026-04-29 +210min):** clusters TTT/UUU/VVV (compound 080+091, GPTQ_RESERVE budget sweep, eval-time KV-rope-base scaling); spec 100 frozen (compound NL=3 eq + 4 TTT phases — first compound spec for leaderboard wins)
+- **W22 (2026-04-29 +220min):** clusters WWW/XXX/YYY (compound NL+LR, position+TTT-extension, full-pipeline ensemble); spec 101 frozen (compound NL=3 eq + smaller TTT_LORA_LR=5e-5)
 - (next wake will append below)
 
 ---
@@ -1993,4 +1994,60 @@ seq_len. Diagnostic only. Defer.
 - **TTT3 (compound NL=3 + smaller LR)** is config-only; W22 candidate.
 - **UUU (GPTQ_RESERVE sweep)** lower priority; defer.
 - **VVV demoted** — almost certainly hurts.
+
+---
+
+## W22 — More compound combinations
+
+Specs 100+ start the compound phase. This wake adds a second
+compound axis: deeper recurrence × tuned TTT LR.
+
+### Cluster WWW — Compound NL × TTT_LORA_LR
+
+If 094 (smaller LR) wins on canonical NL, the question is whether
+the LR adjustment compounds with deeper recurrence (080's NL=3 eq).
+
+**WWW1. NL=3 eq + TTT_LORA_LR=5e-5.** Combines 080's pattern with
+094's LR. Tests "does smaller LR help deeper-recurrence TTT
+adaptation?"
+- Hypothesis: deeper recurrence amplifies gradient magnitudes
+  through the chain rule; a smaller LR may stabilize TTT under
+  deeper iteration.
+- Spec candidate: 101 = WWW1. **FREEZE THIS WAKE.**
+
+**WWW2. NL=4 eq + smaller LR.** Pushes further. W23 candidate.
+
+**WWW3. NL=3 eq + larger LR (095's 2e-4).** Inverse — does deeper
+recurrence benefit from larger TTT LR? W24 candidate.
+
+### Cluster XXX — Compound position × TTT-extension
+
+Combines band-shift position changes with TTT extensions.
+
+**XXX1. Band {2,3,4} + 4 TTT phases.** If 089 (band {2,3,4}) wins
+or near-noise, can the extra TTT phase help even more?
+- Speculative; depends on 089's outcome.
+
+**XXX2. Band {4,5,6} + 4 TTT phases.** Same direction, later band.
+
+### Cluster YYY — Full-pipeline ensemble
+
+A more ambitious compound: run multiple eval passes with different
+LOOP_PATTERN values, ensemble the logits.
+
+**YYY1. NL=3 eq + canonical NL=2, ensemble.** Run two complete
+forward passes (sequence at NL=3 eq, sequence at NL=2 canonical),
+average logits at each token. Cost ~2× eval compute — exceeds
+typical 600s eval cap.
+- Code change required for the ensemble logic in eval pipeline.
+- Defer.
+
+### Decisions for W22
+
+- **Spec 101 = WWW1 = compound NL=3 eq + TTT_LORA_LR=5e-5.**
+  Different compound axis from 100. Config-only on `e7ccda2`.
+  **FREEZE THIS WAKE.**
+- **WWW2/WWW3 (other LR-NL combos)** are config-only; W23+ candidates.
+- **XXX (position × TTT-ext)** depends on 089/090 results; defer.
+- **YYY (ensemble)** code change; defer.
 
