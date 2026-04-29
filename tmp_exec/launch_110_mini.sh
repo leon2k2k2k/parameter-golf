@@ -64,7 +64,21 @@ export PHASED_TTT_PREFIX_DOCS=2500 TTT_BETA2=0.99 TTT_WEIGHT_DECAY=0.5 TTT_LORA_
 
 # ── 4H ADAPTATIONS ────────────────────────────────────────────────────────
 export GRAD_ACCUM_STEPS=2          # global batch unchanged at 786432; halved GPU count → 2x accum
-export MAX_WALLCLOCK_SECONDS=1200  # matched FLOPs to 8H × 600s
+
+# ── Spec 110 MINI smoke overrides ─────────────────────────────────────────
+# Critical: these must be exported BEFORE torchrun, not after.
+export MULTI_STREAM_LOOP_ENABLED=1
+export MULTI_STREAM_MERGE_RANK=8
+# NUM_LOOPS=2 (canonical) used as activation gate. The multi-stream forward
+# kicks in when looping_active=True (gated by num_loops>0 and frac>=enable_at).
+# The actual recurrence is the dual-stream block, NOT canonical NL=2 expansion.
+# (canonical sets NUM_LOOPS=2 already in the config block above)
+# Mini smoke: short wallclock + iters to verify compile + early stability.
+export MAX_WALLCLOCK_SECONDS=300
+export ITERATIONS=400
+
+echo "[launch_110_mini] MULTI_STREAM_LOOP_ENABLED=${MULTI_STREAM_LOOP_ENABLED} MERGE_RANK=${MULTI_STREAM_MERGE_RANK}"
+echo "[launch_110_mini] WALLCLOCK=${MAX_WALLCLOCK_SECONDS}s ITERATIONS=${ITERATIONS} (smoke)"
 
 export SEED="$SEED"
 export RUN_ID="${ARM}-${RUN_LABEL}"
@@ -109,12 +123,4 @@ fi
 
 echo "=========================================================================="
 grep -E "stopping_early|diagnostic.*val_bpb|val_loss:|Total submission size|TTT" "${RUNDIR}/train.log" | tail -20 || true
-
-# ── Spec 110 lever ─────────────────────────────────────────────────────────
-export MULTI_STREAM_LOOP_ENABLED=1
-export MULTI_STREAM_MERGE_RANK=8
-# Mini smoke: short wallclock to verify compile + early training stability
-export MAX_WALLCLOCK_SECONDS=300
-export ITERATIONS=400
-echo "[launch_110_mini] MULTI_STREAM_LOOP_ENABLED=$MULTI_STREAM_LOOP_ENABLED MERGE_RANK=$MULTI_STREAM_MERGE_RANK"
 

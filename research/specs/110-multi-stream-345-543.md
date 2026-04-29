@@ -117,8 +117,12 @@ training signal to merge MLP yet).
 
 ```
 MULTI_STREAM_LOOP_ENABLED = 1
-LOOP_START = 3, LOOP_END = 5     (canonical, defines which layers are dual-streamed)
-NUM_LOOPS = 0                     (no further outer iteration; multi-stream replaces NL=1 with dual NL=1)
+MULTI_STREAM_MERGE_RANK = 8
+LOOP_START = 3, LOOP_END = 5     (canonical; defines which layers are dual-streamed)
+NUM_LOOPS = 2                     (any positive value; used as ACTIVATION GATE, not loop count.
+                                   Multi-stream forward kicks in when looping_active=True, which
+                                   requires num_loops > 0. The dual-stream block IS the recurrence;
+                                   canonical NL=2 expansion is bypassed entirely when this lever is on.)
 ENABLE_LOOPING_AT = 0.35          (canonical activation point)
 ```
 

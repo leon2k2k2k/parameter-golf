@@ -88,6 +88,13 @@ export TTT_BETA2=0.99
 export TTT_WEIGHT_DECAY=0.5
 export TTT_LORA_RANK=80
 
+# ── Spec 110 OFFICIAL lever (8H, leaderboard-valid) ───────────────────────
+# Critical: these must be exported BEFORE torchrun, not after.
+export MULTI_STREAM_LOOP_ENABLED=1
+export MULTI_STREAM_MERGE_RANK=8
+# NUM_LOOPS=2 from canonical config above used as activation gate.
+echo "[launch_110_official] MULTI_STREAM_LOOP_ENABLED=${MULTI_STREAM_LOOP_ENABLED} MERGE_RANK=${MULTI_STREAM_MERGE_RANK}"
+
 # ── Per-run identity ──────────────────────────────────────────────────────
 export SEED="$SEED"
 export MAX_WALLCLOCK_SECONDS=600
@@ -150,9 +157,4 @@ fi
 echo "=========================================================================="
 echo "[launch] KEY RESULT LINES:"
 grep -E "stopping_early|diagnostic.*val_bpb|val_loss:|Total submission size|TTT|sliding|^bytes" "${RUNDIR}/train.log" | tail -20 || true
-
-# ── Spec 110 lever (8H official, leaderboard-valid) ────────────────────────
-export MULTI_STREAM_LOOP_ENABLED=1
-export MULTI_STREAM_MERGE_RANK=8
-echo "[launch_110_official] MULTI_STREAM_LOOP_ENABLED=$MULTI_STREAM_LOOP_ENABLED MERGE_RANK=$MULTI_STREAM_MERGE_RANK"
 

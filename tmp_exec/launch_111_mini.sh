@@ -64,7 +64,22 @@ export PHASED_TTT_PREFIX_DOCS=2500 TTT_BETA2=0.99 TTT_WEIGHT_DECAY=0.5 TTT_LORA_
 
 # ── 4H ADAPTATIONS ────────────────────────────────────────────────────────
 export GRAD_ACCUM_STEPS=2          # global batch unchanged at 786432; halved GPU count → 2x accum
-export MAX_WALLCLOCK_SECONDS=1200  # matched FLOPs to 8H × 600s
+
+# ── Spec 111 MINI (Anderson) smoke overrides ─────────────────────────────
+# Critical: these must be exported BEFORE torchrun, not after.
+export ANDERSON_ENABLED=1
+export ANDERSON_HISTORY=2
+export ANDERSON_BETA=1.0
+export ANDERSON_REGULARIZATION=1e-6
+# NUM_LOOPS=2 (canonical) used as activation gate. Anderson forward kicks in
+# when looping_active=True. Anderson uses NUM_LOOPS+1=3 f-applications per
+# forward, with m=2 history → meaningful Anderson step at pass 2.
+# Mini smoke: short wallclock + iters to verify compile + LS-solve stability.
+export MAX_WALLCLOCK_SECONDS=300
+export ITERATIONS=400
+
+echo "[launch_111_mini] ANDERSON_ENABLED=${ANDERSON_ENABLED} HISTORY=${ANDERSON_HISTORY} BETA=${ANDERSON_BETA}"
+echo "[launch_111_mini] WALLCLOCK=${MAX_WALLCLOCK_SECONDS}s ITERATIONS=${ITERATIONS} (smoke)"
 
 export SEED="$SEED"
 export RUN_ID="${ARM}-${RUN_LABEL}"
@@ -109,14 +124,4 @@ fi
 
 echo "=========================================================================="
 grep -E "stopping_early|diagnostic.*val_bpb|val_loss:|Total submission size|TTT" "${RUNDIR}/train.log" | tail -20 || true
-
-# ── Spec 111 lever (training-from-scratch) ─────────────────────────────────
-export ANDERSON_ENABLED=1
-export ANDERSON_HISTORY=2
-export ANDERSON_BETA=1.0
-export ANDERSON_REGULARIZATION=1e-6
-# Mini smoke: short wallclock to verify compile + early training stability
-export MAX_WALLCLOCK_SECONDS=300
-export ITERATIONS=400
-echo "[launch_111_mini] ANDERSON_ENABLED=$ANDERSON_ENABLED HISTORY=$ANDERSON_HISTORY"
 

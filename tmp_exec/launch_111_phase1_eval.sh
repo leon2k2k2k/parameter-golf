@@ -71,6 +71,14 @@ export PHASED_TTT_PREFIX_DOCS=2500 TTT_BETA2=0.99 TTT_WEIGHT_DECAY=0.5 TTT_LORA_
 # RESUME_FROM_CKPT magic — train_gpt.py should detect this and skip training.
 export RESUME_FROM_CKPT="$RESUME_FROM_CKPT"
 
+# ── Spec 111 phase 1 — Anderson at eval on 060A trained checkpoint ───────
+# Critical: these must be exported BEFORE torchrun, not after.
+export ANDERSON_ENABLED=1
+export ANDERSON_HISTORY=2
+export ANDERSON_BETA=1.0
+export ANDERSON_REGULARIZATION=1e-6
+echo "[launch_111_phase1_eval] ANDERSON_ENABLED=${ANDERSON_ENABLED} HISTORY=${ANDERSON_HISTORY} BETA=${ANDERSON_BETA}"
+
 # Per-run identity
 export SEED="$SEED"
 export MAX_WALLCLOCK_SECONDS=900   # eval-only; gives slack
@@ -113,11 +121,4 @@ fi
 # ── Surface result ────────────────────────────────────────────────────────
 echo "=========================================================================="
 grep -E "diagnostic.*val_bpb|val_loss:|TTT|sliding|^bytes" "${RUNDIR}/eval.log" | tail -10 || true
-
-# ── Spec 111 phase 1 — Anderson at eval on 060A trained checkpoint ─────────
-export ANDERSON_ENABLED=1
-export ANDERSON_HISTORY=2
-export ANDERSON_BETA=1.0
-export ANDERSON_REGULARIZATION=1e-6
-echo "[launch_111_phase1_eval] ANDERSON_ENABLED=$ANDERSON_ENABLED HISTORY=$ANDERSON_HISTORY"
 
