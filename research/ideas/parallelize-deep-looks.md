@@ -64,6 +64,7 @@ extract extra recurrence value**.
 - **W1 (2026-04-29 +10min):** fresh ideas in clusters H/I/J/K; spec 080 frozen
 - **W2 (2026-04-29 +20min):** clusters L/M/N/O + opposite-direction tests; spec 081 frozen
 - **W3 (2026-04-29 +30min):** clusters P/Q/R/S/T (TTT×recurrence, position-dependent depth, cross-rank pattern divergence, fixed-point cache); spec 082 frozen
+- **W4 (2026-04-29 +40min):** TTT compositional risks; clusters U/V/W (eval-time logit blends, encoder-only/decoder-only NL skew, post-quant deeper recurrence); spec 083 frozen (TTT-on × NL=3 eq)
 - (next wake will append below)
 
 ---
@@ -606,4 +607,120 @@ inference" for NL=3 even though training was NL=2.
   — composes 080 with TTT, real leaderboard-relevant.
 - **R1 (per-rank pattern divergence)** is the most novel idea this wake
   — free ensemble effect at no extra cost. Worth specifying for W5.
+
+---
+
+## W4 — TTT compositional risks + post-quant variants
+
+### Cluster U — Eval-time logit blends (cross-NL ensembling without retraining)
+
+**U1. Logit average across NL=2 + NL=3 forwards on the same checkpoint.**
+060A's `final_model.pt` can be loaded twice in the same eval (or
+in two passes, output cached and combined). Run forward at canonical
+NL=2 → save logits L₂; run forward at NL=3 (LOOP_PATTERN per 080) →
+save logits L₃. Final logits = α·L₂ + (1-α)·L₃ with α tuned via a
+short grid {0.3, 0.5, 0.7}.
+- **Mechanism:** if 080 lands close-to-baseline-noise, neither NL=2
+  nor NL=3 dominates uniformly — but they may have *complementary*
+  errors. Logit averaging exploits that.
+- **Cost:** 2× eval forwards = ~2× wallclock. Risk: blows the eval-
+  time budget if both forwards take ~500s. Need to verify total
+  wallclock fits.
+- **Compile audit:** two distinct eval forwards = two cached graph
+  variants, both compiled at first invocation, no mid-run recompile.
+- **Spec candidate for W5/W6**.
+
+**U2. Token-position-conditional NL via post-hoc selection.** Run BOTH
+forwards (NL=2 and NL=3), but per-token select whichever has lower
+cross-entropy on the validation byte stream. Optimistic upper bound:
+"oracle NL selector" gives the best-of-both at every position. Real
+implementation: select based on prediction entropy of NL=2 (proxy for
+"am I sure?" — if sure, use NL=2; if uncertain, use NL=3).
+- **Practical version:** run both, average; ignore selection logic.
+
+### Cluster V — Encoder-only vs decoder-only NL skew
+
+The U-Net structure splits encoder_indices and decoder_indices at the
+midpoint of the expanded loop list. Currently NL=2 means the loop
+band {3,4,5} is repeated 3 times across the *combined* list. The
+encoder visits some of those repetitions, the decoder visits the
+rest. We could break the symmetry deliberately.
+
+**V1. Encoder-deeper, decoder-canonical.** Build LOOP_PATTERN such
+that the encoder side has 4 visits to {3,4,5} but the decoder side has
+only 2-3. Tests whether the iterative refinement happens during the
+encoder-side or decoder-side processing.
+- For example: pre [0,1,2] + body [3,4,5,3,4,5,3,4,5,3,4,5,5,6] + post [7..10]
+  → encoder visits {3,4,5} four times, decoder visits twice.
+- Cleanest specification: tweak the body string so the midpoint split
+  produces asymmetric counts.
+- **Hypothesis:** if encoder-side recurrence dominates, V1 wins. If
+  decoder-side, V1 loses. Either way, informative.
+
+**V2. Decoder-deeper, encoder-canonical.** Inverse of V1. Asymmetric
+in the other direction.
+
+**V3. Joint sweep V1+V2.** Run both as the natural pair-test.
+
+### Cluster W — Post-quantization recurrence variants
+
+Spec 080/081/082 measure pre-quant val_bpb. The leaderboard cares
+about post-quant val_bpb (pre-quant is just a proxy). Quantization
+error is an additional source that may interact with deeper
+recurrence non-linearly:
+
+- Each loop pass amplifies whatever quant error is present in the
+  weight banks. Trained NL=2 model's quant calibration was tuned for
+  3 visits per loop layer; running NL=3 means each weight is used 4
+  times → quant error compounds 4/3× more.
+- Or: extra passes "average out" quant noise (de-noising effect).
+  Unclear which dominates.
+
+**W1. Spec 080 with GPTQ ON.** Same as 080 but enable
+`GPTQ_CALIBRATION_BATCHES=16` and run the full quant pipeline. Tests
+whether the pre-quant gain (if any) survives quantization.
+- **Subsumes part of P1** (TTT × NL=3) which is being frozen this wake.
+- W1 is *quant-only* without TTT; P1 is *TTT-only* without recompute.
+  The full leaderboard test (TTT + GPTQ) is W2-style.
+
+**W2. Spec 080 with full submission pipeline (TTT + GPTQ).** This is
+the actual leaderboard-relevant measurement. After running, you have
+a real submittable artifact at NL=3 inference.
+- **Cost:** ~$3-5 (full eval pipeline including TTT phases).
+- **Hypothesis:** if pre-quant gain survives both TTT and GPTQ, this
+  is a leaderboard-promotable result.
+- **Subsumes both P1 and W1.**
+
+### TTT compositional risks (the reason 083 needs careful framing)
+
+When freezing P1 (083 = TTT-on with NL=3 eq), there are two distinct
+sub-questions:
+
+- **Q1: Does TTT operate over the deeper recurrence?** TTT updates LoRA
+  weights based on prefix tokens. If the recurrence depth changes
+  during TTT (eval at NL=3 instead of NL=2), the LoRA gradients are
+  computed against the deeper-recurrence forward — meaning TTT learns
+  to adapt the deeper-recurrence model. Should be fine.
+
+- **Q2: Are TTT phases compatible with longer iteration counts?**
+  PHASED_TTT runs 3 phases. Each phase: TTT update, then score next
+  chunk. If LOOP_PATTERN extends the recurrence, all phases see it.
+  Each phase scores against the deeper graph — same compile burst at
+  first phase, then cached.
+
+Both should be safe under the always-tensor / no-mid-run-recompile
+constraint, IF the LOOP_PATTERN is set BEFORE the model is constructed
+(env var read at __init__). Setting it via env var in the launch
+script does exactly this.
+
+### Decisions for W4
+
+- **Spec 083 = P1 = TTT-on × NL=3 eq.** Real leaderboard-relevant
+  test. Eval-only on 060A checkpoint, config-only. **FREEZE THIS WAKE.**
+- **W2 (full pipeline, 080+TTT+GPTQ) candidate for W5.**
+- **V1/V2 (encoder/decoder NL skew)** is interesting and config-only —
+  good W5 candidate too.
+- **U1 (logit-blend ensemble)** needs careful eval-time wallclock
+  accounting — defer until we know if there's headroom for 2× eval
+  cost.
 
