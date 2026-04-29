@@ -1093,53 +1093,22 @@ class MLP(nn.Module):
 
 
 def anderson_step(x_history, f_history, beta, reg):
-    """Spec 111 — Anderson acceleration step (compile-friendly).
+    """Spec 111-baked — Anderson with α frozen to values measured on trained 111.
 
-    Closed-form solve for M ∈ {2, 3} (history+1). Avoids torch.linalg.solve
-    (incompatible with fullgraph=True). Pure fp32 scalar math on Gram entries;
-    final blend in model dtype.
+    α values from forward-pass inspection of the SHA 44799f2 trained model:
+      M=2 (pass 1): α ≈ [+0.57, +0.43]
+      M=3 (pass 2): α ≈ [+0.55, -0.67, +1.12]    (extrapolation regime)
 
-    α* = argmin ‖Σ α_i · g_i‖²   s.t.   Σ α_i = 1
-       = G^-1 1 / (1^T G^-1 1)
+    Trades input-adaptive LS-α for static mixing. Eliminates the Gram matmul
+    and closed-form solve entirely → throughput parity with canonical NL=2.
+    `beta` and `reg` kept in signature for compatibility but unused.
     """
     M = len(x_history)
-    # Build Gram matrix via one small bf16 matmul instead of 6 fused reductions
-    # (latter triggered Inductor OOM in shared memory: 458KB > H100's 232KB).
-    # Matmul template handles [M, N] @ [N, M] → [M, M] cleanly.
-    R = torch.stack([(f - x).reshape(-1) for x, f in zip(x_history, f_history)], dim=0)
-    G = R @ R.transpose(0, 1)  # [M, M] bf16
     if M == 2:
-        a = G[0, 0] + reg
-        b = G[0, 1]
-        c = G[1, 1] + reg
-        u0 = c - b
-        u1 = a - b
-        s = u0 + u1
-        alpha = torch.stack([u0 / s, u1 / s], dim=0)
+        return 0.57 * f_history[0] + 0.43 * f_history[1]
     else:
-        # M == 3 (history=2 default after pass 2)
-        a = G[0, 0] + reg
-        b = G[0, 1]
-        c = G[0, 2]
-        d = G[1, 1] + reg
-        e = G[1, 2]
-        f_ = G[2, 2] + reg
-        # Cofactors of symmetric 3x3 (G^-1 @ 1, ignoring det since it cancels)
-        u0 = (d * f_ - e * e) + (c * e - b * f_) + (b * e - c * d)
-        u1 = (c * e - b * f_) + (a * f_ - c * c) + (b * c - a * e)
-        u2 = (b * e - c * d) + (b * c - a * e) + (a * d - b * b)
-        s = u0 + u1 + u2
-        alpha = torch.stack([u0 / s, u1 / s, u2 / s], dim=0)
-    # Explicit sum over M instead of stack-then-reduce. Stacking [M,B,T,d] and
-    # broadcast-mul created a fused Triton kernel needing >232KB shared memory.
-    # Pairwise additions tile cleanly.
-    if M == 2:
-        f_blend = alpha[0] * f_history[0] + alpha[1] * f_history[1]
-        x_blend = alpha[0] * x_history[0] + alpha[1] * x_history[1]
-    else:
-        f_blend = alpha[0] * f_history[0] + alpha[1] * f_history[1] + alpha[2] * f_history[2]
-        x_blend = alpha[0] * x_history[0] + alpha[1] * x_history[1] + alpha[2] * x_history[2]
-    return beta * f_blend + (1.0 - beta) * x_blend
+        # M == 3 — extrapolation: middle iterate subtracted, latest amplified.
+        return 0.55 * f_history[0] + (-0.67) * f_history[1] + 1.12 * f_history[2]
 
 
 class Block(nn.Module):
