@@ -68,6 +68,7 @@ extract extra recurrence value**.
 - **W5 (2026-04-29 +50min):** R1 framing correction; clusters X/Y/Z (warmup-skip eval, prefix-only deeper recurrence, mixed-precision recurrence); spec 084 frozen (TTT-on × NL=4 eq)
 - **W6 (2026-04-29 +60min):** V1/V2 design challenge (U-Net midpoint constraint); clusters AA/BB/CC (matched-compute pattern shape, TTT-prefix length sweep, hot-pass conditioning); spec 085 frozen (matched-compute broad pattern eval on 060A)
 - **W7 (2026-04-29 +70min):** clusters DD/EE/FF (LR schedule × deeper-NL interactions, rolling-window eval, low-rank residual stream); spec 086 frozen (TTT-on × broad-pattern, leaderboard-relevant)
+- **W8 (2026-04-29 +80min):** clusters GG/HH/II (band-position shifts, TTT batch size sensitivity, gradient-aligned recurrence); spec 087 frozen (matched-compute stepped pattern eval, 073-shape sibling)
 - (next wake will append below)
 
 ---
@@ -1047,4 +1048,81 @@ Does the recurrence iterate better in the projected space?
   modest implementation difficulty. Defer.
 - **DD cluster collapses** — LR schedule isn't relevant for eval-only
   specs.
+
+---
+
+## W8 — band-position shifts, TTT-batch sensitivity, gradient alignment
+
+### Cluster GG — Band-position shifts (matched compute, shifted location)
+
+Sibling axis to AA (matched compute, different shape). GG asks: what
+if we keep the *shape* (3 layers, NL=2 each = 9 visits) but shift
+the *position* of the band?
+
+**GG1. Loop band {2,3,4} (one layer earlier).** body =
+"2,3,4,2,3,4,2,3,4,5,6,7" — 12 visits. pre [0,1] + post [8,9,10]
+= 17 total. Layer 2 visited 4× (3 in body + 1 in pre — wait, with
+pre = range(min(body)) = range(2) = [0,1], layer 2 not in pre).
+Visits: {0:1, 1:1, 2:3, 3:3, 4:3, 5:1, 6:1, 7:1, 8:1, 9:1, 10:1}
+= 17 ✓. Tests "is the loop band {3,4,5} optimal positionally, or
+would {2,3,4} also work?"
+- Memory has prior negative result on this from #1726 (heavy reuse
+  {2..7} catastrophic; layer band shifts harmful). But #1726 didn't
+  test {2,3,4} specifically with NL=2.
+- **Compile audit:** same as 080. Eval-only LOOP_PATTERN, one new
+  graph variant, no mid-run recompile.
+- **Spec candidate.**
+
+**GG2. Loop band {4,5,6} (one layer later).** body =
+"4,5,6,4,5,6,4,5,6,7" — 10 visits. pre [0,1,2,3] + post [7,8,9,10]
+= 18 total. Hmm 18 not 17. Adjust: body = "4,5,6,4,5,6,4,5,6"
+= 9, pre [0..3] + post [7..10] = 17 ✓. Visits: {0:1,1:1,2:1,3:1,
+4:3,5:3,6:3,7:1,8:1,9:1,10:1}. Tests "later band positioning."
+
+**GG3. Joint sweep GG1+GG2+canonical.** Three-point band-position
+test at fixed compute. Each spec ~$1, total $3.
+
+### Cluster HH — TTT batch size × deeper-NL interaction
+
+The TTT phases use `TTT_BATCH_SIZE=64` and `TTT_CHUNK_SIZE=48`. With
+deeper recurrence at eval, each TTT chunk takes longer to score
+(more layer-passes per chunk). The TTT optimizer (Adam over LoRA)
+sees fewer chunks per wall-second.
+
+**HH1. Smaller TTT batch with deeper recurrence (082 + smaller TTT_BATCH_SIZE).**
+Trade fewer chunks for finer-grained TTT updates. Tests whether the
+TTT LoRA benefits from higher-frequency / lower-batch updates when
+the underlying scoring is more expensive.
+- Config-only spec; modifies TTT_BATCH_SIZE in addition to LOOP_PATTERN.
+- **Compile audit:** TTT_BATCH_SIZE doesn't change the model graph;
+  it changes the data loading. No new graph variant. Safe.
+
+**HH2. TTT chunk size sweep × NL.** TTT_CHUNK_SIZE=48 was tuned at
+NL=2. At NL=3 maybe larger chunks (96) work better (the deeper
+recurrence already saw enough context). Or smaller (24) for finer
+updates. Sweep candidate; multiple specs.
+
+### Cluster II — Gradient-alignment recurrence (training-time, code change)
+
+Speculative: during training, after the loop band's k-th pass, compute
+the gradient of pass-k's output with respect to pass-0's output
+(within the same forward). Add a regularizer that aligns these
+gradients across passes — ensuring later-pass updates point in the
+same direction as earlier passes. Smooths the iteration.
+
+- **Engineering:** requires `torch.autograd.grad` *during* forward.
+  Forces graph break in compile. **Skip for homestretch.**
+- Documenting for completeness; not a near-term spec.
+
+### Decisions for W8
+
+- **Spec 087 = matched-compute stepped pattern eval (073-shape).**
+  Direct sibling to 085 — different matched-compute shape. Together
+  with 085 builds the shape sweep at fixed compute. Config-only on
+  `e7ccda2`. **FREEZE THIS WAKE.**
+- **GG cluster (band-position shifts)** good for W9-W10 if we have
+  more wakes. Each is config-only.
+- **HH (TTT batch size sensitivity)** is config-only and complementary
+  to the (compute, shape) grid; defer to W9.
+- **II demoted** — autograd-in-forward isn't compile-safe.
 
