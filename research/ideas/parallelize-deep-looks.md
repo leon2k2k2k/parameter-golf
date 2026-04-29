@@ -77,6 +77,7 @@ extract extra recurrence value**.
 - **W14 (2026-04-29 +140min):** clusters YY/ZZ/AAA (TTT-LR sweep, eval-time SmearGate alteration, repeated-context test); spec 093 frozen (TTT-on band {4,5,6}, completes position × TTT grid)
 - **W15 (2026-04-29 +150min):** clusters BBB/CCC/DDD (TTT-momentum sensitivity, eval-time logit softcap variant, full-attention vs XSA on loop layers); spec 094 frozen (TTT_LORA_LR=5e-5, smaller-LR sweep)
 - **W16 (2026-04-29 +160min):** clusters EEE/FFF/GGG (XSA on/off subset of layers, validation-set sub-sampling for fast iteration, eval-time mixed-precision); spec 095 frozen (TTT_LORA_LR=2e-4, larger-LR sweep, completes LR direction)
+- **W17 (2026-04-29 +170min):** clusters HHH/III/JJJ (TTT-momentum activation, prefix-doc count sweep, 1-shot TTT post-hoc); spec 096 frozen (TTT_BETA1=0.9, novel TTT-momentum axis)
 - (next wake will append below)
 
 ---
@@ -1698,4 +1699,60 @@ precision in the iterative refinement.
   **FREEZE THIS WAKE.**
 - **EEE / FFF / GGG clusters** all require code changes or have
   unclear value. Defer.
+
+---
+
+## W17 — TTT momentum activation + prefix-doc sweep + 1-shot TTT-post-hoc
+
+### Cluster HHH — TTT-momentum activation (BBB1 reframe)
+
+`TTT_BETA1=0.0` in 060A is unusual — Adam normally uses β1=0.9 to
+dampen gradient noise via momentum. β1=0 means each LoRA update
+is purely the (gradient × LR) signal, no smoothing.
+
+**HHH1. TTT_BETA1=0.9 at canonical.** Add momentum back. Tests
+whether 060A's β1=0 was a tuned choice or a stripped-down default.
+- Config-only spec; Adam state lives Python-side.
+- Cost ~$3-4 (full pipeline eval).
+- **Spec candidate: 096.** **FREEZE THIS WAKE.**
+
+**HHH2. TTT_BETA1=0.5 (intermediate).** If β1=0.9 hurts but β1=0.0
+is also suboptimal, an intermediate value may be best. Defer to
+followup if HHH1 is suggestive.
+
+### Cluster III — Prefix-doc count sweep
+
+`PHASED_TTT_PREFIX_DOCS=2500` controls how many prefix documents the
+TTT optimizer adapts on per phase. More docs = more adaptation data
+per phase but proportionally more time per phase.
+
+**III1. PHASED_TTT_PREFIX_DOCS=1500 (smaller, ~60% of canonical).**
+Less adaptation per phase; faster phases. Trade-off: less context per
+LoRA step vs more "phases-per-second" effective.
+- Config-only.
+- Already partially explored in spec 060L if it exists; verify.
+
+**III2. PHASED_TTT_PREFIX_DOCS=3500 (larger).** More adaptation per
+phase. Risk: phases run longer, may push past eval budget.
+
+### Cluster JJJ — 1-shot TTT-post-hoc on top of canonical
+
+The 060A model has TTT applied during eval. A novel idea: BEFORE
+running TTT, run a lightweight one-shot adaptation step that warms
+the LoRA on a small global pre-prefix.
+
+**JJJ1. Add a single "warmup" TTT step with smaller LR before phase 1.**
+- Code change: ~30 LOC in eval pipeline. Extra Adam step on a
+  pre-pre-prefix.
+- Compile audit: extra forward_ttt call, same compiled graph, called
+  once more. No new graph variant.
+- Defer for code change.
+
+### Decisions for W17
+
+- **Spec 096 = HHH1 = TTT_BETA1=0.9 at canonical.** Novel axis test
+  (TTT momentum). Config-only on `e7ccda2`. **FREEZE THIS WAKE.**
+- **III1 (smaller prefix)** is config-only and complementary; spec
+  candidate W18.
+- **JJJ (1-shot warmup TTT)** requires a code change; defer.
 
