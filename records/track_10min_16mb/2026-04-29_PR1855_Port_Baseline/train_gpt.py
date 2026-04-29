@@ -1092,50 +1092,47 @@ class MLP(nn.Module):
         return F.linear(hidden, down_w.to(x.dtype))
 
 
-@torch.compiler.disable
 def anderson_step(x_history, f_history, beta, reg):
-    """Spec 111 — Anderson acceleration step.
+    """Spec 111 — Anderson acceleration step (compile-friendly).
 
-    Given a list of recent inputs `x_history` and their f-applications
-    `f_history`, compute the Anderson-mixed next iterate.
+    Closed-form solve for M ∈ {2, 3} (history+1). Avoids torch.linalg.solve
+    (incompatible with fullgraph=True). Pure fp32 scalar math on Gram entries;
+    final blend in model dtype.
 
-    Math:
-        residuals g_i = f_i - x_i              # i=0..m
-        Solve α* = argmin ‖Σ α_i · g_i‖²    s.t. Σ α_i = 1
-        Update: x_next = β·Σ α_i·f_i + (1-β)·Σ α_i·x_i
-
-    Implementation: stack residuals along new dim, compute (m+1)x(m+1) Gram
-    matrix, add regularization, solve constrained LS via Lagrange multiplier
-    on the sum-to-one constraint.
-
-    Args:
-        x_history, f_history: lists of length M+1, each tensor [B, T, d].
-        beta: scalar mixing factor.
-        reg: small float for diagonal regularization (LS stability).
-
-    Returns:
-        x_next: tensor [B, T, d].
+    α* = argmin ‖Σ α_i · g_i‖²   s.t.   Σ α_i = 1
+       = G^-1 1 / (1^T G^-1 1)
     """
-    # Compute residuals
-    residuals = [f - x for f, x in zip(f_history, x_history)]
-    # Stack as [M+1, B, T, d]
-    R = torch.stack(residuals, dim=0)
-    M = R.shape[0]
-    # Gram matrix in fp32 for stability: G[i,j] = <r_i, r_j>
-    R_flat = R.reshape(M, -1).to(torch.float32)
-    G = R_flat @ R_flat.transpose(0, 1)
-    # Regularize: G += reg * I
-    G = G + reg * torch.eye(M, device=G.device, dtype=G.dtype)
-    # Solve constrained LS (Σ α_i = 1) via:
-    #   α = G^-1 1 / (1^T G^-1 1)
-    ones = torch.ones(M, device=G.device, dtype=G.dtype)
-    # Use linalg.solve for numerical stability
-    G_inv_1 = torch.linalg.solve(G, ones)
-    alpha = G_inv_1 / G_inv_1.sum()
-    alpha = alpha.to(R.dtype)  # back to model dtype
-    # Stack history tensors and apply weights
-    F_stack = torch.stack(f_history, dim=0)  # [M, B, T, d]
-    X_stack = torch.stack(x_history, dim=0)  # [M, B, T, d]
+    M = len(x_history)
+    orig_dtype = x_history[0].dtype
+    # Build Gram matrix entrywise in fp32 (no big matmul; M is tiny).
+    g_flat = [(f - x).reshape(-1).to(torch.float32) for x, f in zip(x_history, f_history)]
+    if M == 2:
+        a = (g_flat[0] * g_flat[0]).sum() + reg
+        b = (g_flat[0] * g_flat[1]).sum()
+        c = (g_flat[1] * g_flat[1]).sum() + reg
+        u0 = c - b
+        u1 = a - b
+        s = u0 + u1
+        a0 = u0 / s
+        a1 = u1 / s
+        alpha = torch.stack([a0, a1], dim=0).to(orig_dtype)
+    else:
+        # M == 3 (history=2 default after pass 2)
+        a = (g_flat[0] * g_flat[0]).sum() + reg
+        b = (g_flat[0] * g_flat[1]).sum()
+        c = (g_flat[0] * g_flat[2]).sum()
+        d = (g_flat[1] * g_flat[1]).sum() + reg
+        e = (g_flat[1] * g_flat[2]).sum()
+        f_ = (g_flat[2] * g_flat[2]).sum() + reg
+        # Cofactors of symmetric 3x3 (G^-1 @ 1, ignoring det since it cancels)
+        u0 = (d * f_ - e * e) + (c * e - b * f_) + (b * e - c * d)
+        u1 = (c * e - b * f_) + (a * f_ - c * c) + (b * c - a * e)
+        u2 = (b * e - c * d) + (b * c - a * e) + (a * d - b * b)
+        s = u0 + u1 + u2
+        alpha = torch.stack([u0 / s, u1 / s, u2 / s], dim=0).to(orig_dtype)
+    # Apply weights to history tensors
+    F_stack = torch.stack(f_history, dim=0)
+    X_stack = torch.stack(x_history, dim=0)
     alpha_view = alpha.view(M, 1, 1, 1)
     f_blend = (alpha_view * F_stack).sum(dim=0)
     x_blend = (alpha_view * X_stack).sum(dim=0)
