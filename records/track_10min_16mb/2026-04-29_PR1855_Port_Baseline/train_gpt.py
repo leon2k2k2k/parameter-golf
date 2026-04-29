@@ -261,6 +261,16 @@ class Hyperparameters:
     loop_start = int(os.environ.get("LOOP_START", 3))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
+    # Spec 111 — Anderson acceleration on the recurrence loop.
+    # Replaces Markov-chain iteration (x_{k+1} = f(x_k)) with Anderson update
+    # using m=ANDERSON_HISTORY prior residuals via least-squares mixing.
+    # Convergence: super-linear on smooth contractions (Anderson 1965; DEQ
+    # literature). Stateful residual buffer across passes; bounded graph
+    # variants per pass position in cyclic buffer.
+    anderson_enabled = bool(int(os.environ.get("ANDERSON_ENABLED", "0")))
+    anderson_history = int(os.environ.get("ANDERSON_HISTORY", "2"))
+    anderson_beta = float(os.environ.get("ANDERSON_BETA", "1.0"))
+    anderson_regularization = float(os.environ.get("ANDERSON_REGULARIZATION", "1e-6"))
     parallel_start_layer = int(os.environ.get("PARALLEL_START_LAYER", 8))
     parallel_final_lane = os.environ.get("PARALLEL_FINAL_LANE", "mean")
     min_lr = float(os.environ.get("MIN_LR", 0.0))
@@ -1082,6 +1092,55 @@ class MLP(nn.Module):
         return F.linear(hidden, down_w.to(x.dtype))
 
 
+def anderson_step(x_history, f_history, beta, reg):
+    """Spec 111 — Anderson acceleration step.
+
+    Given a list of recent inputs `x_history` and their f-applications
+    `f_history`, compute the Anderson-mixed next iterate.
+
+    Math:
+        residuals g_i = f_i - x_i              # i=0..m
+        Solve α* = argmin ‖Σ α_i · g_i‖²    s.t. Σ α_i = 1
+        Update: x_next = β·Σ α_i·f_i + (1-β)·Σ α_i·x_i
+
+    Implementation: stack residuals along new dim, compute (m+1)x(m+1) Gram
+    matrix, add regularization, solve constrained LS via Lagrange multiplier
+    on the sum-to-one constraint.
+
+    Args:
+        x_history, f_history: lists of length M+1, each tensor [B, T, d].
+        beta: scalar mixing factor.
+        reg: small float for diagonal regularization (LS stability).
+
+    Returns:
+        x_next: tensor [B, T, d].
+    """
+    # Compute residuals
+    residuals = [f - x for f, x in zip(f_history, x_history)]
+    # Stack as [M+1, B, T, d]
+    R = torch.stack(residuals, dim=0)
+    M = R.shape[0]
+    # Gram matrix in fp32 for stability: G[i,j] = <r_i, r_j>
+    R_flat = R.reshape(M, -1).to(torch.float32)
+    G = R_flat @ R_flat.transpose(0, 1)
+    # Regularize: G += reg * I
+    G = G + reg * torch.eye(M, device=G.device, dtype=G.dtype)
+    # Solve constrained LS (Σ α_i = 1) via:
+    #   α = G^-1 1 / (1^T G^-1 1)
+    ones = torch.ones(M, device=G.device, dtype=G.dtype)
+    # Use linalg.solve for numerical stability
+    G_inv_1 = torch.linalg.solve(G, ones)
+    alpha = G_inv_1 / G_inv_1.sum()
+    alpha = alpha.to(R.dtype)  # back to model dtype
+    # Stack history tensors and apply weights
+    F_stack = torch.stack(f_history, dim=0)  # [M, B, T, d]
+    X_stack = torch.stack(x_history, dim=0)  # [M, B, T, d]
+    alpha_view = alpha.view(M, 1, 1, 1)
+    f_blend = (alpha_view * F_stack).sum(dim=0)
+    x_blend = (alpha_view * X_stack).sum(dim=0)
+    return beta * f_blend + (1.0 - beta) * x_blend
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -1206,7 +1265,19 @@ class GPT(nn.Module):
             for i in range(max(0, h.num_layers - h.xsa_last_n), h.num_layers):
                 self.blocks[i].attn.use_xsa = True
         self.looping_active = False
-        if h.num_loops > 0:
+        # Spec 111 — Anderson takes precedence over canonical loop expansion.
+        # encoder = pre-loop layers, decoder = post-loop layers; the loop band
+        # runs as an Anderson-accelerated block inserted between them.
+        self.anderson_enabled = bool(h.anderson_enabled)
+        self.anderson_history = int(h.anderson_history)
+        self.anderson_beta = float(h.anderson_beta)
+        self.anderson_regularization = float(h.anderson_regularization)
+        self.anderson_num_passes = int(h.num_loops + 1)  # how many f-applications
+        if self.anderson_enabled:
+            self.encoder_indices = list(range(h.loop_start))
+            self.decoder_indices = list(range(h.loop_end + 1, h.num_layers))
+            self.loop_band_layer_indices = list(range(h.loop_start, h.loop_end + 1))
+        elif h.num_loops > 0:
             loop_seg = list(range(h.loop_start, h.loop_end + 1))
             all_indices = list(range(h.loop_start))
             for _ in range(h.num_loops + 1):
@@ -1215,9 +1286,11 @@ class GPT(nn.Module):
             num_enc = len(all_indices) // 2
             self.encoder_indices = all_indices[:num_enc]
             self.decoder_indices = all_indices[num_enc:]
+            self.loop_band_layer_indices = []
         else:
             self.encoder_indices = list(range(self.num_encoder_layers))
             self.decoder_indices = list(range(self.num_encoder_layers, h.num_layers))
+            self.loop_band_layer_indices = []
         self.num_skip_weights = min(
             len(self.encoder_indices), len(self.decoder_indices)
         )
@@ -1355,6 +1428,37 @@ class GPT(nn.Module):
             q_w, k_w, v_w, out_w, up_w, down_w = self._bank_weights(i)
             x = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, down_w, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
             skips.append(x)
+        # Spec 111 — Anderson-accelerated recurrence loop band, inserted between
+        # encoder and decoder. Active only when looping_active.
+        if self.anderson_enabled and self.looping_active:
+            x_history = []
+            f_history = []
+            x_curr = x
+            for k in range(self.anderson_num_passes):
+                # Apply f: one trip through the loop band layers.
+                f_curr = x_curr
+                for i in self.loop_band_layer_indices:
+                    q_w, k_w_, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                    f_curr = self.blocks[i](
+                        f_curr, x0, q_w, k_w_, v_w, out_w, up_w, down_w,
+                        cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
+                    )
+                x_history.append(x_curr)
+                f_history.append(f_curr)
+                # Truncate history to last (m+1) entries.
+                if len(x_history) > self.anderson_history + 1:
+                    x_history = x_history[-(self.anderson_history + 1):]
+                    f_history = f_history[-(self.anderson_history + 1):]
+                # Compute next iterate.
+                if k == 0 or len(x_history) < 2:
+                    # First pass: vanilla (no history to mix).
+                    x_curr = f_curr
+                else:
+                    x_curr = anderson_step(
+                        x_history, f_history,
+                        self.anderson_beta, self.anderson_regularization,
+                    )
+            x = x_curr
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
@@ -1458,6 +1562,33 @@ class GPT(nn.Module):
             x = self._block_with_lora(self.blocks[i], x, x0, lora, slot, q_w, k_w, v_w, out_w, up_w, down_w)
             slot += 1
             skips.append(x)
+        # Spec 111 — Anderson loop band on TTT path.
+        if self.anderson_enabled and self.looping_active:
+            x_history = []
+            f_history = []
+            x_curr = x
+            for k in range(self.anderson_num_passes):
+                f_curr = x_curr
+                for i in self.loop_band_layer_indices:
+                    q_w, k_w_, v_w, out_w, up_w, down_w = self._bank_weights(i)
+                    f_curr = self._block_with_lora(
+                        self.blocks[i], f_curr, x0, lora, slot,
+                        q_w, k_w_, v_w, out_w, up_w, down_w,
+                    )
+                    slot += 1
+                x_history.append(x_curr)
+                f_history.append(f_curr)
+                if len(x_history) > self.anderson_history + 1:
+                    x_history = x_history[-(self.anderson_history + 1):]
+                    f_history = f_history[-(self.anderson_history + 1):]
+                if k == 0 or len(x_history) < 2:
+                    x_curr = f_curr
+                else:
+                    x_curr = anderson_step(
+                        x_history, f_history,
+                        self.anderson_beta, self.anderson_regularization,
+                    )
+            x = x_curr
         psl = self.parallel_start_layer
         lane0 = None
         lane1 = None
