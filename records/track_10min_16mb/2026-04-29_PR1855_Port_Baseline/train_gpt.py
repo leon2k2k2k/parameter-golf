@@ -3477,6 +3477,46 @@ def train_model(h, device, val_data):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     step = 0
+    # Spec 064b — torch.profiler chrome-trace harness (rank-0 only).
+    # Schedule(skip_first=78, wait=1, warmup=1, active=8, repeat=2) →
+    # window 1 ≈ steps 80-87 (pre-loop), window 2 ≈ steps 90-97
+    # (post-loop) given ENABLE_LOOPING_AT=0.35 × ITERATIONS=250 ⇒
+    # loop activates near step 88. Identity-cost when disabled.
+    _profile_chrome_trace = os.environ.get("PROFILE_CHROME_TRACE", "0") == "1"
+    _profile_dir = os.environ.get(
+        "PROFILE_OUTPUT_DIR", os.environ.get("ARTIFACT_DIR", ".")
+    )
+    _profiler = None
+    if _profile_chrome_trace and h.rank == 0:
+        os.makedirs(_profile_dir, exist_ok=True)
+        def _profile_trace_handler(p):
+            fname = os.path.join(
+                _profile_dir, f"chrome_trace_step_{p.step_num}.json"
+            )
+            p.export_chrome_trace(fname)
+            try:
+                log(f"profiler:exported step={p.step_num} file={fname}")
+            except Exception:
+                pass
+        _profiler = torch.profiler.profile(
+            schedule=torch.profiler.schedule(
+                skip_first=int(os.environ.get("PROFILE_SKIP_FIRST", "78")),
+                wait=1,
+                warmup=1,
+                active=int(os.environ.get("PROFILE_ACTIVE_STEPS", "8")),
+                repeat=int(os.environ.get("PROFILE_REPEAT", "2")),
+            ),
+            on_trace_ready=_profile_trace_handler,
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=False,
+            with_stack=False,
+            profile_memory=False,
+        )
+        _profiler.start()
+        log("profiler:started torch.profiler chrome-trace harness")
     while True:
         last_step = (
             step == h.iterations
@@ -3520,6 +3560,8 @@ def train_model(h, device, val_data):
             for ema_t, t in _ema_pairs:
                 ema_t.mul_(ema_decay).add_(t.detach(), alpha=1.0 - ema_decay)
         step += 1
+        if _profiler is not None:
+            _profiler.step()
         approx_training_time_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
         should_log_train = h.train_log_every > 0 and (
             step <= 5 or step % h.train_log_every == 0 or stop_after_step is not None
@@ -3538,6 +3580,12 @@ def train_model(h, device, val_data):
             reached_cap = bool(reached_cap_tensor.item())
         if stop_after_step is None and reached_cap:
             stop_after_step = step
+    if _profiler is not None:
+        try:
+            _profiler.stop()
+            log("profiler:stopped")
+        except Exception as exc:
+            log(f"profiler:stop_error {exc!r}")
     log(
         f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB"
     )
