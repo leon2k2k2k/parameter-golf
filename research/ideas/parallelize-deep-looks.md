@@ -81,6 +81,7 @@ extract extra recurrence value**.
 - **W18 (2026-04-29 +180min):** clusters KKK/LLL/MMM (TTT batch granularity, TTT chunk size effect, TTT_BETA2 variant); spec 097 frozen (TTT_BATCH_SIZE=32, TTT-batch-granularity axis)
 - **W19 (2026-04-29 +190min):** clusters NNN/OOO/PPP (TTT-WD effect, eval-time GPTQ-only test, TTT-LR-warmup ramp); spec 098 frozen (TTT_BETA2=0.999, completes Adam β-mapping)
 - **W20 (2026-04-29 +200min):** clusters QQQ/RRR/SSS (TTT vs no-TTT calibration, GPTQ-without-TTT pre-quant comparison, single-phase TTT diagnostic); spec 099 frozen (TTT-disabled, calibrates TTT lever weight)
+- **W21 (2026-04-29 +210min):** clusters TTT/UUU/VVV (compound 080+091, GPTQ_RESERVE budget sweep, eval-time KV-rope-base scaling); spec 100 frozen (compound NL=3 eq + 4 TTT phases — first compound spec for leaderboard wins)
 - (next wake will append below)
 
 ---
@@ -1934,4 +1935,62 @@ individually, this composes.
   spec candidate W21.
 - **SSS1 (compound TTT × recurrence)** is config-only and
   potentially leaderboard-relevant; W22 candidate.
+
+---
+
+## W21 — First compound specs (cross-axis combinations)
+
+After 20 single-axis specs (080-099), the natural next phase is to
+test combinations of winning levers. Specs 100+ start the compound
+phase.
+
+### Cluster TTT — Compound recurrence-extension + TTT-extension
+
+The cleanest compound: combine 091's TTT-phases-up with 080's
+NL=3-eq deeper recurrence. Both spend the eval-time-headroom on
+different levers.
+
+**TTT1. NL=3 eq + PHASED_TTT_NUM_PHASES=4.** Spec 100.
+- If both 080 and 091 win individually, this should win by more.
+- If they compose destructively (compete for the same eval-time
+  headroom), 100 may be worse than either.
+- Config-only on `e7ccda2`. **FREEZE THIS WAKE.**
+
+**TTT2. NL=4 eq + 4 TTT phases.** Pushes further. Cost ~$5+. Defer
+unless 100 wins.
+
+**TTT3. NL=3 eq + smaller TTT_LORA_LR (5e-5).** Combines 080 and 094.
+If 094 wins (smaller LR helps with deeper recurrence), this should
+compose.
+
+### Cluster UUU — GPTQ_RESERVE_SECONDS budget sweep
+
+`GPTQ_RESERVE_SECONDS=4` is the canonical reserve. Smaller (2) gives
+GPTQ more time but risks running out before quantization completes.
+Larger (8) has more buffer at the cost of fewer eval steps.
+
+**UUU1. GPTQ_RESERVE_SECONDS=2 at canonical.** Tests whether the
+canonical reserve is conservative.
+
+**UUU2. GPTQ_RESERVE_SECONDS=8.** Tests larger buffer.
+
+These are config-only and orthogonal. Diagnostic value moderate.
+
+### Cluster VVV — Eval-time RoPE base scaling (speculative)
+
+`ROPE_BASE=10000` is the canonical RoPE base frequency. At eval, we
+could try a different base (e.g., 100000) for longer-context
+capability — though our eval seq_len is the trained 2048.
+
+**VVV1. ROPE_BASE=100000 at eval.** Almost certainly hurts at trained
+seq_len. Diagnostic only. Defer.
+
+### Decisions for W21
+
+- **Spec 100 = TTT1 = compound NL=3 eq + 4 TTT phases.** First
+  compound spec. Tests composition of two single-axis levers.
+  Config-only. **FREEZE THIS WAKE.**
+- **TTT3 (compound NL=3 + smaller LR)** is config-only; W22 candidate.
+- **UUU (GPTQ_RESERVE sweep)** lower priority; defer.
+- **VVV demoted** — almost certainly hurts.
 
