@@ -73,6 +73,7 @@ extract extra recurrence value**.
 - **W10 (2026-04-29 +100min):** clusters MM/NN/OO (eval-only embedding-LR rescale, recurrence + sliding window interaction, multiple residual streams during loop band); spec 089 frozen (band-position shift {2,3,4} eval — novel positional axis)
 - **W11 (2026-04-29 +110min):** clusters PP/QQ/RR (band {4,5,6} symmetry test, training-data-free hotstart from canonical, partial-rank weight slicing); spec 090 frozen (band-position shift {4,5,6} — completes position pair with 089)
 - **W12 (2026-04-29 +120min):** clusters SS/TT/UU (TTT-compute axis isolation, eval-time-deterministic seeding, multi-checkpoint averaging); spec 091 frozen (more TTT phases at canonical — TTT compute axis test)
+- **W13 (2026-04-29 +130min):** clusters VV/WW/XX (position × TTT cell completion, GPTQ calibration sweep, dropout-style residual perturbation); spec 092 frozen (TTT-on band {2,3,4}, leaderboard cell for 089)
 - (next wake will append below)
 
 ---
@@ -1429,4 +1430,72 @@ eval? Speculative; would need both saved which we likely don't have.
   low-priority for science output. Defer.
 - **UU cluster** depends on having multiple checkpoints we likely
   don't have. Drop.
+
+---
+
+## W13 — Position × TTT cell completion + GPTQ-side levers
+
+### Cluster VV — Position-axis × TTT cell completion
+
+089 (band {2,3,4} TTT-off) and 090 (band {4,5,6} TTT-off) cover the
+two position shifts at TTT-off. **TTT-on versions complete the
+position-axis × TTT grid** for leaderboard relevance.
+
+**VV1. TTT-on version of 089 (band {2,3,4} + TTT).** Same pattern as
+089 (`2,3,4,2,3,4,2,3,4,5,6,7`) but with TTT and GPTQ enabled.
+Real leaderboard test of "earlier band shift."
+- **Compile audit:** same as 089 + 083 — forward_logits and
+  forward_ttt each compile once with new index lists, no mid-run
+  recompile. Bank weights unchanged from 060A.
+- **Spec candidate: 092.** **FREEZE THIS WAKE.**
+
+**VV2. TTT-on version of 090 (band {4,5,6} + TTT).** Sibling. May be
+W14's freeze.
+
+### Cluster WW — GPTQ calibration sweep at canonical NL
+
+`GPTQ_CALIBRATION_BATCHES=16` is the default. Memory has spec 046A
+in the `GPTQ_CALIBRATION_BATCHES` sweep family — likely already
+explored at canonical 060A. Verify before duplicating.
+
+**WW1. GPTQ_CALIBRATION_BATCHES=32 at canonical.** More calibration
+data → potentially better quantization → smaller pre→post quant gap.
+- Already may be specced; defer.
+
+### Cluster XX — Eval-time residual perturbation
+
+A novel direction: at eval, *perturb* the residual stream slightly
+between loop passes. Tests whether the trained recurrence is
+robust to noise (it should be — it's already a contraction).
+
+**XX1. Pre-pass dropout at eval.** Apply Bernoulli dropout (p=0.05)
+to the residual at the entry to each loop pass. Forces the model
+to be robust; at high enough p, may improve generalization
+(implicit regularizer at eval).
+- **Eval-time only**, no training change. The trained model never
+  saw dropout, so this is a regularization-at-test technique.
+- **Compile audit:** dropout adds randomness inside the compile
+  region. With `torch.dropout` and a fixed seed, the kernel is
+  deterministic per-step but produces different masks per call. One
+  graph variant. **No mid-run recompile** if seed-controlled.
+- **Code change required:** ~10 LOC in `_forward_hidden` — wrap the
+  block call with a dropout call gated by an env var.
+- **Defer for code change.** Risk: trained models without dropout
+  often degrade with eval-time dropout; this is a "wide-net" test.
+
+**XX2. Quantization-noise-style perturbation at eval.** Add
+deterministic small noise to weights (matching INT6 quant noise
+scale) at eval-time. Tests whether trained weights are robust to
+their own quantization. Speculative; not clearly useful.
+
+### Decisions for W13
+
+- **Spec 092 = VV1 (TTT-on band {2,3,4}).** Direct extension of 089
+  to leaderboard relevance. Config-only on `e7ccda2`. **FREEZE THIS
+  WAKE.**
+- **VV2 (TTT-on band {4,5,6})** for W14.
+- **WW (GPTQ calibration sweep)** likely already specced under 046A;
+  verify before duplicating.
+- **XX (eval-time residual perturbation)** is novel but code-change
+  required; defer.
 
