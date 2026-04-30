@@ -1143,6 +1143,13 @@ class Block(nn.Module):
             sparse_attn_gate_scale=sparse_attn_gate_scale,
         )
         self.mlp = MLP(dim, mlp_mult)
+        # Spec 252: per-block MLP output gate (PR #1941 idiom).
+        # 13 params/layer, gate input = first 12 channels of residual stream.
+        # Init: weight=0 (via _zero_init), bias=+5 -> sigmoid(5)~=0.993 -> identity at start.
+        self.mlp_gate_out = CastedLinear(12, 1, bias=True)
+        self.mlp_gate_out._zero_init = True
+        with torch.no_grad():
+            self.mlp_gate_out.bias.fill_(5.0)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(
@@ -1160,9 +1167,13 @@ class Block(nn.Module):
             max_seqlen=max_seqlen,
         )
         x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
-        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[
-            None, None, :
-        ] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        # Spec 252: MLP output gate. Gate input = first 12 channels of x_out
+        # (the post-attn residual that the MLP itself reads via mlp_norm).
+        mlp_out = self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
+        gate_in = x_out[..., :12].contiguous()
+        gate = torch.sigmoid(self.mlp_gate_out(gate_in))
+        mlp_out = mlp_out * gate
+        x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
         return x_out
 
 class GPT(nn.Module):
@@ -1338,9 +1349,13 @@ class GPT(nn.Module):
         )
         attn_out = block.attn_scale.to(dtype=attn_out.dtype)[None, None, :] * attn_out
         mlp_read = lane1
-        mlp_out = block.mlp_scale.to(dtype=lane1.dtype)[None, None, :] * block.mlp(
-            block.mlp_norm(mlp_read) * block.ln_scale_factor, up_w, down_w
-        )
+        # Spec 252: MLP output gate (parallel path, no LoRA). Gate input = first 12
+        # channels of mlp_read (lane1), matching the residual the MLP itself reads.
+        mlp_raw = block.mlp(block.mlp_norm(mlp_read) * block.ln_scale_factor, up_w, down_w)
+        gate_in = mlp_read[..., :12].contiguous()
+        gate = torch.sigmoid(block.mlp_gate_out(gate_in))
+        mlp_raw = mlp_raw * gate
+        mlp_out = block.mlp_scale.to(dtype=lane1.dtype)[None, None, :] * mlp_raw
         attn_resid = self.parallel_resid_lambdas[block_idx, 0].to(dtype=lane0.dtype)
         attn_post = self.parallel_post_lambdas[block_idx, 0].to(dtype=lane0.dtype)
         mlp_resid = self.parallel_resid_lambdas[block_idx, 1].to(dtype=lane0.dtype)
@@ -1615,6 +1630,12 @@ class GPT(nn.Module):
         mlp_out = block.mlp(mlp_n, up_w, down_w)
         if lora.mlp_loras is not None:
             mlp_out = mlp_out + lora.mlp_loras[slot](mlp_n)
+        # Spec 252: MLP output gate (TTT serial path). Must match Block.forward exactly,
+        # else train (gate applied) and TTT eval (gate skipped) produce mismatched
+        # representations and BPB regression — same risk pattern as sparse_attn_gate.
+        gate_in = x_out[..., :12].contiguous()
+        gate = torch.sigmoid(block.mlp_gate_out(gate_in))
+        mlp_out = mlp_out * gate
         x_out = x_out + block.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * mlp_out
         return x_out
 
@@ -1679,6 +1700,11 @@ class GPT(nn.Module):
         mlp_out = block.mlp(mlp_n, up_w, down_w)
         if lora.mlp_loras is not None:
             mlp_out = mlp_out + lora.mlp_loras[slot](mlp_n)
+        # Spec 252: MLP output gate (TTT parallel path). Gate input = first 12 channels
+        # of mlp_read (lane1), matches the no-LoRA parallel path so TTT/non-TTT agree.
+        gate_in = mlp_read[..., :12].contiguous()
+        gate = torch.sigmoid(block.mlp_gate_out(gate_in))
+        mlp_out = mlp_out * gate
         mlp_out = block.mlp_scale.to(dtype=lane1.dtype)[None, None, :] * mlp_out
         attn_resid = self.parallel_resid_lambdas[block_idx, 0].to(dtype=lane0.dtype)
         attn_post = self.parallel_post_lambdas[block_idx, 0].to(dtype=lane0.dtype)
