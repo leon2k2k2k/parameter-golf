@@ -58,21 +58,29 @@ different hyperparams vs #2014. No firm prior — the run will tell us.
 
 ---
 
-## Restart config — all six fixes vs pilot
+## Restart config — fixes vs pilot
+
+N-gram is turned **entirely off** (`NGRAM_TILT_ENABLED=0`, the default). This eliminates the
+precompute timing concern, the within/word C1 debate, and the `WITHIN_BOOST`/`WORD_BOOST` env
+vars — one flag kills all of it. The ~130s of eval budget recovered goes to TTT instead.
+Trade-off: ~+0.005 bpb vs a working token-order-only tilt, accepted for cleanness.
 
 ```bash
-COMPRESSOR=pergroup                    # was brotli — pergroup (lrzip) required for ≤16 MB
-NGRAM_HINT_PRECOMPUTE_OUTSIDE=0        # was 1 — inside timer required for legality
-MIN_LR=0.1                             # was 0.0 — LR floor critical for final steps
-SKYLIGHT_MUON=0                        # was 1 — match submitted #2118
-EVAL_SEQ_LEN=2560                      # was 2048 — match submitted #2118 eval context
-TTT_EVAL_SEQ_LEN=2560                  # was 2048
-EMBED_BITS=7                           # was 8 — int7 embed; with pergroup gets artifact under 16 MB
+NGRAM_TILT_ENABLED=0        # kill entire n-gram path; no precompute, no timing concern
+COMPRESSOR=pergroup         # was brotli — lrzip required for artifact ≤16 MB
+MIN_LR=0.1                  # was 0.0 — LR floor critical for final steps
+SKYLIGHT_MUON=0             # was 1 — match submitted #2118
+EVAL_SEQ_LEN=2560           # was 2048 — match submitted #2118
+TTT_EVAL_SEQ_LEN=2560       # was 2048
+EMBED_BITS=7                # was 8 — int7+pergroup keeps artifact under 16 MB
 ```
 
-Everything else inherited from the pilot (which was already correct):
-clean HF data, `within_boost=0`, `word_boost=0`, `gated_xsa_enabled=True`,
-`gptq_reserve_seconds=2.0`, `lqer_top_k=1`, `phased_ttt_prefix_docs=1000`.
+Drop from env (moot with NGRAM_TILT_ENABLED=0):
+`NGRAM_HINT_PRECOMPUTE_OUTSIDE`, `WITHIN_BOOST`, `WORD_BOOST`, `TOKEN_BOOST`, `TOKEN_ORDER`, `TOKEN_THRESHOLD`
+
+Everything else from the pilot was already correct:
+clean HF data, `gated_xsa_enabled=True`, `gptq_reserve_seconds=2.0`, `lqer_top_k=1`,
+`phased_ttt_prefix_docs=1000`, `phased_ttt_num_phases=1`.
 
 ---
 
