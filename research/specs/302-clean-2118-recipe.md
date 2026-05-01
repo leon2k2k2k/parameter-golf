@@ -16,16 +16,19 @@ instead of the leaky local-prep dataset, with the config locked to match the sub
 
 ## Pilot seeds — non-submittable
 
-Seeds 42 and 1234 were launched with three incorrect settings vs submitted #2118:
+Seeds 42 and 1234 were launched with six incorrect settings vs submitted #2118:
 
-| Setting | Pilot (wrong) | Target (correct) | Impact |
+| Setting | Pilot (wrong) | Target (correct) | Severity |
 |---|---|---|---|
-| `compressor` | `brotli` | `pergroup` (lrzip) | Artifact 16.95 MB > 16 MB cap — **fatal** |
-| `skylight_muon_enabled` | `True` | `False` | Different training regime |
-| `ngram_hint_precompute_outside` | `True` | `False` | Outside-timer precompute — not legal |
+| `compressor` | `brotli` | `pergroup` (lrzip) | **Fatal** — artifact 16.95 MB > 16 MB cap |
+| `ngram_hint_precompute_outside` | `True` | `False` | **High** — outside-timer precompute not legal |
+| `min_lr` | `0.0` | `0.1` | **High** — LR floor matters a lot for final steps |
+| `skylight_muon_enabled` | `True` | `False` | **High** — different training regime |
+| `eval_seq_len` | `2048` | `2560` | **Medium** — shorter context costs val_bpb |
+| `embed_bits` | `8` | `7` | **Medium** — int8 embed larger; pergroup+int7 gets under 16 MB |
 
 These seeds are finishing eval now. Their val_bpb is logged as a reference signal only.
-**Do not submit.** Full restart required with corrected settings.
+**Do not submit.** Full restart required with all six settings corrected.
 
 ---
 
@@ -55,13 +58,21 @@ different hyperparams vs #2014. No firm prior — the run will tell us.
 
 ---
 
-## Compliance decisions (resolved)
+## Restart config — all six fixes vs pilot
 
-| Issue | Decision |
-|---|---|
-| Skylight Muon | **OFF** — match submitted #2118 (`skylight_muon_enabled: False`) |
-| N-gram precompute timing | **Inside timer** — `ngram_hint_precompute_outside: False`; required for legality |
-| Compressor | **pergroup** (lrzip) — brotli blows past 16 MB cap |
+```bash
+COMPRESSOR=pergroup                    # was brotli — pergroup (lrzip) required for ≤16 MB
+NGRAM_HINT_PRECOMPUTE_OUTSIDE=0        # was 1 — inside timer required for legality
+MIN_LR=0.1                             # was 0.0 — LR floor critical for final steps
+SKYLIGHT_MUON=0                        # was 1 — match submitted #2118
+EVAL_SEQ_LEN=2560                      # was 2048 — match submitted #2118 eval context
+TTT_EVAL_SEQ_LEN=2560                  # was 2048
+EMBED_BITS=7                           # was 8 — int7 embed; with pergroup gets artifact under 16 MB
+```
+
+Everything else inherited from the pilot (which was already correct):
+clean HF data, `within_boost=0`, `word_boost=0`, `gated_xsa_enabled=True`,
+`gptq_reserve_seconds=2.0`, `lqer_top_k=1`, `phased_ttt_prefix_docs=1000`.
 
 ---
 
@@ -82,7 +93,7 @@ max_wallclock_seconds: 600.0
 gptq_reserve_seconds: 2.0
 warmdown_frac: 0.75                  # vs 0.85 in #2014
 beta2: 0.95                          # vs 0.99 in #2014
-min_lr: 0.0                          # vs 0.1 in #2014
+min_lr: 0.1                          # match submitted #2118
 matrix_lr: 0.026
 qk_gain_init: 5.0                    # vs 5.25 in #2014
 grad_clip_norm: 0.3
@@ -106,14 +117,15 @@ ema_decay: 0.9965
 logit_softcap: 30.0
 
 # Quantization / compression
-matrix_bits: 6          embed_bits: 8         # vs int7 in #2014
+matrix_bits: 6          embed_bits: 7         # match submitted #2118; int7+pergroup keeps artifact ≤16 MB
 lqer_enabled: True      lqer_rank: 4          lqer_asym_group: 64
 lqer_top_k: 1           lqer_factor_bits: 4
 awq_lite_enabled: True  awq_lite_group_size: 64  awq_lite_group_top_k: 1
 compressor: pergroup                 # lrzip — required for artifact ≤16MB
 
 # Eval / TTT
-eval_seq_len: 2048                   # vs 2560 in submitted #2118, 3072 in #2014
+eval_seq_len: 2560                   # match submitted #2118
+ttt_eval_seq_len: 2560
 eval_stride: 64
 phased_ttt_num_phases: 1
 phased_ttt_prefix_docs: 1000
