@@ -257,6 +257,11 @@ class Hyperparameters:
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 4.0))
+    mlp_schedule_enabled = bool(int(os.environ.get("MLP_SCHEDULE_ENABLED", "0")))
+    mlp_early_mult = float(os.environ.get("MLP_EARLY_MULT", mlp_mult))
+    mlp_middle_mult = float(os.environ.get("MLP_MIDDLE_MULT", mlp_mult))
+    mlp_late_mult = float(os.environ.get("MLP_LATE_MULT", mlp_mult))
+    mlp_middle_layers = os.environ.get("MLP_MIDDLE_LAYERS", "3,4,5")
     skip_gates_enabled = bool(int(os.environ.get("SKIP_GATES_ENABLED", "1")))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 3e1))
@@ -476,6 +481,43 @@ class Hyperparameters:
         if artifact_dir
         else "final_model.int6.ptz"
     )
+
+
+def _parse_layer_list(spec):
+    if not spec.strip():
+        return []
+    return [int(x) for x in spec.split(",") if x.strip()]
+
+
+def _layer_mlp_mults(h):
+    if not h.mlp_schedule_enabled:
+        return [h.mlp_mult] * h.num_layers
+    middle_layers = sorted(set(_parse_layer_list(h.mlp_middle_layers)))
+    if not middle_layers:
+        raise ValueError("MLP_SCHEDULE_ENABLED=1 requires non-empty MLP_MIDDLE_LAYERS")
+    if middle_layers != list(range(middle_layers[0], middle_layers[-1] + 1)):
+        raise ValueError("MLP_MIDDLE_LAYERS must be contiguous for the current banded schedule")
+    if middle_layers[0] <= 0 or middle_layers[-1] >= h.num_layers - 1:
+        raise ValueError("MLP_MIDDLE_LAYERS must leave at least one early and one late layer")
+    middle_set = set(middle_layers)
+    first_middle = middle_layers[0]
+    mults = []
+    for i in range(h.num_layers):
+        if i in middle_set:
+            mults.append(h.mlp_middle_mult)
+        elif i < first_middle:
+            mults.append(h.mlp_early_mult)
+        else:
+            mults.append(h.mlp_late_mult)
+    return mults
+
+
+def _layer_hidden_dims(h):
+    return [int(round(mult * h.model_dim)) for mult in _layer_mlp_mults(h)]
+
+
+def _active_mlp_param_count(h):
+    return sum(2 * h.model_dim * hidden_dim for hidden_dim in _layer_hidden_dims(h))
 
 
 _logger_hparams = None
@@ -1348,7 +1390,8 @@ class GPT(nn.Module):
         self.num_layers = h.num_layers
         head_dim = h.model_dim // h.num_heads
         kv_dim = h.num_kv_heads * head_dim
-        hidden_dim = int(h.mlp_mult * h.model_dim)
+        self.layer_hidden_dims = _layer_hidden_dims(h)
+        hidden_dim = max(self.layer_hidden_dims)
         self.qo_bank = nn.Parameter(torch.empty(2 * h.num_layers, h.model_dim, h.model_dim))
         self.kv_bank = nn.Parameter(torch.empty(2 * h.num_layers, kv_dim, h.model_dim))
         self.mlp_up_bank = nn.Parameter(torch.empty(h.num_layers, hidden_dim, h.model_dim))
@@ -1467,10 +1510,13 @@ class GPT(nn.Module):
             self.qo_bank.data[n + i].mul_(proj_scale)
             nn.init.orthogonal_(self.kv_bank.data[i], gain=1.0)
             nn.init.orthogonal_(self.kv_bank.data[n + i], gain=1.0)
+        nn.init.zeros_(self.mlp_up_bank)
+        nn.init.zeros_(self.mlp_down_bank)
         for i in range(n):
-            nn.init.orthogonal_(self.mlp_up_bank.data[i], gain=1.0)
-            nn.init.zeros_(self.mlp_down_bank.data[i])
-            self.mlp_down_bank.data[i].mul_(proj_scale)
+            hidden_dim = self.layer_hidden_dims[i]
+            nn.init.orthogonal_(self.mlp_up_bank.data[i, :hidden_dim], gain=1.0)
+            nn.init.zeros_(self.mlp_down_bank.data[i, :, :hidden_dim])
+            self.mlp_down_bank.data[i, :, :hidden_dim].mul_(proj_scale)
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 if getattr(module, "_zero_init", False):
@@ -1484,13 +1530,14 @@ class GPT(nn.Module):
 
     def _bank_weights(self, i):
         n = self.num_layers
+        hidden_dim = self.layer_hidden_dims[i]
         return (
             self.qo_bank[i],
             self.kv_bank[i],
             self.kv_bank[n + i],
             self.qo_bank[n + i],
-            self.mlp_up_bank[i],
-            self.mlp_down_bank[i],
+            self.mlp_up_bank[i, :hidden_dim],
+            self.mlp_down_bank[i, :, :hidden_dim],
         )
 
     def _parallel_block(
@@ -3928,6 +3975,16 @@ def train_model(h, device, val_data):
     )
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
+    log(f"active_mlp_params:{_active_mlp_param_count(h)}")
+    if h.mlp_schedule_enabled:
+        log(
+            "mlp_schedule:"
+            f" early={h.mlp_early_mult}"
+            f" middle={h.mlp_middle_mult}"
+            f" late={h.mlp_late_mult}"
+            f" middle_layers={h.mlp_middle_layers}"
+            f" hidden_dims={_layer_hidden_dims(h)}"
+        )
     optimizers = Optimizers(h, base_model)
     train_loader = DocumentPackingLoader(h, device)
     train_seq_plan = parse_train_seq_schedule(h.train_seq_schedule, h.train_seq_len)
