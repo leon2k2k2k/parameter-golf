@@ -513,7 +513,9 @@ def _layer_mlp_mults(h):
 
 
 def _layer_hidden_dims(h):
-    return [int(round(mult * h.model_dim)) for mult in _layer_mlp_mults(h)]
+    # Round to multiple of 16 so per-layer slices stay 16-byte-stride-aligned
+    # for Triton vectorized loads (bf16 needs 8-element / 16-byte alignment).
+    return [((int(round(mult * h.model_dim)) + 8) // 16) * 16 for mult in _layer_mlp_mults(h)]
 
 
 def _active_mlp_param_count(h):
