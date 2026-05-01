@@ -1,22 +1,38 @@
 # CaseOps records — train/val data-leakage audit
 
-**Date:** 2026-05-02. **Working set:** 34 CaseOps-lineage record-track PRs since 2026-04-18 (the merged-record + unmerged-frontier window of CaseOps).
+**Date:** 2026-05-02 (with strict re-audit applied same day). **Working set:** 34 CaseOps-lineage record-track PRs since 2026-04-18 (the merged-record + unmerged-frontier window of CaseOps).
 
-## Headline
+## Headline (after strict re-audit)
 
-The CaseOps records frontier is split into two islands.
+The CaseOps records frontier is split into clean / leak / ambiguous islands.
 
-**CLEAN island** (8 records): val docs are NOT in the training set.
-- #1729 (1.0678) → #1851 (1.06128) → #1868 (1.06141) — the merged trunk, built on the canonical HF dataset `romeerp/parameter-golf-caseops-v1`.
-- Plus #1908, #2019, #2031, #2068 — independent forks that explicitly went HF.
-- Plus #2027 — non-CaseOps SP8192, clean by pre-CaseOps lineage.
+**CLEAN island** (9 records, val docs NOT in training set):
+- Merged trunk: #1729 (1.0678) → #1851 (1.06128) → #1868 (1.06141) — built on canonical HF dataset `romeerp/parameter-golf-caseops-v1`.
+- Independent HF forks: #1908 (1.06081), #2019 (1.05847), #2031 (1.05985), #2068 (1.06172).
+- **#1945 (1.05943)** — flipped from LEAK to CLEAN in the re-audit; `finalize_v18.sh` reveals snapshot_download from HF.
+- #2027 — non-CaseOps SP8192, clean by pre-CaseOps lineage.
 
-**LEAK island** (25 records): val docs ARE in the training set (~80% overlap).
-- Trunk: #1736 (our research baseline) → #1769 → #1787 → #1797 → #1855 → V21 (#1945) → #1953 / #1967 → #2018 → #2118 (current claimed frontier 1.04350).
-- All use `prepare_caseops_data.py --val-docs=10000` default → train docs start at canonical-stream index 10,000 → overlap with the regenerated 50k val (docs 0–49,999) on documents 10,000–49,999.
-- 40,000 of the 50,000 val docs (80%) appear in the training set and are partially memorized over ~5 epochs.
+**LEAK island** (21 records, val docs ARE in training set, ~80% overlap):
+- Trunk: #1736 (our research baseline) → #1769 → #1787 → #1797 → #1855 → V21 / #1923 / #1967 → #2018 → #2118 (current claimed frontier 1.04350).
+- All these have direct evidence: explicit `prepare_caseops_data.py` invocation, audit/submission.json admission, or train log path with `_caseops/datasets/datasets/<name>` triple-nesting / single `<root>/datasets/<name>` (which only local prep produces — HF always gives double-nesting).
+- All use `--val-docs=10000` default → train starts at canonical-stream doc 10,000 → overlap with 50k val (docs 0–49,999) on documents 10,000–49,999.
 
-**Plus:** 1 inherit-only (#2050, eval-only on frozen #1915), and 1 separate symlink-leak mechanism (#2071, claimed 1.0066 via SP8192-symlinked-to-CaseOps).
+**AMBIGUOUS** (3 records, cannot resolve from PR artifacts alone):
+- **#1953** (1.05855), **#2041** (1.05692), **#2075** (no claim) — no explicit prep evidence in their PR. Path matches HF target. Initial first-pass LEAK calls were over-confident (relied on lineage-inheritance heuristic). Lean CLEAN but require external evidence (commit logs from author's pod, etc.) to confirm.
+
+**INHERIT** (1): #2050 — eval-only on frozen #1915 quantized artifacts.
+
+**Separate mechanism** (1): #2071 — claimed 1.0066 via SP8192-symlinked-to-CaseOps; orthogonal to val10k-train, audit-flagged.
+
+## Honest current frontier
+
+If the AMBIGUOUS records are CLEAN (path + parent verdict makes this likely):
+- Best clean BPB: **#2019 at 1.05847** (@aquariouseworkman, unmerged), then #1953 at 1.05855 (if AMBIGUOUS resolves CLEAN), #1945 at 1.05943, #2031 at 1.05985, #1908 at 1.06081, #1851 at 1.06128 (merged).
+
+If the AMBIGUOUS records are LEAK:
+- Best clean BPB: #2019 at 1.05847, then #1945 at 1.05943, then #2031 at 1.05985, then #1908 at 1.06081, then merged #1851 at 1.06128.
+
+Either way, the current claimed frontier #2118 at 1.04350 is **definitely LEAK**, and the clean frontier is **at most ~0.012 bpb below #2118 (i.e., realistic clean SOTA is ≥ 1.05847).**
 
 ## Three signposts
 

@@ -1,6 +1,8 @@
 # CaseOps records — family tree with leak/clean annotations
 
-Legend: `[C]` = CLEAN (val docs not in train), `[L]` = LEAK (val docs in train).
+**Updated 2026-05-02 with strict re-audit applied** (see `verdicts.md` for criteria).
+
+Legend: `[C]` = CLEAN (val docs not in train), `[L]` = LEAK (val docs in train), `[?]` = AMBIGUOUS (cannot resolve from PR artifacts alone).
 
 ## Tree 1 — Merged trunk (linear ancestry)
 
@@ -49,22 +51,29 @@ Legend: `[C]` = CLEAN (val docs not in train), `[L]` = LEAK (val docs in train).
    │
    ├──→ #1923 [L]  @jorge-asenjo  bpb=1.05971  — +AsymLogit +AWQ-lite; ORIGINAL val=9.66M (default --val-docs=10000), val-only re-pulled from HF after corruption; train still doc 10k+ → leak
    │
-   ├──→ #1945 [L]  @alertcat  bpb=1.05943  — "V21" = #1855 + AWQ-lite + AsymLogit
+   ├──→ #1945 [C] ← *flipped from [L] in re-audit*  @alertcat  bpb=1.05943
+   │       │       — finalize_v18.sh has `snapshot_download(repo_id='romeerp/parameter-golf-caseops-v1', local_dir='/workspace/caseops_data')`
+   │       │       — README's prepare_caseops_data.py "Data setup" is stale — actual run used HF
+   │       │       — IF this is correct, #1945 at 1.05943 is a clean-frontier candidate
    │       │
-   │       ├──→ #1953 [L]  @andrewbaggio1  bpb=1.05855  — V21 + TTT tweaks
-   │       │
+   │       ├──→ #1953 [?] ← *downgraded from [L] in re-audit*  @andrewbaggio1  bpb=1.05855
+   │       │       │       — V21 + TTT tweaks. PR ships only train_gpt.py + logs. No prep evidence.
+   │       │       │       — Path matches HF target. Parent #1945 confirmed HF. **Lean CLEAN.**
+   │       │       │
    │       ├──→ #1967 [L]  @ndokutovich  bpb=1.05851  — V21 + LeakyReLU 0.3 + N-gram Tilt
    │       │       │       — setup.sh invokes prepare_caseops_data.py default; ALSO has within/word boundary_lut C1 leak
    │       │       │
    │       │       └──→ #2018 [L]  Simon Marcus  bpb=1.04722  (Apr 30)
    │       │              │       — multi-parent (#1945, #1967, #1953, #1855); +Gated XSA, LQER top-1, AsymLogit, n-gram tilt
    │       │              │       — DATASET_AUDIT.md is gold-standard leak documentation
+   │       │              │       — note: parent #1945 is CLEAN but #2018 audit explicitly proves LEAK construction
    │       │              │
    │       │              ├──→ #2118 [L]  @aquariouseworkman  bpb=1.04350  (May 1)
    │       │              │              — CURRENT FRONTIER (claimed); submission.json: "--val-docs=10000 train shards + 50k val eval"
    │       │              │              — same author who shipped clean #1851 a week earlier
    │       │              │
-   │       │              └──→ #2041 [L]  @jorge-asenjo  bpb=1.05692  — Inside-timer N-gram TTT
+   │       │              └──→ #2041 [?] ← *downgraded from [L] in re-audit*  @jorge-asenjo  bpb=1.05692
+   │       │                              — No prep invocation in PR; double-nested path, ambiguous
    │       │
    │       └──→ #2014 [L]  @simonbissonnette  bpb=1.05759
    │               │       — "uses same shards as PR #1855"; /dev/shm/pgolf_caseops_data_80_l17_final
@@ -86,7 +95,7 @@ Legend: `[C]` = CLEAN (val docs not in train), `[L]` = LEAK (val docs in train).
    ├──→ #2071 [L]  @jamesEmerson112  bpb=1.0066 (claimed)  (parent #1851)
    │       — SEPARATE LEAK: symlink-leak (audit-flagged); SP8192 path symlinked to CaseOps shards
    │
-   ├──→ #2075 [L]  @deusexnatura  — PairGeom-V; ships prep (default)
+   ├──→ #2075 [?] ← *downgraded from [L] in re-audit*  @deusexnatura  — PairGeom-V; ships prep but no explicit invocation
    │
    ├──→ #2101 [L]  @OnlyJundong  bpb=1.05845  — AWQ-lite + AsymLogit + GradCentral; ships prep
    │       │
