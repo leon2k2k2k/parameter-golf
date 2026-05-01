@@ -2,8 +2,8 @@
 
 **Slug:** `301-frontier-harvest-clean`
 **Created:** 2026-05-02
-**Status:** DRAFT
-**Branch:** `exp/301-frontier-harvest-clean` (to be created)
+**Status:** READY
+**Branch:** `exp/301-frontier-harvest-clean` @ `4aed5d3`
 **Links:** `caseops-memory-leakage/verdicts.md`, Spec 300 (#2014 base)
 
 ---
@@ -140,19 +140,30 @@ output in the mini log.
 
 ---
 
-## Code assembly
+## Code changes (done — commit `4aed5d3`)
 
-**Base:** #2014's `train_gpt.py` is the cleanest starting point (has progressive context +
-short-doc TTT + compile warmup). Port Gated XSA from #2118:
+Branch `exp/301-frontier-harvest-clean` adds Gated XSA to #2014's `train_gpt.py` in 8 lines:
 
-1. Copy `gated_xsa_enabled` flag + `xsa_alpha` parameter registration from #2118's
-   `train_gpt.py` into #2014's `train_gpt.py`.
-2. Add the `tanh(xsa_alpha)` multiplication in the XSA subtraction path.
-3. Guard the n-gram import in #2118 so it's skipped when `NGRAM_TILT_ENABLED=0` (or just
-   don't port n-gram code at all — keep #2014's base clean).
-4. Do NOT port any other #2118 additions (n-gram tilt, beta2 changes, etc.).
+```python
+# CausalSelfAttention.__init__:
+self.gated_xsa_enabled = gated_xsa
+if gated_xsa:
+    self.xsa_alpha = nn.Parameter(torch.zeros(num_heads, dtype=torch.float32))
 
-**Data:** same clean HF download as #2118-clean run:
+# _xsa_efficient (split proj into coef to allow gating):
+coef = (y_g * vn).sum(dim=-1, keepdim=True)
+if getattr(self, "gated_xsa_enabled", False):
+    a = torch.tanh(self.xsa_alpha).view(1, 1, Hkv, group, 1).to(y.dtype)
+    coef = coef * a
+return (y_g - coef * vn).reshape(B, T, H, D)
+```
+
+`gated_xsa` threaded through `Block.__init__` → `CausalSelfAttention`. Env var `GATED_XSA` (default `0`).
+No n-gram code — #2014's base has none, and `NGRAM_TILT_ENABLED=0` keeps it off.
+
+Launch script: `runs/301-frontier-harvest-clean/launch.sh`.
+
+**Data:** clean HF download:
 ```bash
 python3 -c "
 from huggingface_hub import snapshot_download
