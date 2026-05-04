@@ -2,6 +2,28 @@
 
 ---
 
+> **What does a 14% compression improvement actually look like?**
+> Both models below were trained on the same dataset, in the same 10 minutes,
+> on the same hardware. The only difference is what the community built in six weeks.
+
+*From the FineWeb validation set — same 150-token context fed to both models:*
+
+| | SP1024 Baseline · 1.22 BPB | 060A Research Model · 1.06 BPB |
+|---|---|---|
+| *"…his driver license and auto insurance had been cancelled in October. This poses a problem for"* | the estate, though internalieness to gets the pass. It is a fat check that's gives ges auto insurance company… that's a **fairyyyyyyyyyyyyyyyyyyyyy** | the estate's creditors who need to work out a payment, especially with the new insurance regulations in october… |
+| *"…New host Steve Byrnes was feeling his way through this"* | season. He had just had a short, **bad weekkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk** | season's show, and while he played one of the best nights of his career at the same time, he hadn't been able to really shine since the first Nashville game… |
+| *"…Prosecutors now have until"* | Jan. 2, the **Supreen House** prosecutor sentences on a **murded** case… **Mazzzzaglia**… **charies's''''''** | Dec. 18 to sign off on a case after the new hampshire attorney general's office says they have more time… |
+
+*Prompted with "You are a helpful AI assistant. Please answer the following question." — not very good at general conversation:*
+
+| | SP1024 Baseline · 1.22 BPB | 060A Research Model · 1.06 BPB |
+|---|---|---|
+| *"The history of the internet began in the 1960s when"* | the Netherlands had established a strong supply of information about the **Canadian government and its supply chains**. The German government, in its own right, is commonly established as a matter of legal… | the internet became the **first electronic commerce tool** that was used by many people, including children, to connect online. the internet is now used by more than 3 billion users worldwide… |
+| *"What is 15 multiplied by 13? Let me work it out:"* | **1. 2. 3. 4. 5. 6. 7. 8. 9. 10. 11. 12. 14. 13.** 14. 15. 16. 17. 18. 19. **19.** 20.1 | 15 multiples 13 have 15, for example, 15, for **1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000** |
+| *"To bake a chocolate cake, you need flour, eggs, butter, and"* | sugar… you need to have **an infinite wooden cake**. Otherwise, you need to be taken as close to an… | salt… Add 1 tablespoon of flour to 1/4 cup of milk and pour over your cake. Add 1/4 teaspoon of sugar… Cook a lightly toasted chocolate cake. Make cupcakes Ã 3 |
+
+---
+
 ## Part 0 — The Competition
 
 In March 2026, OpenAI announced Parameter Golf: a community competition to build
@@ -179,4 +201,118 @@ and recorded the scores. Later models would use this window to actively update
 their weights in response to what they were seeing — a technique called
 test-time training (TTT). The baseline serves as the clean reference point
 before that complication enters.
+
+This baseline scored **1.2244 BPB**. By the end of the competition, the best
+submission had reached **1.0565 BPB** — the same hardware, the same data, the
+same 10 minutes, and a model that had been rebuilt almost from scratch across
+every one of those five components. The rest of this section traces how.
+
+---
+
+### The Final Model
+
+#### Tokenizer
+
+The vocabulary grew in two steps: SP1024 → SP4096 (PR #1218) → SP8192
+(PR #1394). Counterintuitive, since a larger vocabulary means a larger
+embedding table and therefore more parameters. The payoff comes from the
+BPB denominator: it counts *bytes*, not tokens. A token that encodes two
+bytes contributes two bytes to the denominator, so a model that packs more
+bytes per token earns a lower BPB for the same prediction quality. The
+embedding cost is real, but it pays for itself.
+
+The more interesting tokenizer story is about capitalization. An SP8192
+vocabulary wastes slots on case variants — "the", "The", and "THE" are
+three separate entries for the same word. PR #1578 introduced casefold:
+lowercase everything before tokenizing, freeing up hundreds of duplicate
+slots. The problem: casefold permanently destroys information, and a model that
+cannot recover the original casing cannot correctly score it. Ruled illegal
+in Issue #1604.
+
+CaseOps (PR #1729) solved this losslessly. Four control tokens are reserved
+in the vocabulary — TITLE, ALLCAPS, CAPNEXT, ESC — and capitalization is
+encoded inline before tokenizing:
+
+```
+"The NASA launched."  →  "TITLE the ALLCAPS nasa launched."
+```
+
+The original text is fully recoverable. Nothing is discarded. The ~8188
+remaining vocabulary slots are now entirely free of case duplication, and
+the control tokens are cheap to predict — capitalization follows clear
+patterns (sentence starts, acronyms, proper nouns) — so the model pays
+very little BPB on them.
+
+SP8192+CaseOps remained the tokenizer frontier for the rest of the
+competition. CaseOps also turned out to be the center of an unexpected
+controversy — not about the tokenizer itself. A significant fraction of
+CaseOps submissions were later disqualified, for reasons we'll return to
+in Part 3.
+
+---
+
+#### Model Architecture
+
+Here we walk through the most significant architectural changes from the
+baseline to the final model.
+
+**Bigger and deeper.** The final model is 11 layers with a 4× MLP width,
+up from the baseline's 9 layers and 2× MLP width. Wider MLPs give each
+layer more capacity to store and transform information; more layers give
+the network more processing steps. Both changes came with higher weight
+decay to keep the weights compressible under quantization.
+
+**Depth recurrence (PR #1344).** The most structurally novel change. In a
+standard transformer, each layer runs exactly once per token. The final
+model loops layers 3–5 three times per forward pass — the same three
+layers, the same weights, applied three times in sequence:
+
+```
+standard:  1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
+
+with loop: 1 → 2 → 3 → 4 → 5 → 3 → 4 → 5 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
+                     └──────────────── ×3 ────────────────┘
+```
+
+17 effective processing steps from 11 physical layers, at zero additional
+parameter cost. Notably, the model does not start training with this
+structure — the loop activates partway through training, once the weights
+have stabilized enough for repeated application to help rather than hurt.
+We'll cover the training curriculum in the next section.
+
+**Parallel residuals (PR #1530).** In a standard transformer layer,
+attention and MLP run sequentially — attention first, then MLP on the
+result. From layer 8 onward, the final model runs them in parallel: both
+branches receive the same input x, and their outputs are added together:
+
+```
+standard:   h = x + Attn(x),  then  h = h + MLP(h)
+
+parallel:   h = x + Attn(x) + MLP(x)
+```
+
+This squeezes more computation out of each layer without adding parameters.
+
+**XSA (PR #287).** XSA is gaining traction in the community as a simple
+attention improvement. In standard attention, each token strongly attends
+to itself — its own value vector dominates the output, acting as a
+near-identity shortcut. XSA removes this self-contribution by projecting
+it out of the attention output:
+
+```
+standard:   y  = Σⱼ αⱼ vⱼ
+
+XSA:        y  = y − (y · v̂) v̂       where v̂ = v / ‖v‖
+```
+
+The component of y that lies along the current token's own (normalized)
+value vector is subtracted out, forcing the model to actually use context
+from other tokens. Applied to all layers, it was one of the larger single
+architectural improvements in the competition.
+
+A number of smaller changes also accumulated: a learned SmearGate blending
+each token with its neighbor (PR #1667), a narrow attention output gate
+(PR #1787), a LeakyReLU² MLP activation replacing GELU (PR #493), partial
+RoPE with layer-norm scaling (PR #315), and sigmoid-gated U-Net skips
+replacing the baseline's plain weighted connections (PR #289).
 
