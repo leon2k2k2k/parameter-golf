@@ -104,7 +104,7 @@ Key architectural innovations in roughly the order they appeared:
   Probably the single largest architectural change in the competition.
 - **Variable-length (VarLen) attention** — pack documents of different lengths
   into one sequence without padding; enables per-document TTT boundaries.
-- **Parallel residuals** — two-lane attention+MLP routing from layer 7+; stacks
+- **Parallel residuals** — two-lane attention+MLP routing from layer 8+; stacks
   cleanly with recurrence.
 - **SmearGate + BOS fix** — learned gate blending each token's hidden state
   with the previous token's, adding a lightweight bigram-level context signal.
@@ -187,9 +187,18 @@ iterative rule-clarification history.
   adapt K and other params. Improves stability and reduces overfitting.
 - **Short-doc TTT** — preferentially apply TTT to shorter documents, which
   have higher per-token uncertainty and respond better to adaptation (#2014).
-- **Token-only n-gram tilt** — the legal form of n-gram that eventually worked:
-  tilt the token distribution using a left-to-right prefix n-gram, within the
-  already-scored window only. The surprise ending to the n-gram saga.
+- **Token-only n-gram tilt** — the legal form of n-gram that eventually worked.
+  The original kernel (PR #1420) had *three* experts: a token expert (counts
+  n-gram prefix matches in the already-scored window), a within-word expert
+  (gates on whether the current position is mid-word), and a word-start expert
+  (gates on whether it starts a word). The problem: the within-word and
+  word-start experts read `boundary_lut[tokens[i]]` — the TARGET token's
+  boundary type — which is non-causal (you can't know if position i is
+  mid-word until you see what token lands at i). Two of three experts violate
+  C1 by construction. The token expert is causal by construction — it only
+  reads the prefix hash table. Disable the two broken ones, keep the one that
+  works: closed-form `p'(a) = exp(β·1[a=h])·p(a)/Z`, prefix-only. The
+  surprise ending to the n-gram saga.
 - TTT contribution to the final model: pre-quant 1.064 → post-TTT 1.060,
   roughly ~0.004 bpb.
 
@@ -220,14 +229,20 @@ Tone: semi-formal, wry.
 
 ### N-gram: Hard to Do Right
 - Multiple attempts: n-gram eval cache, n-gram TTT, n-gram tilt.
-- The C1/C2 failure history — boundary gate bug (`boundary_lut[tokens[i]]`,
-  Issue #1420), ~95% of gated mass leaky. Resurfaced in multiple PRs.
-- The surprise ending: a restricted within-timer n-gram tilt *did* eventually
-  work legally, appearing in late CaseOps-era records.
-- Closing heuristic: why it's so hard to supplement a neural model with
-  classical n-gram/byte methods without accidentally violating C1 or C2. The
-  failure mode is almost always the same — the classical side either peeks
-  forward or doesn't produce a normalized distribution.
+- The original kernel (PR #1420) had three experts: token, within-word,
+  word-start. The within-word and word-start experts read
+  `boundary_lut[tokens[i]]` — the TARGET token's boundary type. You can't know
+  if position i is mid-word until you see what token lands there, so two of
+  three experts are non-causal by design. The C1 violation rate was ~95% of
+  gated mass, because word/boundary gates fired on almost every token.
+- The token expert is causal: it only queries the prefix hash table (tokens the
+  model has already been graded on). Disabling within/word and keeping only the
+  token expert gives the legal form.
+- The surprise ending: once cleaned up, the token-only tilt *did* eventually
+  work, and appears in the final SOTA record (#2135).
+- Closing heuristic: the failure mode for classical n-gram/byte methods is
+  almost always the same — the classical side either peeks forward (C1) or
+  doesn't produce a normalized distribution (C2).
 
 ---
 
