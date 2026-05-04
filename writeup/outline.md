@@ -67,9 +67,19 @@ compression → TTT at eval time. Each pillar maps onto a stage of this pipeline
   tokenizing gives a small vocabulary a big efficiency boost, but destroys
   case information. Ruled illegal (Issue #1604) because the scorer charges
   bytes on the original text and you can't recover them.
-- **CaseOps** (romeerp, PR #1729): the lossless answer — a bijective case
-  transform that compacts the token set while storing original case in a byte
-  sidecar. Drops the frontier from ~1.07 to ~1.065 in one shot.
+- **CaseOps** (romeerp, PR #1729): the lossless answer. Worth explaining the
+  mechanics: standard SP8192 sees "Hello" and "hello" as two different tokens,
+  wasting vocabulary slots on capitalization variants. CaseOps pre-processes
+  the text before tokenizing — strip all case to lowercase, tokenize the
+  compact lowercase stream, then store the original capitalization pattern in a
+  tiny byte sidecar (a bitmask: 1 bit per alphabetic character saying
+  "was this uppercase?"). The model trains and scores on the lowercase tokens;
+  the sidecar bytes are scored by a simple fixed distribution (capitalization
+  is highly predictable: sentence starts, proper nouns — you can mostly get it
+  right with a few rules). Net effect: the model's vocabulary is far more
+  efficient, each token encodes more semantic content per byte, and the sidecar
+  cost is small because capitalization is easy. Drops the frontier from ~1.07
+  to ~1.065 in one shot.
 - Why byte-level BPB makes tokenizer choice load-bearing: the scorer charges
   per byte regardless of how the model tokenizes, so every token that encodes
   more bytes is a free win.
@@ -244,6 +254,20 @@ Tone: semi-formal, wry.
   almost always the same — the classical side either peeks forward (C1) or
   doesn't produce a normalized distribution (C2).
 
+
+
+- General argument for why supplementing NNs with classical methods is so hard:
+  a neural model already captures most of what an n-gram or PPM would tell you.
+  The NN is well-calibrated on its own uncertainty — it knows when it doesn't
+  know. For a classical model to help, it needs to provide *orthogonal*
+  information: something the NN genuinely can't see. But both n-gram and PPM
+  are trying to predict the same thing from the same context, so their signals
+  are highly correlated with the NN's output. You're fighting for a thin slice
+  of orthogonal signal. The one case where token-only n-gram tilt *does* eke
+  out a gain is exact prefix repetition: a very strong prior that "this phrase
+  appeared verbatim 3 tokens ago" that the softmax tends to smooth over. That's
+  a real, narrow orthogonal lever — but most of the classical-method graveyard
+  here is just correlated noise with a legality trap attached.
 ---
 
 ## Part 3 — Last Day Chaos: The CaseOps Val-Set Leak
