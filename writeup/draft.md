@@ -90,13 +90,93 @@ drop of 0.168 BPB. [TODO: score progression graph]
 In the next section we trace the key techniques that drove this improvement.
 
 ---
-¹ Specifically: the compressed model weights plus all code in `train_gpt.py`.
-² Issue and PR numbers throughout this post refer to the openai/parameter-golf
-GitHub repository: `https://github.com/openai/parameter-golf/issues/{number}`
-or `/pull/{number}`.
+¹ The artifact is the compressed model weights plus all code in `train_gpt.py`.
 The cap is 16,000,000 bytes (decimal) — not 16 MiB (16,777,216 bytes), a
 distinction that matters: the actual budget is about 4.5% smaller than a
 "16 megabyte" headline implies. No external downloads or network calls are
 permitted during evaluation.
+² Issue and PR numbers refer to the openai/parameter-golf GitHub repository:
+`https://github.com/openai/parameter-golf/issues/{number}` or `/pull/{number}`.
 
 ---
+
+## Part 1 — Model Comparison and Techniques
+
+There are five components to a Parameter Golf submission: the tokenizer,
+the model architecture, the training setup, the quantization pipeline, and
+post-training adaptation. Let's start with the base model that OpenAI
+provided at the start of the competition.
+
+*(This section assumes basic familiarity with transformer architecture at
+the level of NanoGPT — attention, residual stream, MLP layers. If that's
+new territory, Karpathy's [Let's build GPT](https://www.youtube.com/watch?v=kCc8FmEb1nY)
+is the right starting point.)*
+
+---
+
+### The Baseline
+
+OpenAI's starting model was already not a simple transformer — not a plain
+NanoGPT-style stack of attention and MLP layers. The baseline was more
+carefully engineered than that.
+
+**Tokenizer.** The baseline used SentencePiece with a 1024-token vocabulary
+(SP1024), trained on the same FineWeb corpus used for scoring. A 1024-token
+vocabulary is quite small by modern standards; GPT-2 uses 50,000 tokens.
+The small vocabulary keeps the embedding table compact, which matters when
+your entire model has to fit in 16 MB.
+
+**Model architecture.** The baseline was a 9-layer, 512-dimensional transformer
+with three structural additions worth calling out:
+
+- **U-Net skip connections** — in a standard transformer, each layer feeds
+  only into the next. The U-Net pattern adds direct connections that skip the
+  middle of the network. The 9 layers are split into an encoder half (layers
+  1–4), a bottleneck (layer 5), and a decoder half (layers 6–9). Each decoder
+  layer receives the output of its mirror encoder layer as an additional
+  residual, weighted by a learned scalar *w*:
+
+  ```
+  Standard:  h_l = Block_l(h_{l-1})
+
+  U-Net:     h_l = Block_l(h_{l-1})               for l ≤ 5
+             h_l = Block_l(h_{l-1} + w · h_{10-l}) for l ∈ {6,7,8,9}
+  ```
+
+  Concretely: layer 6 gets a skip from layer 4, layer 7 from layer 3, layer 8
+  from layer 2, layer 9 from layer 1. The early-layer representations — which
+  tend to capture local, surface-level patterns — are fed directly into the
+  late layers alongside the deep representations. This is the same idea that
+  made U-Net famous in image segmentation.
+- **Grouped-query attention (GQA)** and **rotary positional embeddings (RoPE)**
+  — both standard in modern LLMs, just not in NanoGPT.
+  GQA shares key-value heads across query heads to cut parameter count; RoPE
+  encodes position by rotating query and key vectors rather than adding learned
+  position embeddings.
+
+**Training.** The baseline used the **Muon optimizer** — a popular choice
+over AdamW. The learning rate follows a
+warmup-then-warmdown schedule, rising over the first few steps then decaying
+to zero by the end of the 10-minute window.
+
+**Quantization.** After training, the model weights are rounded from their
+training precision (bfloat16, 16 bits per weight) down to 6 bits per weight
+(int6). This is the core quantization step that makes the 16 MB constraint
+achievable: a bfloat16 copy of this model would be around 70 MB. The baseline
+applied int6 quantization to MLP weights only; attention weights were left at
+higher precision.
+
+The key concept for readers unfamiliar with quantization: every weight is a
+number stored with some number of bits. More bits means more precision, but
+also a larger file. The game is managing the tradeoff — round the weights
+aggressively enough to fit the size budget, but not so aggressively that the
+model's predictions degrade. The baseline's approach was simple: round the
+biggest chunk of parameters (the MLP weights) and leave the rest alone.
+
+**Post-training adaptation.** The baseline did none. During the 10-minute
+evaluation window, it simply ran the model forward on the validation text
+and recorded the scores. Later models would use this window to actively update
+their weights in response to what they were seeing — a technique called
+test-time training (TTT). The baseline serves as the clean reference point
+before that complication enters.
+
