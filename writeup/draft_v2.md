@@ -24,9 +24,9 @@
 
 ---
 
-In March 2026, OpenAI released a public competition with a deceptively simple premise: train the best language model you can, but it has to fit in 16,000,000 bytes, and you only get 10 minutes of training time on 8 H100s. Call it parameter golf — every byte counts, every second counts.
+In March 2026, OpenAI released a public competition with a deceptively simple premise: train the best language model you can, but it has to fit in 16,000,000 bytes, and you only get 10 minutes of training time on 8 H100s. Call it parameter golf: every byte counts, every second counts.
 
-What followed over the next six weeks looked, from the outside, like just another competitive coding challenge. It turned out to be something more: techniques stacking on each other in ways nobody planned, innovations that shouldn't have worked but did, controversial submissions that looked like miracles, mayhem on the last day, and a picture-perfect finish. In the end, starting from a model that produces the gibberish above, the community built one that speaks coherently — just don't ask it anything that isn't in the training data. This post goes through some of the highlights — both the technical and the dramatic. 
+What followed over the next six weeks looked, from the outside, like just another competitive coding challenge. It turned out to be something more: techniques stacking on each other in ways nobody planned, innovations that shouldn't have worked but did, controversial submissions that looked like miracles, mayhem on the last day, and a picture-perfect finish. In the end, starting from a model that produces the gibberish above, the community built one that speaks coherently. Just don't ask it anything that isn't in the training data. This post goes through some of the highlights, both the technical and the dramatic. 
 
 ---
 
@@ -34,19 +34,19 @@ What followed over the next six weeks looked, from the outside, like just anothe
 
 At the core of this competition is a simple question: how well can a model predict text?
 
-A language model is, at its heart, a probability distribution over text. Given a sequence of words — or more precisely, tokens — the model assigns a probability to every possible next token. A well-trained model should assign high probability to tokens that actually appear in real text, and low probability to tokens that don't. Think of it like a well-read person trying to complete sentences. Given "The president signed the —", they would confidently predict "bill" or "order" and be surprised by "banana." A bad model treats every next word as equally likely. A good model has internalized the patterns of language well enough to be right, or at least close, most of the time.
+A language model is, at its heart, a probability distribution over text. Given a sequence of words (or more precisely, tokens) the model assigns a probability to every possible next token. A well-trained model should assign high probability to tokens that actually appear in real text, and low probability to tokens that don't. Think of it like a well-read person trying to complete sentences. Given "The president signed the ___", they would confidently predict "bill" or "order" and be surprised by "banana." A bad model treats every next word as equally likely. A good model has internalized the patterns of language well enough to be right, or at least close, most of the time.
 
-The models in this competition are trained and scored on FineWeb, a large dataset of cleaned web text. The score is computed on a held-out validation slice that the models never see during training. For each token in that slice, we ask: what probability did the model assign to the token that actually appeared? The cost for a single token is $-\log_2 p(t)$, where $t$ is the correct token. If the model is perfectly confident — $p(t) = 1$ — it pays zero cost. If it assigns $p(t) = 0.5$, it pays 1 bit. If it assigns $p(t) = 0.01$, it pays about 6.6 bits. The total score is this cost summed across all tokens, normalized by the number of bytes in the original text:
+The models in this competition are trained and scored on FineWeb, a large dataset of cleaned web text. The score is computed on a held-out validation slice that the models never see during training. For each token in that slice, we ask: what probability did the model assign to the token that actually appeared? The cost for a single token is $-\log_2 p(t)$, where $t$ is the correct token. If the model is perfectly confident ($p(t) = 1$) it pays zero cost. If it assigns $p(t) = 0.5$, it pays 1 bit. If it assigns $p(t) = 0.01$, it pays about 6.6 bits. The total score is this cost summed across all tokens, normalized by the number of bytes in the original text:
 
 $$\text{BPB} = \frac{-\sum_k \log_2 p(t_k \mid t_1, \ldots, t_{k-1})}{\text{number of bytes}}$$
 
-This is called bits-per-byte (BPB). To put it in perspective: a model that assigns completely uniform probability across all 256 possible bytes — knowing nothing at all — scores exactly 8 BPB. The baseline OpenAI provided started at **1.2244 BPB**, already far below that, meaning the model had learned real structure in language. Six weeks later, the community had pushed it to **1.0565** — a 14% reduction, achieved purely through algorithmic improvements with no change to the hardware or the data.
+This is called bits-per-byte (BPB). To put it in perspective: a model that assigns completely uniform probability across all 256 possible bytes, knowing nothing at all, scores exactly 8 BPB. The baseline OpenAI provided started at **1.2244 BPB**, already far below that, meaning the model had learned real structure in language. Six weeks later, the community had pushed it to **1.0565**, a 14% reduction, achieved purely through algorithmic improvements with no change to the hardware or the data.
 
 ---
 
 ## 2. Model Evolution
 
-A modern language model is built from a stack of identical blocks. Each block has two components — attention first, then MLP:
+A modern language model is built from a stack of identical blocks. Each block has two components: attention first, then MLP:
 
 ```
 # One transformer block
@@ -74,7 +74,7 @@ The full model is just these blocks chained one after another:
 x → block_1 → block_2 → block_3 → ... → block_N → output
 ```
 
-Attention captures how words interact with each other — which tokens are relevant to which. The MLP then enriches the meaning of each token individually, using what attention gathered as context. Each block refines the representation a little further. Stack 9 to 11 of them and you have a language model. We will come back to this picture when we discuss depth recurrence.
+Attention captures how words interact with each other, capturing which tokens are relevant to which. The MLP then enriches the meaning of each token individually, using what attention gathered as context. Each block refines the representation a little further. Stack 9 to 11 of them and you have a language model. We will come back to this picture when we discuss depth recurrence.
 
 ---
 
@@ -111,7 +111,7 @@ OpenAI's starting model was already not a simple transformer, not a plain stack 
 
 **Post-training adaptation.** The baseline did none. During the 10-minute evaluation window, it simply ran the model forward on the validation text and recorded the scores. Later models would use this window to actively update their weights in response to what they were seeing, a technique called test-time training (TTT). The baseline serves as the clean reference point before that complication enters.
 
-This baseline scored **1.2244 BPB**. By the end of the competition, the best submission had reached **1.0565 BPB** — the same hardware, the same data, the same 10 minutes, and a model that had been rebuilt almost from scratch across every one of those five components. The rest of this section traces how.
+This baseline scored **1.2244 BPB**. By the end of the competition, the best submission had reached **1.0565 BPB**, with the same hardware, the same data, the same 10 minutes, and a model that had been rebuilt almost from scratch across every one of those five components. The rest of this section traces how.
 
 ---
 
@@ -121,7 +121,7 @@ This baseline scored **1.2244 BPB**. By the end of the competition, the best sub
 
 The vocabulary grew in two steps: SP1024 → SP4096 (PR #1218) → SP8192 (PR #1394). Counterintuitive, since a larger vocabulary means a larger embedding table. The payoff comes from the BPB denominator: it counts *bytes*, not tokens. A token that encodes two bytes contributes two bytes to the denominator, so a model that packs more bytes per token earns lower BPB for the same prediction quality.
 
-An SP8192 vocabulary still wastes slots on case variants: "the", "The", and "THE" are three separate entries. PR #1578 introduced casefold — lowercase everything before tokenizing — but this permanently destroys casing information the model needs to score correctly. Ruled illegal in Issue #1604.
+An SP8192 vocabulary still wastes slots on case variants: "the", "The", and "THE" are three separate entries. PR #1578 introduced casefold, which lowercases everything before tokenizing, but this permanently destroys casing information the model needs to score correctly. Ruled illegal in Issue #1604.
 
 CaseOps (PR #1729) solved this losslessly. Four control tokens are reserved (TITLE, ALLCAPS, CAPNEXT, ESC) and capitalization is encoded inline:
 
@@ -129,13 +129,13 @@ CaseOps (PR #1729) solved this losslessly. Four control tokens are reserved (TIT
 "The NASA launched."  →  "TITLE the ALLCAPS nasa launched."
 ```
 
-The original text is fully recoverable. The ~8188 remaining vocabulary slots are now entirely free of case duplication, and the control tokens are cheap to predict — capitalization follows clear patterns — so the model pays very little BPB on them. SP8192+CaseOps remained the tokenizer frontier for the rest of the competition.
+The original text is fully recoverable. The ~8188 remaining vocabulary slots are now entirely free of case duplication, and the control tokens are cheap to predict, since capitalization follows clear patterns, so the model pays very little BPB on them. SP8192+CaseOps remained the tokenizer frontier for the rest of the competition.
 
 ---
 
 #### Model Architecture: Depth Recurrence and Parallel Residuals
 
-In a standard transformer, each layer runs exactly once per token. The final model (PR #1344) loops layers 3–5 three times per forward pass — the same three layers, the same weights, applied three times in sequence:
+In a standard transformer, each layer runs exactly once per token. The final model (PR #1344) loops layers 3–5 three times per forward pass: the same three layers, the same weights, applied three times in sequence:
 
 ```
 standard:  1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
@@ -173,7 +173,7 @@ The final training run is a well-choreographed 10-minute dance. The learning rat
 
 #### Quantization: GPTQ and LQER
 
-Quantization and compression happen after the 10-minute training clock stops, a separate post-processing step before the artifact is sealed. Not everything gets quantized equally. The bulky matrix weights — attention projections, MLP weights, and embeddings — dominate the artifact size and get quantized aggressively (int6 or int7). The small scalar and 1D parameters like gains, skip weights, and mixing coefficients are kept in full precision: they are too sensitive to round safely and too small to matter for the size budget. The baseline rounded MLP weights to int6 using simple nearest-neighbour rounding. The final model does something considerably more sophisticated.
+Quantization and compression happen after the 10-minute training clock stops, a separate post-processing step before the artifact is sealed. Not everything gets quantized equally. The bulky matrix weights (attention projections, MLP weights, and embeddings) dominate the artifact size and get quantized aggressively (int6 or int7). The small scalar and 1D parameters like gains, skip weights, and mixing coefficients are kept in full precision: they are too sensitive to round safely and too small to matter for the size budget. The baseline rounded MLP weights to int6 using simple nearest-neighbour rounding. The final model does something considerably more sophisticated.
 
 **GPTQ (PR #535).** When you round a weight, you introduce an error. Instead of ignoring that error, GPTQ compensates for it by adjusting the remaining unquantized weights in the same layer, using second-order information about how sensitive the output is to each weight. The result is a quantized model that stays much closer to the original's predictions than naive rounding. This evolved to cover all weights including attention (PR #1285) and embeddings at int7 (PR #1586).
 
@@ -183,11 +183,11 @@ Quantization and compression happen after the 10-minute training clock stops, a 
 
 #### Post-Training: TTT
 
-The final model uses its 10-minute eval window not just for scoring, but to simultaneously adapt its weights to the text it is seeing — a technique called test-time training (TTT). The TTT here splits into two steps:
+The final model uses its 10-minute eval window not just for scoring, but to simultaneously adapt its weights to the text it is seeing, a technique called test-time training (TTT). The TTT here splits into two steps:
 
 **Per-document LoRA (PR #1530).** The base model weights are frozen. For each validation document, a set of low-rank adapter matrices are attached to the model's projections. The document is processed in chunks: score each chunk first, then take a gradient step to update the adapters. By the final chunk, the model has already adapted to that document's style and vocabulary. The adapters reset after each document; nothing carries over.
 
-**Global SGD phase (PR #1610/#1626).** After an initial batch of documents has been scored, a full SGD pass runs on the base model weights themselves — not just the adapters — using all the already-scored documents as training data. The base model is updated, the adapters reset, and the remaining documents are scored on top of this improved base.
+**Global SGD phase (PR #1610/#1626).** After an initial batch of documents has been scored, a full SGD pass runs on the base model weights themselves, not just the adapters, using all the already-scored documents as training data. The base model is updated, the adapters reset, and the remaining documents are scored on top of this improved base.
 
 The LoRA handles fast local adaptation per document; the global SGD step shifts the base model toward the distribution of the validation set as a whole. The eval budget splits roughly as ~120 seconds for the baseline scoring pass and ~480 seconds for the TTT loop.
 
@@ -214,13 +214,13 @@ The final model is a messy, sophisticated combination of all of the above: signi
 
 ## 3. Too Good to Be True
 
-One might imagine the leaderboard as a steady downward curve from 1.2244 to 1.0565 over six weeks. The reality was anything but. Periodically, a submission would appear claiming a score far below the rest of the field — dropping below 1.0, well beyond what any single technique could explain. Others would quickly follow, stacking on top of the same method, while long threads of debate opened about whether the technique was valid at all. As it turned out, they were all too good to be true. We examine the two most important cases here, and the lesson they leave behind.
+One might imagine the leaderboard as a steady downward curve from 1.2244 to 1.0565 over six weeks. The reality was anything but. Periodically, a submission would appear claiming a score far below the rest of the field, dropping below 1.0, well beyond what any single technique could explain. Others would quickly follow, stacking on top of the same method, while long threads of debate opened about whether the technique was valid at all. As it turned out, they were all too good to be true. We examine the two most important cases here, and the lesson they leave behind.
 
 ---
 
 ### N-gram Tilt
 
-An n-gram model tracks token co-occurrence statistics: given the last few tokens, what token tends to come next? The idea behind n-gram tilting (PR #1145) was to run a lightweight n-gram counter alongside the neural model, updated as each token is scored, and use it to boost the probabilities of tokens that the recent history strongly predicts. No extra artifact bytes, no parameters — just a running table built from the document itself.
+An n-gram model tracks token co-occurrence statistics: given the last few tokens, what token tends to come next? The idea behind n-gram tilting (PR #1145) was to run a lightweight n-gram counter alongside the neural model, updated as each token is scored, and use it to boost the probabilities of tokens that the recent history strongly predicts. No extra artifact bytes, no parameters; just a running table built from the document itself.
 
 While the idea is sound, the implementation had a subtle causality issue.[^rules] The within-word and word-start experts had a classic C1 violation (PR #1420):
 
@@ -231,19 +231,19 @@ if (!is_boundary && st->within_len > 0U)
     within_valid[i] = 1U;        // fire the hint at position i
 ```
 
-The gate reads `tokens[i]` — the token being predicted — before scoring position i. It is like filling in all the answers on an exam, then peeking at the answer key before erasing the wrong ones. A causal system cannot know whether the next token is a continuation token before seeing it. Later on, PR #1514 disable within-word and word-start entirely, keep only the token-order-16 expert. That clean expert survived into the final SOTA.
+The gate reads `tokens[i]` (the token being predicted) before scoring position i. It is like filling in all the answers on an exam, then peeking at the answer key before erasing the wrong ones. A causal system cannot know whether the next token is a continuation token before seeing it. Later on, PR #1514 disable within-word and word-start entirely, keep only the token-order-16 expert. That clean expert survived into the final SOTA.
 
 
-[^rules]: The competition launched without a complete ruleset. As participants found increasingly creative ways to improve their scores, four constraints were codified mid-competition through community discussion in Issue #1017: **C1 (causal eval)** — the probability assigned to token tₖ must depend only on the tokens before it, never the token itself; **C2 (normalized distribution)** — the output must be a valid probability distribution summing to exactly 1; **C3 (score before update)** — in TTT, a chunk must be fully scored before any gradient step is applied to it; **C4 (single pass)** — each token is scored exactly once.
+[^rules]: The competition launched without a complete ruleset. As participants found increasingly creative ways to improve their scores, four constraints were codified mid-competition through community discussion in Issue #1017: **C1 (causal eval):** the probability assigned to token tₖ must depend only on the tokens before it, never the token itself; **C2 (normalized distribution):** the output must be a valid probability distribution summing to exactly 1; **C3 (score before update):** in TTT, a chunk must be fully scored before any gradient step is applied to it; **C4 (single pass):** each token is scored exactly once.
 
 
 ---
 
 ### PPM-D
 
-PPM-D (Prediction by Partial Matching) is the technique behind the PRs with the most impressive claims: scores in the 0.8–1.0 range, far below anything other techniques offered. It is a classical byte-level compression algorithm that counts byte n-grams: given the last few bytes, what byte tends to come next? It is particularly good at within-document repetition. Think of a Russian novel where a character's long name appears dozens of times — after the first few occurrences, PPM-D can predict the exact spelling almost perfectly, byte by byte. The neural model, by contrast, has no special memory for what has already appeared in this document. The PRs blended PPM-D's predictions with the neural model's: an n-byte token with probability p contributing p^(1/n) to each of its byte positions, then mixing with PPM-D. Claimed scores dropped dramatically.
+PPM-D (Prediction by Partial Matching) is the technique behind the PRs with the most impressive claims: scores in the 0.8–1.0 range, far below anything other techniques offered. It is a classical byte-level compression algorithm that counts byte n-grams: given the last few bytes, what byte tends to come next? It is particularly good at within-document repetition. Think of a Russian novel where a character's long name appears dozens of times; after the first few occurrences, PPM-D can predict the exact spelling almost perfectly, byte by byte. The neural model, by contrast, has no special memory for what has already appeared in this document. The PRs blended PPM-D's predictions with the neural model's: an n-byte token with probability p contributing p^(1/n) to each of its byte positions, then mixing with PPM-D. Claimed scores dropped dramatically.
 
-It turned out the math was rigged. A valid probability distribution must sum to exactly 1 — this is C2. For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated, and summing across all tokens that share a given byte gives more than 1.0. In the exam analogy: assigning 90% to each of four answer options simultaneously. The score looked excellent because the scoring formula was fed an invalid distribution. Why the broken math produced such dramatic gains — and why the correct version is actually *worse* than the baseline — is a more interesting story, explained in PR #1905.[^ppmd]
+It turned out the math was rigged. A valid probability distribution must sum to exactly 1 (this is C2). For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated, and summing across all tokens that share a given byte gives more than 1.0. In the exam analogy: assigning 90% to each of four answer options simultaneously. The score looked excellent because the scoring formula was fed an invalid distribution. Why the broken math produced such dramatic gains, and why the correct version is actually *worse* than the baseline, is a more interesting story, explained in PR #1905.[^ppmd]
 
 [^ppmd]: The correct way to convert token probabilities to byte probabilities is to sum over all tokens that share the same byte prefix, weighted by their probabilities. When counted correctly, it turns out that PPM-D yields no gain over the neural model alone. The deeper reason is discussed in the lesson below.
 
@@ -251,22 +251,22 @@ It turned out the math was rigged. A valid probability distribution must sum to 
 
 ### The Lesson
 
-Both cases point to the same underlying reality. A well-trained language model is already a calibrated entropy estimator: where it predicts a flat distribution, the text really is hard to predict; where it is confident, the text really is predictable.[^entropy] The correlation between the model's uncertainty and the true information content is tight. That is exactly why PPM-D and n-gram statistics could not deliver incredible gains. They were identifying the same easy tokens the model already had low entropy on. For an external signal to genuinely help, its errors would need to be *uncorrelated* with the model's — it would need to be uncertain where the model is confident, and vice versa.
+Both cases point to the same underlying reality. A well-trained language model is already a calibrated entropy estimator: where it predicts a flat distribution, the text really is hard to predict; where it is confident, the text really is predictable.[^entropy] The correlation between the model's uncertainty and the true information content is tight. That is exactly why PPM-D and n-gram statistics could not deliver incredible gains. They were identifying the same easy tokens the model already had low entropy on. For an external signal to genuinely help, its errors would need to be *uncorrelated* with the model's: it would need to be uncertain where the model is confident, and vice versa.
 
-There is no silver bullet. The progress that held was incremental, compounding, and hard-won — one careful PR at a time.
+There is no silver bullet. The progress that held was incremental, compounding, and hard-won, one careful PR at a time.
 
-[^entropy]: The expected entropy at a position is $H = -\sum_t p(t) \log_2 p(t)$, where the sum is over all possible next tokens. This measures how spread out the model's distribution is — high entropy means the model is uncertain, low entropy means it is confident. A well-calibrated model's expected entropy correlates tightly with the actual information content of the text at that position.
+[^entropy]: The expected entropy at a position is $H = -\sum_t p(t) \log_2 p(t)$, where the sum is over all possible next tokens. This measures how spread out the model's distribution: high entropy means the model is uncertain; low entropy means it is confident. A well-calibrated model's expected entropy correlates tightly with the actual information content of the text at that position.
 
 ---
 
 ## 4. Drama on the Last Day
 
-This competition did not go quietly. On April 30th, the day before the competition closed, PR #2014 dropped at **1.0576 BPB** — a clean record built on the new idea of progressive context scheduling. The field had been grinding toward this number for weeks. Shortly after, a flurry of PRs appeared beating it: **1.047** (a 0.011 gap), **1.043** (a 0.015 gap) — numbers that seemed implausibly good.
+This competition did not go quietly. On April 30th, the day before the competition closed, PR #2014 dropped at **1.0576 BPB**, a clean record built on the new idea of progressive context scheduling. The field had been grinding toward this number for weeks. Shortly after, a flurry of PRs appeared beating it: **1.047** (a 0.011 gap), **1.043** (a 0.015 gap), numbers that seemed implausibly good.
 
-However, the reason turned out to be nothing anyone had anticipated. `prepare_caseops_data.py` — the script everyone had been copying to build CaseOps datasets since PR #1736 — defaulted to `--val-docs=10000`. Training started at document 10,000, when it should have started at 50,000. What's wrong with that? The validation set covers documents 0 through 49,999. Starting training at 10,000 meant that 40,000 out of 50,000 validation documents — eighty percent — had been in the training data the whole time. It is like giving students the test questions as homework to prepare for the exam. 
+However, the reason turned out to be nothing anyone had anticipated. `prepare_caseops_data.py` (the script everyone had been copying to build CaseOps datasets since PR #1736) defaulted to `--val-docs=10000`. Training started at document 10,000, when it should have started at 50,000. What's wrong with that? The validation set covers documents 0 through 49,999. Starting training at 10,000 meant that 40,000 out of 50,000 validation documents, eighty percent of which, had been in the training data the whole time. It is like giving students the test questions as homework to prepare for the exam. 
 
-Many PRs were eventually classified as leaky (Issue #2127), most of their authors having inherited the data setup from earlier submissions without knowing. As it turned out, the bug had been caught and quietly fixed eight days earlier — then accidentally reintroduced on the very same day. The person who first discovered and patched it was also the one sitting at the top of the leaderboard with that 1.043 score.
+Many PRs were eventually classified as leaky (Issue #2127), most of their authors having inherited the data setup from earlier submissions without knowing. As it turned out, the bug had been caught and quietly fixed eight days earlier, then accidentally reintroduced on the very same day. The person who first discovered and patched it was also the one sitting at the top of the leaderboard with that 1.043 score.
 
-With the leaky PRs disqualified, #2014 was restored as the clean SOTA — and with a full day still left on the clock, the door was wide open. A last-hour flurry of clean PRs came in, each trying to be the one to beat it. When the dust settled, one did: **PR #2135** at **1.0565 BPB**, by a margin of just 0.001. One clean submission, one narrow margin, one number that stood. A picture-perfect finish to a competition that had everything.
+With the leaky PRs disqualified, #2014 was restored as the clean SOTA, and with a full day still left on the clock, the door was wide open. A last-hour flurry of clean PRs came in, each trying to be the one to beat it. When the dust settled, one did: **PR #2135** at **1.0565 BPB**, by a margin of just 0.001. One clean submission, one narrow margin, one number that stood. A picture-perfect finish to a competition that had everything.
 
-Six weeks, two thousand pull requests, and a 14% improvement wrung out of the same hardware, the same data, the same ten minutes — through nothing but engineering. One default flag nearly rewrote the ending. Two methods that looked like miracles turned out to be mistakes. And in the end, what remained was a small, sophisticated model built from a careful accumulation of every technique described above.
+Six weeks, two thousand pull requests, and a 14% improvement wrung out of the same hardware, the same data, the same ten minutes, through nothing but engineering. One default flag nearly rewrote the ending. Two methods that looked like miracles turned out to be mistakes. And in the end, what remained was a small, sophisticated model built from a careful accumulation of every technique described above.
