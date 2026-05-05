@@ -529,3 +529,51 @@ apparent uncertainty on multi-byte tokens, then giving PPM spurious credit
 for resolving it. The 0.8x BPB figures were an artifact of the scoring
 construction, not a real compression improvement.
 
+### Drama on the Last Day
+
+On April 30th — the day before the competition closed — PR #2014 dropped
+at **1.0576 BPB**, a clean record built on progressive context scheduling.
+Then in the final hours, a flurry of PRs appeared beating it: **1.047**,
+**1.043**, numbers that seemed implausibly good. The field looked wide open.
+
+People started looking more closely.
+
+It turned out that `prepare_caseops_data.py` — the script everyone had
+been copying to build CaseOps datasets since PR #1736 — defaulted to
+`--val-docs=10000`. Training started at document 10,000; validation
+covered documents 0–50,000. Eighty percent of the validation set had been
+in training the whole time.
+
+Fifteen PRs were eventually classified as leaky (Issue #2127), most of
+their authors having inherited the data setup from earlier submissions
+without knowing. The fix had actually been discovered and quietly deployed
+eight days earlier, then re-introduced independently on the same day. The
+best detail: the author who first caught and fixed the bug also submitted
+PR #2118 — the most egregiously leaked PR of the competition — whose own
+`submission.json` admitted the overlap in its technique summary field.
+
+When the dust settled, one PR stood as the clean improvement over #2014:
+**PR #2135** at **1.0565 BPB**, by a narrow margin of 0.001. The final
+SOTA of the competition.
+
+---
+
+## Looking Back
+
+Six weeks. Two thousand pull requests. A 0.168 BPB drop from a number
+that already looked hard to beat.
+
+Looking back, this competition had everything. Techniques stacking on top
+of each other in ways nobody planned — a tokenizer change enabling an
+architecture change enabling a training change, the whole thing only
+working because each piece made the others more effective. Ingenious
+innovations that shouldn't have worked but did: loops over layers that
+were cheaper than they looked, byte-level scoring rewarding longer tokens
+in ways that inverted the obvious vocabulary intuition. Controversial
+methods that looked like miracles — submissions claiming 0.8 BPB when the
+field was at 1.06, scores that made people stop and ask whether the rules
+of physics had changed. Mayhem on the last day, with the leaderboard in
+flux and half the field unknowingly racing on contaminated data. And then
+a picture-book finish: one clean submission, one narrow margin, one number
+that stood.
+
