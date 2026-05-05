@@ -163,7 +163,7 @@ This squeezes more computation out of each of the final layers without adding pa
 
 **Loop curriculum (PR #1420).** The recurrence loop does not activate from the start of training. For the first 35% of wallclock (~3.5 minutes), the model trains as a standard 11-layer network. The loop then switches on for the remainder. The reason is throughput: 17 effective layers is significantly slower per step than 11. By delaying the loop, the model gets more gradient steps within the 10-minute budget before paying the cost.
 
-The final training run is a choreographed 10 minutes: fast 11-layer passes early, the loop switching on at the 35% mark, context growing from 1024 to 2048 to 3072 tokens as the clock runs down (PR #2014).
+The final training run is a well-choreographed 10-minute dance. The learning rate warms up over the first steps, then holds steady for the bulk of training, then warmdowns to a floor as the clock runs down. The loop activates at the 35% mark, shifting the model into its deeper recurrent mode. And towards the end, context grows progressively from 1024 to 2048 to 3072 tokens (PR #2014), giving the model long-range representations right when it needs them most. Every decision is timed to extract the most signal from a budget that ends the moment the last second expires.
 
 ---
 
