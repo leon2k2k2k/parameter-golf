@@ -32,7 +32,15 @@ What followed over the next six weeks looked, from the outside, like just anothe
 
 ## 1. The Competition
 
-*(draft pending)*
+The models in this competition are trained and scored on FineWeb, a large dataset of cleaned web text. The score is computed on a held-out validation slice that none of the models ever train on directly.
+
+The scoring formula is the average negative log-probability the model assigns to each token, normalized by the number of UTF-8 bytes in the original text:
+
+$$\text{BPB} = \frac{-\sum_k \log_2 p(t_k \mid t_1, \ldots, t_{k-1})}{\text{number of bytes}}$$
+
+Think of it as a measure of surprise: at each position, the model makes a prediction, and we ask how surprised it was by what actually came next. A model that is never surprised scores close to zero; a model that is constantly wrong scores high. Lower is better.
+
+The baseline OpenAI provided started at **1.2244 BPB**. Six weeks later, the community had pushed it to **1.0565** — a 14% reduction, achieved purely through algorithmic improvements with no change to the hardware or the data.
 
 ---
 
