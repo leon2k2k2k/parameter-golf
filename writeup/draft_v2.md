@@ -261,13 +261,9 @@ There is no silver bullet. The progress that held was incremental, compounding, 
 
 ## 4. Drama on the Last Day
 
-This competition did not go quietly.
+This competition did not go quietly. On April 30th, the day before the competition closed, PR #2014 dropped at **1.0576 BPB** — a clean record built on the new idea of progressive context scheduling. The field had been grinding toward this number for weeks. Then, in the final hours, a flurry of PRs appeared beating it: **1.047** (a 0.011 gap), **1.043** (a 0.015 gap) — numbers that seemed implausibly good. The leaderboard was in motion. The field looked wide open.
 
-On April 30th, the day before the competition closed, PR #2014 dropped at **1.0576 BPB** — a clean record built on the new idea of progressive context scheduling. The field had been grinding toward this number for weeks. Then, in the final hours, a flurry of PRs appeared beating it: **1.047** (a 0.011 gap), **1.043** (a 0.015 gap) — numbers that seemed implausibly good. The leaderboard was in motion. The field looked wide open.
-
-However, the reason turned out to be nothing anyone had anticipated. `prepare_caseops_data.py` — the script everyone had been copying to build CaseOps datasets since PR #1736 — defaulted to `--val-docs=10000`. Training started at document 10,000, when it should have started at 50,000. What's wrong with that? The validation set covers documents 0 through 49,999. Starting training at 10,000 meant that 40,000 out of 50,000 validation documents — eighty percent — had been in the training data the whole time.
-
-It is like giving students the test questions as homework to prepare for the exam. The model was not predicting held-out text; it was reciting text it had already memorized.
+However, the reason turned out to be nothing anyone had anticipated. `prepare_caseops_data.py` — the script everyone had been copying to build CaseOps datasets since PR #1736 — defaulted to `--val-docs=10000`. Training started at document 10,000, when it should have started at 50,000. What's wrong with that? The validation set covers documents 0 through 49,999. Starting training at 10,000 meant that 40,000 out of 50,000 validation documents — eighty percent — had been in the training data the whole time. It is like giving students the test questions as homework to prepare for the exam. 
 
 Fifteen PRs were eventually classified as leaky (Issue #2127), most of their authors having inherited the data setup from earlier submissions without knowing. The bug had actually been caught and quietly fixed eight days earlier, then independently reintroduced on the same day. The best detail: the author who first found and fixed the bug also submitted PR #2118 — the most egregiously leaked PR of the competition — whose own `submission.json` admitted the overlap in its technique summary field.
 
