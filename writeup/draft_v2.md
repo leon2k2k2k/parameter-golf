@@ -195,6 +195,8 @@ The LoRA handles fast local adaptation per document; the global SGD step shifts 
 
 ### Other Changes
 
+Many other techniques were introduced over the six weeks that contributed to the final model. We list the most significant ones here.
+
 | Component | Change | PR |
 |---|---|---|
 | Architecture | XSA: removes self-copy bias from attention outputs | #287 |
