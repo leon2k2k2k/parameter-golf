@@ -183,7 +183,7 @@ Quantization and compression happen after the 10-minute training clock stops, a 
 
 #### Post-Training: TTT
 
-The 10-minute eval window is not just for scoring. The final model uses most of it to actively adapt its weights to the validation text it is about to score — test-time training (TTT).
+The final model uses its 10-minute eval window not just for scoring, but to simultaneously adapt its weights to the text it is seeing — a technique called test-time training (TTT).
 
 **Per-document LoRA (PR #1530).** The base model weights are frozen. For each validation document, a set of low-rank adapter matrices are attached to the model's projections. The document is processed in chunks: score each chunk first, then take a gradient step to update the adapters. By the final chunk, the model has already adapted to that document's style and vocabulary. The adapters reset after each document; nothing carries over.
 
