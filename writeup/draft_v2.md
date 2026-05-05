@@ -107,7 +107,7 @@ Early layers capture surface-level patterns; the skip connections feed those dir
 
 **Post-training adaptation.** None. The 10-minute eval window was used only for scoring.
 
-This baseline scored **1.2244 BPB**. Here is what changed.
+This baseline scored **1.2244 BPB**. By the end of the competition, the best submission had reached **1.0565 BPB** — the same hardware, the same data, the same 10 minutes, and a model that had been rebuilt almost from scratch across every one of those five components. The rest of this section traces how.
 
 ---
 
