@@ -216,17 +216,11 @@ The final model is a messy, sophisticated combination of all of the above: signi
 
 One might imagine the leaderboard as a steady downward curve from 1.2244 to 1.0565 over six weeks. The reality was anything but. Periodically, a submission would appear claiming a score far below the rest of the field — dropping below 1.0, well beyond what any single technique could explain. Others would quickly follow, stacking on top of the same method, while long threads of debate opened about whether the technique was valid at all. As it turned out, they were all too good to be true. We examine the two most important cases here, and the lesson they leave behind.
 
-A pretrained model is static. It knows nothing about what has already appeared in the document it is currently scoring. If a document mentions "San Francisco" ten times, the model treats the eleventh occurrence the same as the first. Several submissions tried to close this gap by running lightweight online statistics alongside the model: track what has appeared so far in this document, and use that to sharpen the predictions. Two approaches in particular attracted significant attention — and both ran into legality problems.[^rules]
-
-[^rules]: The competition launched without a complete ruleset. As participants found increasingly creative ways to improve their scores, four constraints were codified mid-competition through community discussion in Issue #1017: **C1 (causal eval)** — the probability assigned to token tₖ must depend only on the tokens before it, never the token itself; **C2 (normalized distribution)** — the output must be a valid probability distribution summing to exactly 1; **C3 (score before update)** — in TTT, a chunk must be fully scored before any gradient step is applied to it; **C4 (single pass)** — each token is scored exactly once.
-
 ### N-gram Tilt
 
 An n-gram model tracks token co-occurrence statistics: given the last few tokens, what token tends to come next? The idea behind n-gram tilting (PR #1145) was to run a lightweight n-gram counter alongside the neural model, updated as each token is scored, and use it to boost the probabilities of tokens that the recent history strongly predicts. No extra artifact bytes, no parameters — just a running table built from the document itself.
 
-Using the exam analogy: at each question, you consult your notes on what you have seen so far in this document, and nudge your answer accordingly. This is legal — you are still committing before seeing the correct answer.
-
-The implementation had three expert channels. The token expert was clean. The within-word and word-start experts had a classic C1 violation (PR #1420):
+While the idea is sound, the implementation had a subtle causality issue.[^rules] The within-word and word-start experts had a classic C1 violation (PR #1420):
 
 ```c
 const uint16_t tok = tokens[i];  // the target token being predicted
@@ -235,7 +229,9 @@ if (!is_boundary && st->within_len > 0U)
     within_valid[i] = 1U;        // fire the hint at position i
 ```
 
-The gate reads `tokens[i]` — the token being predicted — before scoring position i. In the exam analogy: you peek at the correct answer, then decide how confident to be. A causal system cannot know whether the next token is a continuation token before seeing it; in the shipped code, 100% of positions where the within-word expert fired were continuation tokens. No honest predictor can achieve that.
+The gate reads `tokens[i]` — the token being predicted — before scoring position i. It is like filling in all the answers on an exam, then peeking at the answer key, erasing the wrong ones, and handing it in. A causal system cannot know whether the next token is a continuation token before seeing it; in the shipped code, 100% of positions where the within-word expert fired were continuation tokens. No honest predictor can achieve that.
+
+[^rules]: The competition launched without a complete ruleset. As participants found increasingly creative ways to improve their scores, four constraints were codified mid-competition through community discussion in Issue #1017: **C1 (causal eval)** — the probability assigned to token tₖ must depend only on the tokens before it, never the token itself; **C2 (normalized distribution)** — the output must be a valid probability distribution summing to exactly 1; **C3 (score before update)** — in TTT, a chunk must be fully scored before any gradient step is applied to it; **C4 (single pass)** — each token is scored exactly once.
 
 The fix (PR #1514): disable within-word and word-start entirely, keep only the token-order-16 expert. That clean expert survived into the final SOTA.
 
