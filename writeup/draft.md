@@ -529,7 +529,7 @@ apparent uncertainty on multi-byte tokens, then giving PPM spurious credit
 for resolving it. The 0.8x BPB figures were an artifact of the scoring
 construction, not a real compression improvement.
 
-### Drama on the Last Day
+## Drama on the Last Day
 
 On April 30th — the day before the competition closed — PR #2014 dropped
 at **1.0576 BPB**, a clean record built on progressive context scheduling.
@@ -555,10 +555,6 @@ PR #2118 — the most egregiously leaked PR of the competition — whose own
 When the dust settled, one PR stood as the clean improvement over #2014:
 **PR #2135** at **1.0565 BPB**, by a narrow margin of 0.001. The final
 SOTA of the competition.
-
----
-
-## Looking Back
 
 Six weeks, two thousand pull requests, a 0.168 BPB drop from a number
 that already looked hard to beat. This competition had everything:
