@@ -209,7 +209,7 @@ every one of those five components. The rest of this section traces how.
 
 ---
 
-### The Final Model
+### The Evolution
 
 #### Tokenizer
 
