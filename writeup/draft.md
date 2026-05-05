@@ -451,3 +451,81 @@ significant structural innovations layered on top of dozens of smaller
 refinements, each contributing a fraction of the 0.17 BPB gap to the
 baseline.
 
+---
+
+## Part 2 — The Disqualifications
+
+At various points in the competition, the open PR list showed submissions
+claiming BPB in the 0.8–1.0 range — well below what the merged leaderboard
+reflected. These numbers were real in the sense that the code produced
+them, but they were not valid scores: the techniques behind them violated
+one of the competition's core conditions. We discuss two such techniques
+and one data leak here.
+
+A pretrained model is static — it knows nothing about what has already
+appeared in the document it is currently scoring. If a document mentions
+"San Francisco" ten times, the model treats the eleventh occurrence the
+same as the first. Several submissions tried to close this gap by running
+lightweight online statistics alongside the model: track what has appeared
+so far in this document, and use that to sharpen the model's predictions.
+Two approaches in particular — n-gram tilting and PPM-D — attracted
+significant attention, and both ultimately ran into legality problems.
+
+### N-gram Tilt
+
+An online n-gram tilt (PR #1145) maintains a prefix-keyed hash table of
+token co-occurrence statistics, updated as each token is scored. At each
+position, if the recent token history strongly predicts a specific next
+token, that token's probability gets a boost before the loss is computed.
+No extra artifact bytes, no parameters — just a running table built from
+the document itself.
+
+The implementation used three expert channels — token n-gram, within-word
+continuation, and word-start. The token expert was clean. The within-word
+and word-start experts had a classic C1 violation (PR #1420):
+
+```c
+const uint16_t tok = tokens[i];  // the target token being predicted
+const uint8_t is_boundary = boundary_lut[tok];
+if (!is_boundary && st->within_len > 0U)
+    within_valid[i] = 1U;        // fire the hint at position i
+```
+
+The gate reads `tokens[i]` before scoring position i — the label, not the
+prefix. In the shipped code, 100% of positions where the within-word
+expert fired were continuation tokens; no causal system can achieve that.
+The fix (PR #1514): disable within-word and word-start entirely, keep only
+the token-order-16 expert. That clean expert survived into the final SOTA.
+
+### PPM-D
+
+PPM-D (Prediction by Partial Matching) is a classical lossless compression
+algorithm. It maintains a trie of byte n-gram counts and at each position
+predicts the next byte by looking up the longest matching context, falling
+back to shorter contexts when the full history hasn't been seen before. It
+was state-of-the-art for text compression before neural networks and is
+particularly effective at within-document repetition: once "San Francisco"
+has appeared several times, the byte sequence becomes highly predictable.
+
+The appeal for parameter golf was direct: BPB is charged at the byte level,
+and PPM-D operates at the byte level. A cluster of submissions (starting
+with PR #1785) mixed PPM-D with the neural net by spreading each token's
+probability uniformly across its bytes — an n-byte token with probability p
+contributing p^(1/n) to each of its byte positions — then taking a convex
+combination with PPM-D's byte predictions. Claimed scores dropped into the
+0.8–1.0 range.
+
+The problem, identified in Issue #1872, is that the spread does not produce
+a valid probability distribution. For any multi-byte token with p < 1,
+p^(1/n) > p — the per-byte contributions are inflated. Summing across all
+tokens that start with a given byte gives more than 1.0. The mixture is not
+normalized, violating C2.
+
+PR #1905 ran the decisive experiment: using the same PPM configuration but
+with a correct byte marginal (the proper way to convert token probabilities
+to byte probabilities), PPM-D was *worse* than the baseline by 0.038 BPB.
+The entire apparent gain came from the invalid spread inflating the NN's
+apparent uncertainty on multi-byte tokens, then giving PPM spurious credit
+for resolving it. The 0.8x BPB figures were an artifact of the scoring
+construction, not a real compression improvement.
+
