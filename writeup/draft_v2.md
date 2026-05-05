@@ -229,11 +229,11 @@ if (!is_boundary && st->within_len > 0U)
     within_valid[i] = 1U;        // fire the hint at position i
 ```
 
-The gate reads `tokens[i]` — the token being predicted — before scoring position i. It is like filling in all the answers on an exam, then peeking at the answer key, erasing the wrong ones, and handing it in. A causal system cannot know whether the next token is a continuation token before seeing it; in the shipped code, 100% of positions where the within-word expert fired were continuation tokens. No honest predictor can achieve that.
+The gate reads `tokens[i]` — the token being predicted — before scoring position i. It is like filling in all the answers on an exam, then peeking at the answer key before erasing the wrong ones. A causal system cannot know whether the next token is a continuation token before seeing it. Later on, PR #1514 disable within-word and word-start entirely, keep only the token-order-16 expert. That clean expert survived into the final SOTA.
+
 
 [^rules]: The competition launched without a complete ruleset. As participants found increasingly creative ways to improve their scores, four constraints were codified mid-competition through community discussion in Issue #1017: **C1 (causal eval)** — the probability assigned to token tₖ must depend only on the tokens before it, never the token itself; **C2 (normalized distribution)** — the output must be a valid probability distribution summing to exactly 1; **C3 (score before update)** — in TTT, a chunk must be fully scored before any gradient step is applied to it; **C4 (single pass)** — each token is scored exactly once.
 
-The fix (PR #1514): disable within-word and word-start entirely, keep only the token-order-16 expert. That clean expert survived into the final SOTA.
 
 ---
 
