@@ -216,6 +216,55 @@ The final model is a messy, sophisticated combination of all of the above: signi
 
 One might imagine the leaderboard as a steady downward curve from 1.2244 to 1.0565 over six weeks. The reality was anything but. Periodically, a submission would appear claiming a score far below the rest of the field — dropping below 1.0, well beyond what any single technique could explain. Others would quickly follow, stacking on top of the same method. Long threads of debate would open about whether the technique was valid. As it turned out, they were all too good to be true. We examine the two most important cases here, and the lesson they leave behind.
 
+A pretrained model is static. It knows nothing about what has already appeared in the document it is currently scoring. If a document mentions "San Francisco" ten times, the model treats the eleventh occurrence the same as the first. Several submissions tried to close this gap by running lightweight online statistics alongside the model: track what has appeared so far in this document, and use that to sharpen the predictions. Two approaches in particular attracted significant attention — and both ran into legality problems.[^rules]
+
+[^rules]: The competition launched without a complete ruleset. As participants found increasingly creative ways to improve their scores, four constraints were codified mid-competition through community discussion in Issue #1017: **C1 (causal eval)** — the probability assigned to token tₖ must depend only on the tokens before it, never the token itself; **C2 (normalized distribution)** — the output must be a valid probability distribution summing to exactly 1; **C3 (score before update)** — in TTT, a chunk must be fully scored before any gradient step is applied to it; **C4 (single pass)** — each token is scored exactly once.
+
+### N-gram Tilt
+
+An n-gram model tracks token co-occurrence statistics: given the last few tokens, what token tends to come next? The idea behind n-gram tilting (PR #1145) was to run a lightweight n-gram counter alongside the neural model, updated as each token is scored, and use it to boost the probabilities of tokens that the recent history strongly predicts. No extra artifact bytes, no parameters — just a running table built from the document itself.
+
+Using the exam analogy: at each question, you consult your notes on what you have seen so far in this document, and nudge your answer accordingly. This is legal — you are still committing before seeing the correct answer.
+
+The implementation had three expert channels. The token expert was clean. The within-word and word-start experts had a classic C1 violation (PR #1420):
+
+```c
+const uint16_t tok = tokens[i];  // the target token being predicted
+const uint8_t is_boundary = boundary_lut[tok];
+if (!is_boundary && st->within_len > 0U)
+    within_valid[i] = 1U;        // fire the hint at position i
+```
+
+The gate reads `tokens[i]` — the token being predicted — before scoring position i. In the exam analogy: you peek at the correct answer, then decide how confident to be. A causal system cannot know whether the next token is a continuation token before seeing it; in the shipped code, 100% of positions where the within-word expert fired were continuation tokens. No honest predictor can achieve that.
+
+The fix (PR #1514): disable within-word and word-start entirely, keep only the token-order-16 expert. That clean expert survived into the final SOTA.
+
+---
+
+### PPM-D
+
+PPM-D (Prediction by Partial Matching) is a classical lossless compression algorithm. It maintains a trie of byte n-gram counts and at each position predicts the next byte by looking up the longest matching context, falling back to shorter contexts when the full history has not been seen. It was state-of-the-art for text compression before neural networks, and is particularly effective at within-document repetition: if "San Francisco" has appeared several times, the byte sequence becomes highly predictable.
+
+The appeal was direct: BPB is charged at the byte level, and PPM-D operates at the byte level. A cluster of submissions (starting with PR #1785) mixed PPM-D with the neural net by spreading each token's probability uniformly across its bytes — an n-byte token with probability p contributing p^(1/n) to each of its byte positions — then taking a convex combination with PPM-D's byte predictions. Claimed scores dropped into the 0.8–1.0 range.
+
+The problem, identified in Issue #1872, was a C2 violation. For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated. Summing across all tokens that start with a given byte gives more than 1.0. Back to the exam analogy: the model was effectively assigning more than 100% total probability mass — like giving 90% to each of four options simultaneously. The score looked excellent because the math was broken.
+
+PR #1905 ran the decisive experiment: using the same PPM configuration but with a correct byte marginal, PPM-D was *worse* than the baseline by 0.038 BPB. The entire apparent gain was an artifact of the invalid spread. The 0.8x figures were not real.[^ppmd]
+
+[^ppmd]: The correct way to convert token probabilities to byte probabilities is to sum over all tokens that share the same byte prefix, weighted by their probabilities. This is more expensive and, as PR #1905 showed, yields no gain over the neural model alone. The deeper reason is discussed in the lesson below.
+
+---
+
+### The Lesson
+
+Both cases point to the same underlying reality. A well-trained language model is already a calibrated entropy estimator: where it predicts a flat distribution, the text really is hard to predict; where it is confident, the text really is predictable. The correlation between the model's uncertainty and the true information content is tight.
+
+That is exactly why PPM-D and n-gram statistics could not deliver. They were identifying the same easy tokens the model already had low entropy on. For an external signal to genuinely help, its errors would need to be *uncorrelated* with the model's — it would need to be uncertain where the model is confident, and vice versa. PPM-D tracks recency and local byte patterns; the transformer already captures those through attention. N-gram statistics track local co-occurrence; attention captures that too. There is no orthogonal signal left to harvest.
+
+To genuinely improve over a well-calibrated neural model, you would need something that sees structure the transformer fundamentally cannot. It is not obvious what that is. And in this competition, nobody found it.
+
+There is no silver bullet. The progress that held was incremental, compounding, and hard-won — one careful PR at a time.
+
 ---
 
 ## 4. Drama on the Last Day
