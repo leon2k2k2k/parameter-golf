@@ -241,15 +241,11 @@ The gate reads `tokens[i]` — the token being predicted — before scoring posi
 
 ### PPM-D
 
-PPM-D (Prediction by Partial Matching) is the technique behind the PRs with the most impressive claims: scores in the 0.8–1.0 range, far below anything the model improvements above could explain.
-
-PPM-D is a classical byte-level compression algorithm. It simply counts byte n-grams: given the last few bytes, what byte tends to come next? It is particularly good at within-document repetition. Think of a Russian novel where a character's long name appears dozens of times — after the first few occurrences, PPM-D can predict the exact spelling almost perfectly, byte by byte. The neural model, by contrast, has no special memory for what has already appeared in this document.
-
-The idea was to blend PPM-D's predictions with the neural model's: an n-byte token with probability p contributing p^(1/n) to each of its byte positions, then mixing with PPM-D. Claimed scores dropped dramatically.
+PPM-D (Prediction by Partial Matching) is the technique behind the PRs with the most impressive claims: scores in the 0.8–1.0 range, far below anything other techniques offered. It is a classical byte-level compression algorithm that counts byte n-grams: given the last few bytes, what byte tends to come next? It is particularly good at within-document repetition. Think of a Russian novel where a character's long name appears dozens of times — after the first few occurrences, PPM-D can predict the exact spelling almost perfectly, byte by byte. The neural model, by contrast, has no special memory for what has already appeared in this document. The PRs blended PPM-D's predictions with the neural model's: an n-byte token with probability p contributing p^(1/n) to each of its byte positions, then mixing with PPM-D. Claimed scores dropped dramatically.
 
 It turned out the math was rigged. A valid probability distribution must sum to exactly 1 — this is C2. For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated, and summing across all tokens that share a given byte gives more than 1.0. In the exam analogy: assigning 90% to each of four answer options simultaneously. The score looked excellent because the scoring formula was fed an invalid distribution. Why the broken math produced such dramatic gains — and why the correct version is actually *worse* than the baseline — is a more interesting story, explained in PR #1905.[^ppmd]
 
-[^ppmd]: The correct way to convert token probabilities to byte probabilities is to sum over all tokens that share the same byte prefix, weighted by their probabilities. This is more expensive and, as PR #1905 showed, yields no gain over the neural model alone. The deeper reason is discussed in the lesson below.
+[^ppmd]: The correct way to convert token probabilities to byte probabilities is to sum over all tokens that share the same byte prefix, weighted by their probabilities. When counted correctly, it turns out that PPM-D yields no gain over the neural model alone. The deeper reason is discussed in the lesson below.
 
 ---
 
