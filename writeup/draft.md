@@ -276,12 +276,12 @@ with loop: 1 → 2 → 3 → 4 → 5 → 3 → 4 → 5 → 3 → 4 → 5 → 6 �
 ```
 
 17 effective processing steps from 11 physical layers, at zero additional
-parameter cost. Notably, the model does not start training with this
-structure — the loop activates partway through training, once the weights
-have stabilized enough for repeated application to help rather than hurt.
-We'll cover the training curriculum in the next section.
+parameter cost. PR #1344 introduced the structure with 2 passes over
+layers 3–5; the final configuration of 3 passes was established in later
+records. Notably, the model does not start training with the loop active
+— we cover the training curriculum in the next section.
 
-**Parallel residuals (PR #1530).** In a standard transformer layer,
+**Parallel residuals (PR #1204, from layer 8 in PR #1529).** In a standard transformer layer,
 attention and MLP run sequentially — attention first, then MLP on the
 result. From layer 8 onward, the final model runs them in parallel: both
 branches receive the same input x, and their outputs are added together:
@@ -312,10 +312,11 @@ from other tokens. Applied to all layers, it was one of the larger single
 architectural improvements in the competition.
 
 A number of smaller changes also accumulated: a learned SmearGate blending
-each token with its neighbor (PR #1667), a narrow attention output gate
-(PR #1787), a LeakyReLU² MLP activation replacing GELU (PR #493), partial
-RoPE with layer-norm scaling (PR #315), sigmoid-gated U-Net skips
-replacing the baseline's plain weighted connections (PR #289).
+each token with its neighbor (first introduced in PR #162, reintroduced in
+the SP8192 era in PR #1667), a multiplicative attention output gate first
+in PR #1667 then narrowed to a sparse form in PR #1787, a LeakyReLU² MLP
+activation replacing relu² (PR #493), partial RoPE with layer-norm scaling
+(PR #315), and sigmoid-gated U-Net skip connections (PR #289).
 
 ---
 
@@ -335,10 +336,10 @@ weight iterates throughout training — the eval model is this running
 average, not the last step. Because SGD iterates are noisy, the average
 sits in a flatter, more stable region of the loss landscape and
 generalizes significantly better. EMA replaced stochastic weight
-averaging early in the competition; the decay value of 0.9965 was set
-once and never revisited through the final SOTA.
+averaging early in the competition; the decay value introduced in PR #287
+was never revisited through the final SOTA.
 
-**Depth recurrence curriculum (PR #1344).** The loop over layers 3–5 does not
+**Depth recurrence curriculum (PR #1420).** The loop over layers 3–5 does not
 activate from the start of training. For the first 35% of wallclock
 (~3.5 minutes), the model trains as a standard 11-layer network. The
 loop then switches on and runs for the remainder. The reason is throughput: 17 effective layers is significantly slower per
@@ -354,8 +355,7 @@ representations by the end without paying the throughput cost of 3k
 sequences from step one.
 
 Taken together, the training loop is a carefully choreographed 10
-minutes: fast 11-layer passes early, the recurrence loop switching on at
-the halfway point, context growing longer as the clock runs down — every
+minutes: fast 11-layer passes early, the recurrence loop switching on at the 35% mark, context growing longer as the clock runs down — every
 decision timed to extract the most signal from a budget that ends the
 moment the last second expires.
 
@@ -374,16 +374,15 @@ matter for the size budget. The baseline rounded MLP weights to int6 using
 simple nearest-neighbour rounding. The final model does something
 considerably more sophisticated.
 
-**GPTQ (PR #1019).** The core insight of GPTQ: when you round a weight,
+**GPTQ (PR #535).** The core insight of GPTQ: when you round a weight,
 you introduce an error. Instead of ignoring that error, you can
 compensate for it by adjusting the remaining unquantized weights in the
 same layer. GPTQ uses the Hessian of the loss — second-order information
 about how sensitive the output is to each weight — to compute these
 compensating adjustments. The result is a quantized model that stays
 much closer to the original's predictions than naive rounding would
-achieve. This evolved from MLP-only (PR #1019) to all weights including
-attention (PR #1285) to embeddings quantized at int7 (PR #1394 → PR
-#1586).
+achieve. This evolved to all weights including attention (PR #1285) and
+embeddings quantized at int7 (PR #1394 → PR #1586).
 
 **LQER (PR #1797).** After GPTQ, some quantization error remains.
 LQER stores a correction: compute the residual between the original and
@@ -427,8 +426,8 @@ document is done, the LoRA resets — nothing carries over to the next
 document, keeping each document's adaptation independent.
 
 **Global SGD phase (PR #1610/#1626).** On top of the per-document LoRA,
-there is a single global pause after the first 2500 documents have been
-scored. At that point, a full SGD pass runs on the base model weights
+there is a global pause after an initial batch of documents have been
+scored (2000 in PR #1610, refined to 2500 in PR #1626). At that point, a full SGD pass runs on the base model weights
 themselves — not just the LoRA — using all 2500 already-scored documents
 as training data. The base model is then updated, the LoRA resets, and
 the remaining ~47,500 documents are scored on top of this improved base.
