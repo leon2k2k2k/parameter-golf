@@ -8,7 +8,7 @@
 
 *From the FineWeb validation set, same 150-token context fed to both models:*
 
-| | SP1024 Baseline · 1.22 BPB | 060A Research Model · 1.06 BPB |
+| | SP1024 Baseline · 1.22 BPB | Near-SOTA Model · 1.06 BPB |
 |---|---|---|
 | *"…his driver license and auto insurance had been cancelled in October. This poses a problem for"* | the estate, though internalieness to gets the pass. It is a fat check that's gives ges auto insurance company… that's a **fairyyyyyyyyyyyyyyyyyyyyy** | the estate's creditors who need to work out a payment, especially with the new insurance regulations in october… |
 | *"…New host Steve Byrnes was feeling his way through this"* | season. He had just had a short, **bad weekkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk** | season's show, and while he played one of the best nights of his career at the same time, he hadn't been able to really shine since the first Nashville game… |
@@ -16,7 +16,7 @@
 
 *Prompted with "You are a helpful AI assistant. Please answer the following question." (not very good at general conversation):*
 
-| | SP1024 Baseline · 1.22 BPB | 060A Research Model · 1.06 BPB |
+| | SP1024 Baseline · 1.22 BPB | Near-SOTA Model · 1.06 BPB |
 |---|---|---|
 | *"The history of the internet began in the 1960s when"* | the Netherlands had established a strong supply of information about the **Canadian government and its supply chains**. The German government, in its own right, is commonly established as a matter of legal… | the internet became the **first electronic commerce tool** that was used by many people, including children, to connect online. the internet is now used by more than 3 billion users worldwide… |
 | *"What is 15 multiplied by 13? Let me work it out:"* | **1. 2. 3. 4. 5. 6. 7. 8. 9. 10. 11. 12. 14. 13.** 14. 15. 16. 17. 18. 19. **19.** 20.1 | 15 multiples 13 have 15, for example, 15, for **1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000** |
