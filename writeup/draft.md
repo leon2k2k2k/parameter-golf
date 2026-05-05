@@ -140,7 +140,7 @@ is the right starting point.)*
 
 OpenAI's starting model was already not a simple transformer, not a plain
 NanoGPT-style stack of attention and MLP layers. The baseline was more
-carefully engineered than that.
+carefully engineered than that. Let's break it down.
 
 **Tokenizer.** The baseline used SentencePiece with a 1024-token vocabulary
 (SP1024), trained on the same FineWeb corpus used for scoring. A 1024-token
