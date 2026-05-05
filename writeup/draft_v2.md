@@ -84,7 +84,22 @@ OpenAI's starting model was already not a plain stack of blocks. Let's break it 
 
 **Tokenizer.** The baseline used SentencePiece with a 1024-token vocabulary (SP1024). A 1024-token vocabulary is small by modern standards — GPT-2 uses 50,000 — but keeps the embedding table compact, which matters when the entire model has to fit in 16,000,000 bytes.
 
-**Model architecture.** A 9-layer, 512-dimensional transformer with U-Net skip connections (each decoder layer receives a residual from its mirror encoder layer), grouped-query attention (GQA) to reduce parameter count, and rotary positional embeddings (RoPE).
+**Model architecture.** A 9-layer, 512-dimensional transformer with U-Net skip connections, grouped-query attention (GQA), and rotary positional embeddings (RoPE). The U-Net pattern adds direct connections from early layers into their mirror late layers:
+
+```
+# Standard transformer
+h = block_1(h); h = block_2(h); ...; h = block_9(h)
+
+# U-Net: decoder layers receive a skip from their encoder mirror
+h1 = block_1(h);  h2 = block_2(h);  h3 = block_3(h);  h4 = block_4(h)
+h5 = block_5(h4)                              # bottleneck
+h6 = block_6(h5 + w * h4)                    # skip from layer 4
+h7 = block_7(h6 + w * h3)                    # skip from layer 3
+h8 = block_8(h7 + w * h2)                    # skip from layer 2
+h9 = block_9(h8 + w * h1)                    # skip from layer 1
+```
+
+Early layers capture surface-level patterns; the skip connections feed those directly into the late layers alongside the deeper representations.
 
 **Training.** The Muon optimizer with a linear warmup-then-warmdown learning rate schedule.
 
