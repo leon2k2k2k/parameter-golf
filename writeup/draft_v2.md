@@ -261,7 +261,9 @@ There is no silver bullet. The progress that held was incremental, compounding, 
 
 ## 4. Drama on the Last Day
 
-On April 30th, the day before the competition closed, PR #2014 dropped at **1.0576 BPB** — a clean record built on progressive context scheduling. The field had been grinding toward this number for weeks. Then, in the final hours, a flurry of PRs appeared beating it: **1.047**, **1.043**, numbers that seemed implausibly good. The leaderboard was in motion. The field looked wide open.
+This competition did not go quietly.
+
+On April 30th, the day before the competition closed, PR #2014 dropped at **1.0576 BPB** — a clean record built on the new idea of progressive context scheduling. The field had been grinding toward this number for weeks. Then, in the final hours, a flurry of PRs appeared beating it: **1.047** (a 0.011 gap), **1.043** (a 0.015 gap) — numbers that seemed implausibly good. The leaderboard was in motion. The field looked wide open.
 
 People started looking more closely.
 
