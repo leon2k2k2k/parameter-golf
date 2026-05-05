@@ -74,7 +74,7 @@ The full model is just these blocks chained one after another:
 x → block_1 → block_2 → block_3 → ... → block_N → output
 ```
 
-Each block refines the representation a little further. Stack 9 to 11 of them and you have a language model. We will come back to this picture when we discuss depth recurrence.
+Attention captures how words interact with each other — which tokens are relevant to which. The MLP then enriches the meaning of each token individually, using what attention gathered as context. Each block refines the representation a little further. Stack 9 to 11 of them and you have a language model. We will come back to this picture when we discuss depth recurrence.
 
 ---
 
