@@ -216,6 +216,8 @@ The final model is a messy, sophisticated combination of all of the above: signi
 
 One might imagine the leaderboard as a steady downward curve from 1.2244 to 1.0565 over six weeks. The reality was anything but. Periodically, a submission would appear claiming a score far below the rest of the field — dropping below 1.0, well beyond what any single technique could explain. Others would quickly follow, stacking on top of the same method, while long threads of debate opened about whether the technique was valid at all. As it turned out, they were all too good to be true. We examine the two most important cases here, and the lesson they leave behind.
 
+---
+
 ### N-gram Tilt
 
 An n-gram model tracks token co-occurrence statistics: given the last few tokens, what token tends to come next? The idea behind n-gram tilting (PR #1145) was to run a lightweight n-gram counter alongside the neural model, updated as each token is scored, and use it to boost the probabilities of tokens that the recent history strongly predicts. No extra artifact bytes, no parameters — just a running table built from the document itself.
@@ -239,15 +241,13 @@ The gate reads `tokens[i]` — the token being predicted — before scoring posi
 
 ### PPM-D
 
-A cluster of submissions (starting with PR #1785) claimed scores in the 0.8–1.0 range — far below anything the model improvements above could explain. The technique was PPM-D.
+PPM-D (Prediction by Partial Matching) is the technique behind the PRs with the most impressive claims: scores in the 0.8–1.0 range, far below anything the model improvements above could explain.
 
-PPM-D (Prediction by Partial Matching) is a classical byte-level compression algorithm. It simply counts byte n-grams: given the last few bytes, what byte tends to come next? It is particularly good at within-document repetition. Think of a Russian novel where a character's long name appears dozens of times — after the first few occurrences, PPM-D can predict the exact spelling almost perfectly, byte by byte. The neural model, by contrast, has no special memory for what has already appeared in this document.
+PPM-D is a classical byte-level compression algorithm. It simply counts byte n-grams: given the last few bytes, what byte tends to come next? It is particularly good at within-document repetition. Think of a Russian novel where a character's long name appears dozens of times — after the first few occurrences, PPM-D can predict the exact spelling almost perfectly, byte by byte. The neural model, by contrast, has no special memory for what has already appeared in this document.
 
 The idea was to blend PPM-D's predictions with the neural model's: an n-byte token with probability p contributing p^(1/n) to each of its byte positions, then mixing with PPM-D. Claimed scores dropped dramatically.
 
-The problem, identified in Issue #1872, was a C2 violation. For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated. Summing across all tokens that start with a given byte gives more than 1.0. In the exam analogy: the model was assigning more than 100% total probability mass across all options — like giving 90% to each of four answers simultaneously. The score looked excellent because the math was broken.
-
-PR #1905 ran the decisive experiment: using the same PPM configuration but with a correct byte marginal, PPM-D was *worse* than the baseline by 0.038 BPB. The entire apparent gain was an artifact of the invalid spread. The 0.8x figures were not real.[^ppmd]
+It turned out the math was rigged. A valid probability distribution must sum to exactly 1 — this is C2. For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated, and summing across all tokens that share a given byte gives more than 1.0. In the exam analogy: assigning 90% to each of four answer options simultaneously. The score looked excellent because the scoring formula was fed an invalid distribution. Why the broken math produced such dramatic gains — and why the correct version is actually *worse* than the baseline — is a more interesting story, explained in PR #1905.[^ppmd]
 
 [^ppmd]: The correct way to convert token probabilities to byte probabilities is to sum over all tokens that share the same byte prefix, weighted by their probabilities. This is more expensive and, as PR #1905 showed, yields no gain over the neural model alone. The deeper reason is discussed in the lesson below.
 
