@@ -251,67 +251,65 @@ in Part 3.
 Here we walk through the most significant architectural changes from the
 baseline to the final model.
 
-**Bigger and deeper.** The final model is 11 layers (PR #86) with a 4×
-MLP width (PR #1218), up from the baseline's 9 layers and 2× MLP width.
-Wider MLPs give each layer more capacity to store and transform
-information; more layers give the network more processing steps. Both
-changes came with higher weight decay to keep the weights compressible
-under quantization.
+- **Bigger and deeper (PR #86, PR #1218).** The final model is 11 layers
+  with a 4× MLP width, up from the baseline's 9 layers and 2× MLP width.
+  Wider MLPs give each layer more capacity; more layers give the network
+  more processing steps. Both changes came with higher weight decay to keep
+  the weights compressible under quantization.
 
-**Depth recurrence (PR #1344).** The most structurally novel change. In a
-standard transformer, each layer runs exactly once per token. The final
-model loops layers 3–5 three times per forward pass, the same three
-layers, the same weights, applied three times in sequence:
+- **Depth recurrence (PR #1344).** The most structurally novel change. In a
+  standard transformer, each layer runs exactly once per token. The final
+  model loops layers 3–5 three times per forward pass, the same three
+  layers, the same weights, applied three times in sequence:
 
-```
-standard:  1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
+  ```
+  standard:  1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
 
-with loop: 1 → 2 → 3 → 4 → 5 → 3 → 4 → 5 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
-                     └──────────────── ×3 ────────────────┘
-```
+  with loop: 1 → 2 → 3 → 4 → 5 → 3 → 4 → 5 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
+                       └──────────────── ×3 ────────────────┘
+  ```
 
-17 effective processing steps from 11 physical layers, at zero additional
-parameter cost. PR #1344 introduced the structure with 2 passes over
-layers 3–5; the final configuration of 3 passes was established in later
-records. Notably, the model does not start training with the loop active.
-We cover the training curriculum in the next section.
+  17 effective processing steps from 11 physical layers, at zero additional
+  parameter cost. PR #1344 introduced the structure with 2 passes over
+  layers 3–5; the final configuration of 3 passes was established in later
+  records. The model does not start training with the loop active; we cover
+  the training curriculum in the next section.
 
-**Parallel residuals (PR #1204, from layer 8 in PR #1529).** In a standard transformer layer,
-attention and MLP run sequentially, attention first, then MLP on the
-result. From layer 8 onward, the final model runs them in parallel: both
-branches receive the same input x, and their outputs are added together:
+- **Parallel residuals (PR #1204, from layer 8 in PR #1529).** In a
+  standard transformer layer, attention and MLP run sequentially. From
+  layer 8 onward, the final model runs them in parallel: both branches
+  receive the same input x, and their outputs are added together:
 
-```
-standard:   h = x + Attn(x),  then  h = h + MLP(h)
+  ```
+  standard:   h = x + Attn(x),  then  h = h + MLP(h)
 
-parallel:   h = x + Attn(x) + MLP(x)
-```
+  parallel:   h = x + Attn(x) + MLP(x)
+  ```
 
-This squeezes more computation out of each layer without adding parameters.
+  This squeezes more computation out of each layer without adding parameters.
 
-**XSA (PR #287).** XSA is gaining traction in the community as a simple
-attention improvement. In standard attention, each token strongly attends
-to itself, its own value vector dominating the output and acting as a
-near-identity shortcut. XSA removes this self-contribution by projecting
-it out of the attention output:
+- **XSA (PR #287).** XSA is gaining traction in the community as a simple
+  attention improvement. In standard attention, each token strongly attends
+  to itself, its own value vector dominating the output and acting as a
+  near-identity shortcut. XSA removes this self-contribution by projecting
+  it out of the attention output:
 
-```
-standard:   y  = Σⱼ αⱼ vⱼ
+  ```
+  standard:   y  = Σⱼ αⱼ vⱼ
 
-XSA:        y  = y − (y · v̂) v̂       where v̂ = v / ‖v‖
-```
+  XSA:        y  = y − (y · v̂) v̂       where v̂ = v / ‖v‖
+  ```
 
-The component of y that lies along the current token's own (normalized)
-value vector is subtracted out, forcing the model to actually use context
-from other tokens. Applied to all layers, it was one of the larger single
-architectural improvements in the competition.
+  The component of y along the current token's own value vector is
+  subtracted out, forcing the model to actually use context from other
+  tokens. Applied to all layers, it was one of the larger single
+  architectural improvements in the competition.
 
-A number of smaller changes also accumulated: a learned SmearGate blending
-each token with its neighbor (first introduced in PR #162, reintroduced in
-the SP8192 era in PR #1667), a multiplicative attention output gate first
-in PR #1667 then narrowed to a sparse form in PR #1787, a LeakyReLU² MLP
-activation replacing relu² (PR #493), partial RoPE with layer-norm scaling
-(PR #315), and sigmoid-gated U-Net skip connections (PR #289).
+- **Smaller additions.** A learned SmearGate blending each token with its
+  neighbor (PR #162, reintroduced in PR #1667), a multiplicative attention
+  output gate first in PR #1667 then narrowed in PR #1787, a LeakyReLU²
+  MLP activation replacing relu² (PR #493), partial RoPE with layer-norm
+  scaling (PR #315), and sigmoid-gated U-Net skip connections (PR #289).
 
 ---
 
