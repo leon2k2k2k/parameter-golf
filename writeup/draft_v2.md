@@ -212,7 +212,7 @@ Many other techniques were introduced over the six weeks that contributed to the
 
 ## 3. Too Good to Be True
 
-*(draft pending)*
+One might imagine the leaderboard as a steady downward curve from 1.2244 to 1.0565 over six weeks. The reality was anything but. Periodically, a submission would appear claiming a score far below the rest of the field — dropping below 1.0, well beyond what any single technique could explain. Others would quickly follow, stacking on top of the same method. Long threads of debate would open about whether the technique was valid. As it turned out, they were all too good to be true. We examine the two most important cases here, and the lesson they leave behind.
 
 ---
 
