@@ -427,10 +427,11 @@ document, keeping each document's adaptation independent.
 
 **Global SGD phase (PR #1610/#1626).** On top of the per-document LoRA,
 there is a global pause after an initial batch of documents have been
-scored (2000 in PR #1610, refined to 2500 in PR #1626). At that point, a full SGD pass runs on the base model weights
-themselves — not just the LoRA — using all 2500 already-scored documents
-as training data. The base model is then updated, the LoRA resets, and
-the remaining ~47,500 documents are scored on top of this improved base.
+scored (2000 in PR #1610, refined to 2500 in PR #1626). At that point, a
+full SGD pass runs on the base model weights themselves — not just the
+LoRA — using all the already-scored documents as training data. The base
+model is then updated, the LoRA resets, and the remaining documents are
+scored on top of this improved base.
 The intuition: the LoRA handles fast local adaptation per document; the
 global SGD step shifts the base model toward the distribution of the
 validation set as a whole.
