@@ -195,7 +195,7 @@ The LoRA handles fast local adaptation per document; the global SGD step shifts 
 
 ### Other Changes
 
-Many other techniques were introduced over the six weeks that contributed to the final model. We list the most significant ones here.
+Many other techniques were introduced over the six weeks that contributed to the final model. We list some of them here.
 
 | Component | Change | PR |
 |---|---|---|
