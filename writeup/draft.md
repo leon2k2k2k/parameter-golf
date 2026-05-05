@@ -560,20 +560,10 @@ SOTA of the competition.
 
 ## Looking Back
 
-Six weeks. Two thousand pull requests. A 0.168 BPB drop from a number
-that already looked hard to beat.
-
-Looking back, this competition had everything. Techniques stacking on top
-of each other in ways nobody planned — a tokenizer change enabling an
-architecture change enabling a training change, the whole thing only
-working because each piece made the others more effective. Ingenious
-innovations that shouldn't have worked but did: loops over layers that
-were cheaper than they looked, byte-level scoring rewarding longer tokens
-in ways that inverted the obvious vocabulary intuition. Controversial
-methods that looked like miracles — submissions claiming 0.8 BPB when the
-field was at 1.06, scores that made people stop and ask whether the rules
-of physics had changed. Mayhem on the last day, with the leaderboard in
-flux and half the field unknowingly racing on contaminated data. And then
-a picture-book finish: one clean submission, one narrow margin, one number
-that stood.
+Six weeks, two thousand pull requests, a 0.168 BPB drop from a number
+that already looked hard to beat. This competition had everything:
+techniques stacking on each other in ways nobody planned, ingenious
+innovations that shouldn't have worked but did, controversial methods that
+looked like miracles, mayhem on the last day, and a picture-book finish.
+One clean submission, one narrow margin, one number that stood.
 
