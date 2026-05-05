@@ -181,19 +181,14 @@ over AdamW. The learning rate follows a
 warmup-then-warmdown schedule, rising over the first few steps then decaying
 to zero by the end of the 10-minute window.
 
-**Quantization.** After training, the model weights are rounded from their
-training precision (bfloat16, 16 bits per weight) down to 6 bits per weight
-(int6). This is the core quantization step that makes the 16 MB constraint
-achievable: a bfloat16 copy of this model would be around 70 MB. The baseline
-applied int6 quantization to MLP weights only; attention weights were left at
-higher precision.
-
-The key concept for readers unfamiliar with quantization: every weight is a
-number stored with some number of bits. More bits means more precision, but
-also a larger file. The game is managing the tradeoff: round the weights
-aggressively enough to fit the size budget, but not so aggressively that the
-model's predictions degrade. The baseline's approach was simple: round the
-biggest chunk of parameters (the MLP weights) and leave the rest alone.
+**Quantization.** Every weight in the model is a number stored with some
+number of bits: more bits means more precision, but also a larger file.
+After training at bfloat16 (16 bits per weight), the baseline rounded its
+MLP weights down to int6 (6 bits), shrinking what would otherwise be a
+~70 MB model into something that fits the 16 MB budget. The game is
+managing the tradeoff: aggressive enough to fit, not so aggressive that
+predictions degrade. The baseline's approach was simple: round the biggest
+chunk of parameters and leave everything else alone.
 
 **Post-training adaptation.** The baseline did none. During the 10-minute
 evaluation window, it simply ran the model forward on the validation text
