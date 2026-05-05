@@ -175,9 +175,9 @@ The final training run is a well-choreographed 10-minute dance. The learning rat
 
 Quantization and compression happen after the 10-minute training clock stops, a separate post-processing step before the artifact is sealed. Not everything gets quantized equally. The bulky matrix weights (attention projections, MLP weights, and embeddings) dominate the artifact size and get quantized aggressively (int6 or int7). The small scalar and 1D parameters like gains, skip weights, and mixing coefficients are kept in full precision: they are too sensitive to round safely and too small to matter for the size budget. The baseline rounded MLP weights to int6 using simple nearest-neighbour rounding. The final model does something considerably more sophisticated.
 
-**GPTQ (PR #374).** When you round a weight, you introduce an error. Instead of ignoring that error, GPTQ compensates for it by adjusting the remaining unquantized weights in the same layer, using second-order information about how sensitive the output is to each weight. The result is a quantized model that stays much closer to the original's predictions than naive rounding. This evolved to cover all model weights (PR #1285) and embeddings at int7 (PR #1626).
+**GPTQ (PR #374).** When you round a weight, you introduce an error. Instead of ignoring that error, GPTQ compensates for it by adjusting the remaining unquantized weights in the same layer, using second-order information about how sensitive the output is to each weight. The result is a quantized model that stays much closer to the original's predictions than naive rounding. This evolved to cover all model weights (PR #1285) and embeddings at int7 (PR #1586).
 
-**LQER (PR #1851).** After GPTQ, some quantization error remains. LQER stores a correction: compute the residual between the original and quantized weights, take a rank-4 low-rank approximation, and pack those correction factors into the artifact. The model reconstructs a better approximation at inference time. The correction costs ~30 KB of artifact space and recovers a meaningful fraction of the remaining quantization damage.
+**LQER (PR #1797).** After GPTQ, some quantization error remains. LQER stores a correction: compute the residual between the original and quantized weights, take a rank-4 low-rank approximation, and pack those correction factors into the artifact. The model reconstructs a better approximation at inference time. The correction costs ~30 KB of artifact space and recovers a meaningful fraction of the remaining quantization damage.
 
 ---
 
@@ -202,9 +202,9 @@ Many other techniques were introduced over the six weeks that contributed to the
 | Architecture | XSA: removes self-copy bias from attention outputs | #265 |
 | Architecture | Parallel residuals from layer 8: `h = x + Attn(x) + MLP(x)` | #1204, #1529 |
 | Architecture | SmearGate: learned blend of each token with its neighbor | #162, #1851 |
-| Architecture | LeakyReLU² replacing relu² in MLP | #549 |
+| Architecture | LeakyReLU² replacing relu² in MLP | #493 |
 | Architecture | Partial RoPE + layer-norm scaling | #315 |
-| Quantization | AWQ-lite: sensitive weight columns promoted to int8 | #1945 |
+| Quantization | AWQ-lite: sensitive weight columns promoted to int8 | #1908 |
 | Quantization | Calib32: doubled calibration batches for better Hessian | #2135 |
 | Quantization | Artifact compression: lrzip+ZPAQ+L1 row reordering | #1855 |
 
