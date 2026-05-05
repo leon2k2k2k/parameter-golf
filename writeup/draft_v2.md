@@ -153,10 +153,7 @@ x = x + mlp(x)
 x = x + attention(x) + mlp(x)
 ```
 
-This squeezes more computation out of each of the final layers without adding parameters, and the two branches can run simultaneously.
-
-
-Other architectural changes are summarized in the table at the end of this section.
+This squeezes more computation out of each of the final layers without adding parameters, and the two branches can run simultaneously. Other architectural changes are summarized in the table at the end of this section.
 
 ---
 
