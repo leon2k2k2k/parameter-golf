@@ -46,13 +46,13 @@ This is called bits-per-byte (BPB). To put it in perspective: a model that assig
 
 ## 2. Model Evolution
 
-A modern language model is built from a stack of identical blocks. Each block has two components:
+A modern language model is built from a stack of identical blocks. Each block has two components — attention first, then MLP:
 
 ```
 # One transformer block
 def block(x):
-    x = x + attention(x)    # each token looks at all others
-    x = x + mlp(x)          # each token processes what it saw
+    x = x + attention(x)    # tokens communicate: each looks at all others
+    x = x + mlp(x)          # tokens think: each processes what it gathered
     return x
 
 # Attention: tokens communicate
@@ -68,7 +68,13 @@ def mlp(x):
     return W_2 @ activation(W_1 @ x)    # expand, activate, contract
 ```
 
-Attention lets each token look at every other token and decide what to gather from them. The MLP then processes each token independently, using what attention collected. Stack 9 to 11 of these blocks and you have the model.
+The full model is just these blocks chained one after another:
+
+```
+x → block_1 → block_2 → block_3 → ... → block_N → output
+```
+
+Each block refines the representation a little further. Stack 9 to 11 of them and you have a language model. We will come back to this picture when we discuss depth recurrence.
 
 ---
 
