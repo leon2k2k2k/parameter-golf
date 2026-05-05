@@ -34,17 +34,13 @@ What followed over the next six weeks looked, from the outside, like just anothe
 
 At the core of this competition is a simple question: how well can a model predict text?
 
-A language model is, at its heart, a probability distribution over text. Given a sequence of words — or more precisely, tokens — the model assigns a probability to every possible next token. A well-trained model should assign high probability to tokens that actually appear in real text, and low probability to tokens that don't. In other words, a good model is rarely surprised.
+A language model is, at its heart, a probability distribution over text. Given a sequence of words — or more precisely, tokens — the model assigns a probability to every possible next token. A well-trained model should assign high probability to tokens that actually appear in real text, and low probability to tokens that don't. Think of it like a well-read person trying to complete sentences. Given "The president signed the —", they would confidently predict "bill" or "order" and be surprised by "banana." A bad model treats every next word as equally likely. A good model has internalized the patterns of language well enough to be right, or at least close, most of the time.
 
-Think of it like a well-read person trying to complete sentences. Given "The president signed the —", they would confidently predict "bill" or "order" and be surprised by "banana." A bad model treats every next word as equally likely. A good model has internalized the patterns of language well enough to be right, or at least close, most of the time.
-
-The models in this competition are trained and scored on FineWeb, a large dataset of cleaned web text. The score is computed on a held-out validation slice that the models never see during training. For each token in that slice, we ask: what probability did the model assign to the token that actually appeared? The score is the average surprise across all tokens, normalized by the number of bytes in the original text:
+The models in this competition are trained and scored on FineWeb, a large dataset of cleaned web text. The score is computed on a held-out validation slice that the models never see during training. (LL: I want more exaplnation here, that the "cost" is -\log_2 p(t) where t is the correct token. If we are 100% percent confident then p(t) = 1 and we have 0 score deducted...) For each token in that slice, we ask: what probability did the model assign to the token that actually appeared? The score is the average surprise across all tokens, normalized by the number of bytes in the original text:
 
 $$\text{BPB} = \frac{-\sum_k \log_2 p(t_k \mid t_1, \ldots, t_{k-1})}{\text{number of bytes}}$$
 
-This is called bits-per-byte (BPB). The log base 2 converts probability into bits — a unit of information. If the model always assigned probability 1 to the correct token (perfect prediction), BPB would be 0. In practice, natural text has irreducible uncertainty, so the theoretical floor is above zero. Lower is better.
-
-The baseline OpenAI provided started at **1.2244 BPB**. Six weeks later, the community had pushed it to **1.0565** — a 14% reduction, achieved purely through algorithmic improvements with no change to the hardware or the data.
+This is called bits-per-byte (BPB). The log base 2 converts probability into bits — a unit of information. If the model always assigned probability 1 to the correct token (perfect prediction), BPB would be 0. (LL: talk about what if we just assign average here). The baseline OpenAI provided started at **1.2244 BPB**. Six weeks later, the community had pushed it to **1.0565** — a 14% reduction, achieved purely through algorithmic improvements with no change to the hardware or the data.
 
 ---
 
