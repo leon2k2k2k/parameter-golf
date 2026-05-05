@@ -564,6 +564,6 @@ Six weeks, two thousand pull requests, a 0.168 BPB drop from a number
 that already looked hard to beat. This competition had everything:
 techniques stacking on each other in ways nobody planned, ingenious
 innovations that shouldn't have worked but did, controversial methods that
-looked like miracles, mayhem on the last day, and a picture-book finish.
+looked like miracles, mayhem on the last day, and a picture-perfect finish.
 One clean submission, one narrow margin, one number that stood.
 
