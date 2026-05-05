@@ -255,13 +255,15 @@ It turned out the math was rigged. A valid probability distribution must sum to 
 
 ### The Lesson
 
-Both cases point to the same underlying reality. A well-trained language model is already a calibrated entropy estimator: where it predicts a flat distribution, the text really is hard to predict; where it is confident, the text really is predictable. The correlation between the model's uncertainty and the true information content is tight.
+Both cases point to the same underlying reality. A well-trained language model is already a calibrated entropy estimator: where it predicts a flat distribution, the text really is hard to predict; where it is confident, the text really is predictable.[^entropy] The correlation between the model's uncertainty and the true information content is tight.
 
 That is exactly why PPM-D and n-gram statistics could not deliver. They were identifying the same easy tokens the model already had low entropy on. For an external signal to genuinely help, its errors would need to be *uncorrelated* with the model's — it would need to be uncertain where the model is confident, and vice versa. PPM-D tracks recency and local byte patterns; the transformer already captures those through attention. N-gram statistics track local co-occurrence; attention captures that too. There is no orthogonal signal left to harvest.
 
 To genuinely improve over a well-calibrated neural model, you would need something that sees structure the transformer fundamentally cannot. It is not obvious what that is. And in this competition, nobody found it.
 
 There is no silver bullet. The progress that held was incremental, compounding, and hard-won — one careful PR at a time.
+
+[^entropy]: The expected entropy at a position is $H = -\sum_t p(t) \log_2 p(t)$, where the sum is over all possible next tokens. This measures how spread out the model's distribution is — high entropy means the model is uncertain, low entropy means it is confident. A well-calibrated model's expected entropy correlates tightly with the actual information content of the text at that position.
 
 ---
 
