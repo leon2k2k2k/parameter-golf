@@ -135,7 +135,7 @@ The original text is fully recoverable. The ~8188 remaining vocabulary slots are
 
 #### Model Architecture: Depth Recurrence and Parallel Residuals
 
-In a standard transformer, each layer runs exactly once per token. PR #1344 introduced the looping structure over layers 3–5; later records refined it to three passes per forward step. The same three layers, the same weights, applied three times in sequence:
+In a standard transformer, each layer runs exactly once per token. PR #1204 first introduced depth recurrence, running middle layers in a loop; later refinements settled on three passes over layers 3–5 as the final topology. The same three layers, the same weights, applied three times in sequence:
 
 ```
 standard:  1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
@@ -175,9 +175,9 @@ The final training run is a well-choreographed 10-minute dance. The learning rat
 
 Quantization and compression happen after the 10-minute training clock stops, a separate post-processing step before the artifact is sealed. Not everything gets quantized equally. The bulky matrix weights (attention projections, MLP weights, and embeddings) dominate the artifact size and get quantized aggressively (int6 or int7). The small scalar and 1D parameters like gains, skip weights, and mixing coefficients are kept in full precision: they are too sensitive to round safely and too small to matter for the size budget. The baseline rounded MLP weights to int6 using simple nearest-neighbour rounding. The final model does something considerably more sophisticated.
 
-**GPTQ (PR #535).** When you round a weight, you introduce an error. Instead of ignoring that error, GPTQ compensates for it by adjusting the remaining unquantized weights in the same layer, using second-order information about how sensitive the output is to each weight. The result is a quantized model that stays much closer to the original's predictions than naive rounding. This evolved to cover all model weights (PR #1285) and embeddings at int7 (PR #1586).
+**GPTQ (PR #374).** When you round a weight, you introduce an error. Instead of ignoring that error, GPTQ compensates for it by adjusting the remaining unquantized weights in the same layer, using second-order information about how sensitive the output is to each weight. The result is a quantized model that stays much closer to the original's predictions than naive rounding. This evolved to cover all model weights (PR #1285) and embeddings at int7 (PR #1626).
 
-**LQER (PR #1797).** After GPTQ, some quantization error remains. LQER stores a correction: compute the residual between the original and quantized weights, take a rank-4 low-rank approximation, and pack those correction factors into the artifact. The model reconstructs a better approximation at inference time. The correction costs ~30 KB of artifact space and recovers a meaningful fraction of the remaining quantization damage.
+**LQER (PR #1851).** After GPTQ, some quantization error remains. LQER stores a correction: compute the residual between the original and quantized weights, take a rank-4 low-rank approximation, and pack those correction factors into the artifact. The model reconstructs a better approximation at inference time. The correction costs ~30 KB of artifact space and recovers a meaningful fraction of the remaining quantization damage.
 
 ---
 
@@ -199,12 +199,12 @@ Many other techniques were introduced over the six weeks that contributed to the
 
 | Component | Change | PR |
 |---|---|---|
-| Architecture | XSA: removes self-copy bias from attention outputs | #287 |
+| Architecture | XSA: removes self-copy bias from attention outputs | #265 |
 | Architecture | Parallel residuals from layer 8: `h = x + Attn(x) + MLP(x)` | #1204, #1529 |
-| Architecture | SmearGate: learned blend of each token with its neighbor | #162, #1667 |
-| Architecture | LeakyReLU² replacing relu² in MLP | #493 |
+| Architecture | SmearGate: learned blend of each token with its neighbor | #162, #1851 |
+| Architecture | LeakyReLU² replacing relu² in MLP | #549 |
 | Architecture | Partial RoPE + layer-norm scaling | #315 |
-| Quantization | AWQ-lite: sensitive weight columns promoted to int8 | #1908 |
+| Quantization | AWQ-lite: sensitive weight columns promoted to int8 | #1945 |
 | Quantization | Calib32: doubled calibration batches for better Hessian | #2135 |
 | Quantization | Artifact compression: lrzip+ZPAQ+L1 row reordering | #1855 |
 
