@@ -251,11 +251,7 @@ It turned out the math was rigged. A valid probability distribution must sum to 
 
 ### The Lesson
 
-Both cases point to the same underlying reality. A well-trained language model is already a calibrated entropy estimator: where it predicts a flat distribution, the text really is hard to predict; where it is confident, the text really is predictable.[^entropy] The correlation between the model's uncertainty and the true information content is tight.
-
-That is exactly why PPM-D and n-gram statistics could not deliver. They were identifying the same easy tokens the model already had low entropy on. For an external signal to genuinely help, its errors would need to be *uncorrelated* with the model's — it would need to be uncertain where the model is confident, and vice versa. PPM-D tracks recency and local byte patterns; the transformer already captures those through attention. N-gram statistics track local co-occurrence; attention captures that too. There is no orthogonal signal left to harvest.
-
-To genuinely improve over a well-calibrated neural model, you would need something that sees structure the transformer fundamentally cannot. It is not obvious what that is. And in this competition, nobody found it.
+Both cases point to the same underlying reality. A well-trained language model is already a calibrated entropy estimator: where it predicts a flat distribution, the text really is hard to predict; where it is confident, the text really is predictable.[^entropy] The correlation between the model's uncertainty and the true information content is tight. That is exactly why PPM-D and n-gram statistics could not deliver incredible gains. They were identifying the same easy tokens the model already had low entropy on. For an external signal to genuinely help, its errors would need to be *uncorrelated* with the model's — it would need to be uncertain where the model is confident, and vice versa.
 
 There is no silver bullet. The progress that held was incremental, compounding, and hard-won — one careful PR at a time.
 
