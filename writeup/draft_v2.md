@@ -208,6 +208,8 @@ Many other techniques were introduced over the six weeks that contributed to the
 | Quantization | Calib32: doubled calibration batches for better Hessian | #2135 |
 | Quantization | Artifact compression: lrzip+ZPAQ+L1 row reordering | #1855 |
 
+But not all improvements were what they seemed. Some were too good to be true.
+
 ---
 
 ## 3. Too Good to Be True
