@@ -440,3 +440,14 @@ The eval budget splits roughly as ~120 seconds for a standard baseline
 scoring pass and ~480 seconds for the TTT loop — the whole thing just
 fitting within the 600-second cap.
 
+Many other submissions attempted additional eval-time interventions beyond
+TTT — n-gram tilts, retrieval augmentation, ensemble methods. Several were
+ruled illegal. We will examine a few of these in the next section.
+
+---
+
+The final model is a messy, sophisticated combination of all of the above —
+significant structural innovations layered on top of dozens of smaller
+refinements, each contributing a fraction of the 0.17 BPB gap to the
+baseline.
+
