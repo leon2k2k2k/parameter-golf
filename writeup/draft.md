@@ -322,30 +322,31 @@ iteration was retuned with better polynomial coefficients (PR #1344/#1787).
 The more structural training changes are EMA, the recurrence
 curriculum, and progressive context lengthening.
 
-**EMA (PR #287).** One of the most impactful single changes in the
-competition. Instead of evaluating the final checkpoint's weights
-directly, the model maintains an exponential moving average of all past
-weight iterates throughout training. The eval model is this running
-average, not the last step. Because SGD iterates are noisy, the average
-sits in a flatter, more stable region of the loss landscape and
-generalizes significantly better. EMA replaced stochastic weight
-averaging early in the competition; the decay value introduced in PR #287
-was never revisited through the final SOTA.
+- **EMA (PR #287).** One of the most impactful single changes in the
+  competition. Instead of evaluating the final checkpoint's weights
+  directly, the model maintains an exponential moving average of all past
+  weight iterates throughout training. The eval model is this running
+  average, not the last step. Because SGD iterates are noisy, the average
+  sits in a flatter, more stable region of the loss landscape and
+  generalizes significantly better. EMA replaced stochastic weight
+  averaging early in the competition; the decay value introduced in PR #287
+  was never revisited through the final SOTA.
 
-**Depth recurrence curriculum (PR #1420).** The loop over layers 3–5 does not
-activate from the start of training. For the first 35% of wallclock
-(~3.5 minutes), the model trains as a standard 11-layer network. The
-loop then switches on and runs for the remainder. The reason is throughput: 17 effective layers is significantly slower per
-step than 11. By training as a standard 11-layer network first, the model
-gets more gradient steps within the 10-minute budget before paying the
-cost of the loop.
+- **Depth recurrence curriculum (PR #1420).** The loop over layers 3–5
+  does not activate from the start of training. For the first 35% of
+  wallclock (~3.5 minutes), the model trains as a standard 11-layer
+  network. The loop then switches on and runs for the remainder. The reason
+  is throughput: 17 effective layers is significantly slower per step than
+  11. By training as a standard 11-layer network first, the model gets more
+  gradient steps within the 10-minute budget before paying the cost of the
+  loop.
 
-**Progressive context (PR #2014).** Rather than training at a fixed
-sequence length, the final model progressively lengthens context during
-training: starting at 1024 tokens, moving to 2048 for the bulk of
-training, and finishing at 3072. This gives the model long-context
-representations by the end without paying the throughput cost of 3k
-sequences from step one.
+- **Progressive context (PR #2014).** Rather than training at a fixed
+  sequence length, the final model progressively lengthens context during
+  training: starting at 1024 tokens, moving to 2048 for the bulk of
+  training, and finishing at 3072. This gives the model long-context
+  representations by the end without paying the throughput cost of 3k
+  sequences from step one.
 
 Taken together, the training loop is a carefully choreographed 10
 minutes: fast 11-layer passes early, the recurrence loop switching on at the 35% mark, context growing longer as the clock runs down. Every
@@ -367,32 +368,32 @@ matter for the size budget. The baseline rounded MLP weights to int6 using
 simple nearest-neighbour rounding. The final model does something
 considerably more sophisticated.
 
-**GPTQ (PR #535).** The core insight of GPTQ: when you round a weight,
-you introduce an error. Instead of ignoring that error, you can
-compensate for it by adjusting the remaining unquantized weights in the
-same layer. GPTQ uses the Hessian of the loss (second-order information
-about how sensitive the output is to each weight) to compute these
-compensating adjustments. The result is a quantized model that stays
-much closer to the original's predictions than naive rounding would
-achieve. This evolved to all weights including attention (PR #1285) and
-embeddings quantized at int7 (PR #1394 → PR #1586).
+- **GPTQ (PR #535).** The core insight of GPTQ: when you round a weight,
+  you introduce an error. Instead of ignoring that error, you can
+  compensate for it by adjusting the remaining unquantized weights in the
+  same layer. GPTQ uses the Hessian of the loss (second-order information
+  about how sensitive the output is to each weight) to compute these
+  compensating adjustments. The result is a quantized model that stays
+  much closer to the original's predictions than naive rounding would
+  achieve. This evolved to all weights including attention (PR #1285) and
+  embeddings quantized at int7 (PR #1394 → PR #1586).
 
-**LQER (PR #1797).** After GPTQ, some quantization error remains.
-LQER stores a correction: compute the residual between the original and
-quantized weights, take a rank-4 low-rank approximation of it, and pack
-those correction factors into the artifact alongside the quantized
-weights. The model reconstructs a better approximation of the original
-weights at inference time. The correction costs ~30 KB of artifact space
-and recovers a meaningful fraction of the remaining quantization damage.
+- **LQER (PR #1797).** After GPTQ, some quantization error remains.
+  LQER stores a correction: compute the residual between the original and
+  quantized weights, take a rank-4 low-rank approximation of it, and pack
+  those correction factors into the artifact alongside the quantized
+  weights. The model reconstructs a better approximation of the original
+  weights at inference time. The correction costs ~30 KB of artifact space
+  and recovers a meaningful fraction of the remaining quantization damage.
 
-Further refinements accumulated on top: AWQ-lite (PR #1908) identifies
-the most activation-sensitive weight columns and quantizes those at int8
-rather than int6; Calib32 (PR #2135) doubles the calibration batches for
-a better Hessian estimate. The quantized weights also go through a
-compression pipeline, evolving from LZMA to Brotli-11 (PR #1179) and
-finally to a per-group lrzip+ZPAQ pipeline with L1 row reordering
-(PR #1855), saving ~280 KB over Brotli-only and fitting meaningfully more
-model into the 16 MB cap.
+- **Further refinements.** AWQ-lite (PR #1908) identifies the most
+  activation-sensitive weight columns and quantizes those at int8 rather
+  than int6; Calib32 (PR #2135) doubles the calibration batches for a
+  better Hessian estimate. The quantized weights also go through a
+  compression pipeline, evolving from LZMA to Brotli-11 (PR #1179) and
+  finally to a per-group lrzip+ZPAQ pipeline with L1 row reordering
+  (PR #1855), saving ~280 KB over Brotli-only and fitting meaningfully more
+  model into the 16 MB cap.
 
 ---
 
@@ -407,27 +408,26 @@ considerably more sophisticated.
 
 The TTT procedure has two nested levels of adaptation.
 
-**Per-document LoRA (PR #1530).** The base model weights are frozen. For
-each validation document, a set of low-rank adapter matrices (LoRA) are
-attached to the key, output, and MLP projections of every layer. The
-document is processed in small chunks: 8 tokens for short documents, 24
-for medium, 48 for long (PR #2014). For each chunk: score it first under
-the current LoRA, then take a gradient step on that chunk to update the
-LoRA weights. By the time the final chunk is scored, the LoRA has already
-adapted to the document's style, vocabulary, and content. After the
-document is done, the LoRA resets. Nothing carries over to the next
-document, keeping each document's adaptation independent.
+- **Per-document LoRA (PR #1530).** The base model weights are frozen. For
+  each validation document, a set of low-rank adapter matrices (LoRA) are
+  attached to the key, output, and MLP projections of every layer. The
+  document is processed in small chunks: 8 tokens for short documents, 24
+  for medium, 48 for long (PR #2014). For each chunk: score it first under
+  the current LoRA, then take a gradient step on that chunk to update the
+  LoRA weights. By the time the final chunk is scored, the LoRA has already
+  adapted to the document's style, vocabulary, and content. After the
+  document is done, the LoRA resets; nothing carries over to the next
+  document.
 
-**Global SGD phase (PR #1610/#1626).** On top of the per-document LoRA,
-there is a global pause after an initial batch of documents have been
-scored (2000 in PR #1610, refined to 2500 in PR #1626). At that point, a
-full SGD pass runs on the base model weights themselves, not just the
-LoRA, using all the already-scored documents as training data. The base
-model is then updated, the LoRA resets, and the remaining documents are
-scored on top of this improved base.
-The intuition: the LoRA handles fast local adaptation per document; the
-global SGD step shifts the base model toward the distribution of the
-validation set as a whole.
+- **Global SGD phase (PR #1610/#1626).** On top of the per-document LoRA,
+  there is a global pause after an initial batch of documents have been
+  scored (2000 in PR #1610, refined to 2500 in PR #1626). At that point, a
+  full SGD pass runs on the base model weights themselves, not just the
+  LoRA, using all the already-scored documents as training data. The base
+  model is then updated, the LoRA resets, and the remaining documents are
+  scored on top of this improved base. The LoRA handles fast local
+  adaptation per document; the global SGD step shifts the base model toward
+  the distribution of the validation set as a whole.
 
 The eval budget splits roughly as ~120 seconds for a standard baseline
 scoring pass and ~480 seconds for the TTT loop, the whole thing just
