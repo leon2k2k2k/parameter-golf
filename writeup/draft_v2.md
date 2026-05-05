@@ -205,7 +205,6 @@ The LoRA handles fast local adaptation per document; the global SGD step shifts 
 | Quantization | AWQ-lite: sensitive weight columns promoted to int8 | #1908 |
 | Quantization | Calib32: doubled calibration batches for better Hessian | #2135 |
 | Quantization | Artifact compression: lrzip+ZPAQ+L1 row reordering | #1855 |
-| TTT | Progressive context 1024→2048→3072 during TTT chunks | #2014 |
 
 Many other eval-time methods were attempted. Several were ruled illegal. We examine two of them next.
 
