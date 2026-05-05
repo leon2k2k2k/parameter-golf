@@ -80,32 +80,36 @@ Attention captures how words interact with each other — which tokens are relev
 
 ### The Baseline
 
-OpenAI's starting model was already not a plain stack of blocks. Let's break it down across five components.
+OpenAI's starting model was already not a simple transformer, not a plain stack of attention and MLP blocks. The baseline was more carefully engineered than that. Let's break it down.
 
-**Tokenizer.** The baseline used SentencePiece with a 1024-token vocabulary (SP1024). A 1024-token vocabulary is small by modern standards — GPT-2 uses 50,000 — but keeps the embedding table compact, which matters when the entire model has to fit in 16,000,000 bytes.
+**Tokenizer.** The baseline used SentencePiece with a 1024-token vocabulary (SP1024), trained on the same FineWeb corpus used for scoring. A 1024-token vocabulary is quite small by modern standards; GPT-2 uses 50,000 tokens. The small vocabulary keeps the embedding table compact, which matters when your entire model has to fit in 16,000,000 bytes.
 
-**Model architecture.** A 9-layer, 512-dimensional transformer with U-Net skip connections, grouped-query attention (GQA), and rotary positional embeddings (RoPE). The U-Net pattern adds direct connections from early layers into their mirror late layers:
+**Model architecture.** The baseline was a 9-layer, 512-dimensional transformer with three structural additions worth calling out:
 
-```
-# Standard transformer
-h = block_1(h); h = block_2(h); ...; h = block_9(h)
+- **U-Net skip connections:** in a standard transformer, each layer feeds only into the next. The U-Net pattern adds direct connections that skip the middle of the network. The 9 layers are split into an encoder half (layers 1–4), a bottleneck (layer 5), and a decoder half (layers 6–9). Each decoder layer receives the output of its mirror encoder layer as an additional residual, weighted by a learned scalar *w*:
 
-# U-Net: decoder layers receive a skip from their encoder mirror
-h1 = block_1(h);  h2 = block_2(h);  h3 = block_3(h);  h4 = block_4(h)
-h5 = block_5(h4)                              # bottleneck
-h6 = block_6(h5 + w * h4)                    # skip from layer 4
-h7 = block_7(h6 + w * h3)                    # skip from layer 3
-h8 = block_8(h7 + w * h2)                    # skip from layer 2
-h9 = block_9(h8 + w * h1)                    # skip from layer 1
-```
+  ```
+  # Standard transformer
+  h = block_1(h); h = block_2(h); ...; h = block_9(h)
 
-Early layers capture surface-level patterns; the skip connections feed those directly into the late layers alongside the deeper representations.
+  # U-Net: decoder layers receive a skip from their encoder mirror
+  h1 = block_1(h);  h2 = block_2(h);  h3 = block_3(h);  h4 = block_4(h)
+  h5 = block_5(h4)                              # bottleneck
+  h6 = block_6(h5 + w * h4)                    # skip from layer 4
+  h7 = block_7(h6 + w * h3)                    # skip from layer 3
+  h8 = block_8(h7 + w * h2)                    # skip from layer 2
+  h9 = block_9(h8 + w * h1)                    # skip from layer 1
+  ```
 
-**Training.** The Muon optimizer with a linear warmup-then-warmdown learning rate schedule.
+  The early-layer representations, which tend to capture local surface-level patterns, are fed directly into the late layers alongside the deep representations. This is the same idea that made U-Net famous in image segmentation.
 
-**Quantization.** After training at bfloat16, MLP weights were rounded to int6 (6 bits per weight), shrinking what would otherwise be a ~70 MB model into the 16 MB budget. Everything else was left at higher precision.
+- **Grouped-query attention (GQA)** and **rotary positional embeddings (RoPE)**, both standard in modern LLMs. GQA shares key-value heads across query heads to cut parameter count; RoPE encodes position by rotating query and key vectors rather than adding learned position embeddings.
 
-**Post-training adaptation.** None. The 10-minute eval window was used only for scoring.
+**Training.** The baseline used the **Muon optimizer**, a popular choice over AdamW. The learning rate follows a warmup-then-warmdown schedule, rising over the first few steps then decaying to zero by the end of the 10-minute window.
+
+**Quantization.** Every weight in the model is a number stored with some number of bits: more bits means more precision, but also a larger file. After training at bfloat16 (16 bits per weight), the baseline rounded its MLP weights down to int6 (6 bits), shrinking what would otherwise be a ~70 MB model into something that fits the budget. The game is managing the tradeoff: aggressive enough to fit, not so aggressive that predictions degrade. The baseline's approach was simple: round the biggest chunk of parameters and leave everything else alone.
+
+**Post-training adaptation.** The baseline did none. During the 10-minute evaluation window, it simply ran the model forward on the validation text and recorded the scores. Later models would use this window to actively update their weights in response to what they were seeing, a technique called test-time training (TTT). The baseline serves as the clean reference point before that complication enters.
 
 This baseline scored **1.2244 BPB**. By the end of the competition, the best submission had reached **1.0565 BPB** — the same hardware, the same data, the same 10 minutes, and a model that had been rebuilt almost from scratch across every one of those five components. The rest of this section traces how.
 
