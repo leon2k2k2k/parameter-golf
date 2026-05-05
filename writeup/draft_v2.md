@@ -239,11 +239,13 @@ The gate reads `tokens[i]` — the token being predicted — before scoring posi
 
 ### PPM-D
 
-PPM-D (Prediction by Partial Matching) is a classical lossless compression algorithm. It maintains a trie of byte n-gram counts and at each position predicts the next byte by looking up the longest matching context, falling back to shorter contexts when the full history has not been seen. It was state-of-the-art for text compression before neural networks, and is particularly effective at within-document repetition: if "San Francisco" has appeared several times, the byte sequence becomes highly predictable.
+A cluster of submissions (starting with PR #1785) claimed scores in the 0.8–1.0 range — far below anything the model improvements above could explain. The technique was PPM-D.
 
-The appeal was direct: BPB is charged at the byte level, and PPM-D operates at the byte level. A cluster of submissions (starting with PR #1785) mixed PPM-D with the neural net by spreading each token's probability uniformly across its bytes — an n-byte token with probability p contributing p^(1/n) to each of its byte positions — then taking a convex combination with PPM-D's byte predictions. Claimed scores dropped into the 0.8–1.0 range.
+PPM-D (Prediction by Partial Matching) is a classical byte-level compression algorithm. It simply counts byte n-grams: given the last few bytes, what byte tends to come next? It is particularly good at within-document repetition. Think of a Russian novel where a character's long name appears dozens of times — after the first few occurrences, PPM-D can predict the exact spelling almost perfectly, byte by byte. The neural model, by contrast, has no special memory for what has already appeared in this document.
 
-The problem, identified in Issue #1872, was a C2 violation. For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated. Summing across all tokens that start with a given byte gives more than 1.0. Back to the exam analogy: the model was effectively assigning more than 100% total probability mass — like giving 90% to each of four options simultaneously. The score looked excellent because the math was broken.
+The idea was to blend PPM-D's predictions with the neural model's: an n-byte token with probability p contributing p^(1/n) to each of its byte positions, then mixing with PPM-D. Claimed scores dropped dramatically.
+
+The problem, identified in Issue #1872, was a C2 violation. For any multi-byte token with p < 1, p^(1/n) > p: the per-byte contributions are inflated. Summing across all tokens that start with a given byte gives more than 1.0. In the exam analogy: the model was assigning more than 100% total probability mass across all options — like giving 90% to each of four answers simultaneously. The score looked excellent because the math was broken.
 
 PR #1905 ran the decisive experiment: using the same PPM configuration but with a correct byte marginal, PPM-D was *worse* than the baseline by 0.038 BPB. The entire apparent gain was an artifact of the invalid spread. The 0.8x figures were not real.[^ppmd]
 
