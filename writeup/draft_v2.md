@@ -208,7 +208,7 @@ Many other techniques were introduced over the six weeks that contributed to the
 | Quantization | Calib32: doubled calibration batches for better Hessian | #2135 |
 | Quantization | Artifact compression: lrzip+ZPAQ+L1 row reordering | #1855 |
 
-The final model is a messy, sophisticated combination of all of the above: significant structural innovations layered on top of dozens of smaller refinements, each contributing a fraction of the 0.17 BPB gap to the baseline.
+The final model is a messy, sophisticated combination of all of the above: significant structural innovations layered on top of dozens of smaller refinements, together with countless ablations to find the right hyperparameters for each, each contributing a fraction of the 0.17 BPB gap to the baseline.
 
 ---
 
