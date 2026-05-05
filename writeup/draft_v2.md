@@ -155,11 +155,6 @@ x = x + attention(x) + mlp(x)
 
 This squeezes more computation out of each of the final layers without adding parameters, and the two branches can run simultaneously.
 
-| | Baseline | Final |
-|---|---|---|
-| Physical layers | 9 | 11 |
-| Effective processing steps | 9 | 17 |
-| Parameters | ~16 MB | ~16 MB |
 
 Other architectural changes are summarized in the table at the end of this section.
 
