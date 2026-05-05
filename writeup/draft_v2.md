@@ -1,8 +1,6 @@
-# Parameter Golf: Six Weeks at the Frontier
+# Parameter Golf: Six Weeks to Build the Best LLM
 
 ---
-
-## 0. The Hook
 
 In March 2026, OpenAI released a public competition with a deceptively simple premise: train the best language model you can, but it has to fit in 16 megabytes, and you only get 10 minutes of training time on 8 H100s. Call it parameter golf — every byte counts, every second counts, and the winner is whoever gets closest to the true distribution of the English language.
 
