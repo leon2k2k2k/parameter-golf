@@ -261,4 +261,14 @@ There is no silver bullet. The progress that held was incremental, compounding, 
 
 ## 4. Drama on the Last Day
 
-*(draft pending)*
+On April 30th, the day before the competition closed, PR #2014 dropped at **1.0576 BPB** — a clean record built on progressive context scheduling. The field had been grinding toward this number for weeks. Then, in the final hours, a flurry of PRs appeared beating it: **1.047**, **1.043**, numbers that seemed implausibly good. The leaderboard was in motion. The field looked wide open.
+
+People started looking more closely.
+
+It turned out that `prepare_caseops_data.py` — the script everyone had been copying to build CaseOps datasets since PR #1736 — defaulted to `--val-docs=10000`. Training started at document 10,000; the validation set covered documents 0–50,000. Eighty percent of the validation set had been in the training data the whole time.
+
+Think of it as training on the exam itself. A student who has already read every question and answer before sitting the test will score better — not because they learned more, but because the exam is no longer a test of generalization. The model was not predicting held-out text; it was reciting text it had already memorized.
+
+Fifteen PRs were eventually classified as leaky (Issue #2127), most of their authors having inherited the data setup from earlier submissions without knowing. The bug had actually been caught and quietly fixed eight days earlier, then independently reintroduced on the same day. The best detail: the author who first found and fixed the bug also submitted PR #2118 — the most egregiously leaked PR of the competition — whose own `submission.json` admitted the overlap in its technique summary field.
+
+When the dust settled, one PR stood as the clean improvement over #2014: **PR #2135** at **1.0565 BPB**, by a margin of 0.001. One clean submission, one narrow margin, one number that stood. A picture-perfect finish to a competition that had everything.
