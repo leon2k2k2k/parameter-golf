@@ -129,9 +129,9 @@ The original text is fully recoverable. The ~8188 remaining vocabulary slots are
 
 ---
 
-#### Model Architecture: Depth Recurrence
+#### Model Architecture: Depth Recurrence and Parallel Residuals
 
-In a standard transformer, each layer runs exactly once per token. The final model loops layers 3–5 three times per forward pass — the same three layers, the same weights, applied three times in sequence:
+In a standard transformer, each layer runs exactly once per token. The final model (PR #1344) loops layers 3–5 three times per forward pass — the same three layers, the same weights, applied three times in sequence:
 
 ```
 standard:  1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
@@ -140,7 +140,20 @@ with loop: 1 → 2 → 3 → 4 → 5 → 3 → 4 → 5 → 3 → 4 → 5 → 6 �
                      └──────────────── ×3 ────────────────┘
 ```
 
-17 effective processing steps from 11 physical layers, at zero additional parameter cost. This is free test-time compute: the model gets to think harder without growing larger. PR #1344 introduced the structure; the final configuration of 3 passes over layers 3–5 was established in later records.
+17 effective processing steps from 11 physical layers, at zero additional parameter cost. This is free test-time compute: the model gets to think harder without growing larger. The final configuration of 3 passes over layers 3–5 was established in later records.
+
+From layer 8 onward, the final model also runs attention and MLP in parallel rather than sequentially (PR #1204, PR #1529). In a standard block, MLP sees the output of attention. In a parallel block, both branches see the same input and their results are simply added:
+
+```
+# Standard block
+x = x + attention(x)
+x = x + mlp(x)
+
+# Parallel residual (layers 8–11)
+x = x + attention(x) + mlp(x)
+```
+
+This squeezes more computation out of each of the final layers without adding parameters, and the two branches can run simultaneously.
 
 | | Baseline | Final |
 |---|---|---|
